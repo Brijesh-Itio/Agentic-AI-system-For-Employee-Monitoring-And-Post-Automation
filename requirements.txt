@@ -1,0 +1,32 @@
+# ── Desktop Agent (Module 1-4, 23) ──
+pywin32==312
+psutil==7.2.2
+Pillow==12.3.0
+keyboard==0.13.5
+schedule==1.2.2
+requests==2.34.2
+plyer==2.1.0
+
+# ── API Backend (Module 5) ──
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy==2.0.35
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-jose[cryptography]==3.3.0
+python-multipart==0.0.9
+
+# ── AI / Agentic Stack ──
+# ollama + chromadb installed for Module 6 (classification + vector memory).
+# langgraph + langchain-core installed for Module 15 (Master Agent) —
+# genuine StateGraph orchestration, not installed until actually used.
+ollama==0.6.2
+chromadb==1.5.9
+langgraph==1.2.11
+langchain-core==1.5.4
+
+# ── Browser Automation (Module 4, 18, 20) ──
+playwright==1.47.0
+
+# ── Utilities ──
+python-dotenv==1.0.1

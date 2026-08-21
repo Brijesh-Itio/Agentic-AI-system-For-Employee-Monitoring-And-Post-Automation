@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Agent local data
+agent/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+
+# Env / secrets
+.env
+workpulse-config.json
+
+# Node / dashboard
+node_modules/
+dist/
+
+# ChromaDB
+chromadb/
+
+# OS
+.DS_Store
+Thumbs.db

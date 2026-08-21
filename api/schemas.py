@@ -1,6 +1,6 @@
 """Pydantic response models for the FastAPI backend (module 5.1)."""
 from datetime import date as date_type, datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -324,3 +324,84 @@ class JobOut(BaseModel):
     result: Optional[str] = None
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+
+
+# ── Module 7 extension: department-custom DAR templates ──
+
+FieldType = Literal["text", "textarea", "number", "date", "select", "url"]
+
+
+class FieldDef(BaseModel):
+    key: str
+    label: str
+    type: FieldType = "text"
+    required: bool = False
+    options: Optional[list[str]] = None  # only meaningful when type == "select"
+
+
+class DepartmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    created_at: Optional[datetime] = None
+
+
+class DepartmentCreate(BaseModel):
+    name: str
+
+
+class DarTemplateOut(BaseModel):
+    department_id: Optional[int] = None
+    fields: list[FieldDef]
+    updated_at: Optional[datetime] = None
+
+
+class DarTemplateUpdate(BaseModel):
+    fields: list[FieldDef]
+
+
+class DarEntryOut(BaseModel):
+    id: int
+    date: date_type
+    department_id: Optional[int] = None
+    task: str
+    task_description: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    comment: Optional[str] = None
+    remarks: Optional[str] = None
+    link: Optional[str] = None
+    custom_fields: dict
+    source: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class DarEntryCreate(BaseModel):
+    date: date_type
+    department_id: Optional[int] = None
+    task: str
+    task_description: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    comment: Optional[str] = None
+    remarks: Optional[str] = None
+    link: Optional[str] = None
+    custom_fields: dict = {}
+
+
+class DarEntryUpdate(BaseModel):
+    task: Optional[str] = None
+    task_description: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    comment: Optional[str] = None
+    remarks: Optional[str] = None
+    link: Optional[str] = None
+    custom_fields: Optional[dict] = None
+
+
+class DarEntryDraftRequest(BaseModel):
+    date: date_type
+    department_id: int

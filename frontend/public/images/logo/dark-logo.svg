@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="500" viewBox="0 0 1400 500" role="img" aria-labelledby="title desc">
+  <title id="title">LeadFlow AI Dark Mode Logo</title>
+  <desc id="desc">Dark mode LeadFlow AI logo with cyan and violet gradients, AI automation robot, growth arrow, LinkedIn and email symbols.</desc>
+  <defs>
+    <linearGradient id="flow" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00C8FF"/>
+      <stop offset="52%" stop-color="#3974FF"/>
+      <stop offset="100%" stop-color="#A855F7"/>
+    </linearGradient>
+    <linearGradient id="word" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#35D9FF"/>
+      <stop offset="50%" stop-color="#4F8CFF"/>
+      <stop offset="100%" stop-color="#B56CFF"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000" flood-opacity=".5"/>
+    </filter>
+  </defs>
+
+  <!-- Dark background -->
+
+  <!-- Ambient glow -->
+
+  <!-- Growth swoosh -->
+  <path d="M90 365 C165 455 330 455 410 335 C448 278 455 210 430 145"
+        fill="none" stroke="url(#flow)" stroke-width="32" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M402 155 L425 78 L500 111 L455 135 Z" fill="url(#flow)" filter="url(#glow)"/>
+
+  <!-- Robot -->
+  <g filter="url(#shadow)">
+    <ellipse cx="205" cy="378" rx="115" ry="18" fill="#020914"/>
+    <rect x="88" y="168" width="230" height="178" rx="86" fill="#EAF7FF" stroke="#20D7FF" stroke-width="7"/>
+    <rect x="112" y="202" width="182" height="106" rx="48" fill="#061326" stroke="#17456A" stroke-width="3"/>
+    <circle cx="160" cy="255" r="16" fill="#35E6FF" filter="url(#glow)"/>
+    <circle cx="246" cy="255" r="16" fill="#35E6FF" filter="url(#glow)"/>
+    <path d="M157 279 Q203 309 249 279" fill="none" stroke="#35E6FF" stroke-width="8" stroke-linecap="round"/>
+    <path d="M204 166 V126" stroke="#20D7FF" stroke-width="7"/>
+    <circle cx="204" cy="110" r="18" fill="#4F8CFF" filter="url(#glow)"/>
+    <ellipse cx="91" cy="260" rx="27" ry="43" fill="#EAF7FF" stroke="#20D7FF" stroke-width="7"/>
+    <ellipse cx="319" cy="260" rx="27" ry="43" fill="#EAF7FF" stroke="#20D7FF" stroke-width="7"/>
+    <path d="M132 330 Q85 352 74 390" fill="none" stroke="#EAF7FF" stroke-width="35" stroke-linecap="round"/>
+    <path d="M278 330 Q323 351 340 386" fill="none" stroke="#EAF7FF" stroke-width="35" stroke-linecap="round"/>
+  </g>
+
+  <!-- LinkedIn badge -->
+  <g transform="rotate(-8 365 183)" filter="url(#shadow)">
+    <rect x="323" y="135" width="88" height="88" rx="16" fill="#0A66C2" stroke="#55DFFF" stroke-width="3"/>
+    <text x="367" y="196" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="58" font-weight="700" fill="#fff">in</text>
+  </g>
+
+  <!-- Email badge -->
+  <g filter="url(#shadow)">
+    <rect x="330" y="245" width="96" height="76" rx="15" fill="#0D1D31" stroke="#35D9FF" stroke-width="5"/>
+    <path d="M345 262 L378 289 L411 262" fill="none" stroke="#35D9FF" stroke-width="7" stroke-linejoin="round"/>
+    <path d="M345 304 L369 282 M411 304 L387 282" fill="none" stroke="#35D9FF" stroke-width="7"/>
+  </g>
+
+  <!-- Brand name -->
+  <text x="500" y="286" font-family="Arial, Helvetica, sans-serif" font-size="118" font-weight="800" letter-spacing="-6" fill="#F2F8FF">Lead</text>
+  <text x="780" y="286" font-family="Arial, Helvetica, sans-serif" font-size="118" font-weight="800" letter-spacing="-6" fill="url(#word)">Flow</text>
+
+  <!-- AI badge -->
+  <g filter="url(#shadow)">
+    <rect x="1100" y="174" width="190" height="112" rx="34" fill="url(#flow)"/>
+    <rect x="1105" y="179" width="180" height="102" rx="30" fill="#101B3A" opacity=".22"/>
+    <text x="1195" y="256" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="68" font-weight="800" fill="#FFFFFF">AI</text>
+  </g>
+
+  <!-- Sparkles -->
+  <path d="M1290 135 l8 20 20 8-20 8-8 20-8-20-20-8 20-8z" fill="#5EE7FF" filter="url(#glow)"/>
+  <path d="M1332 181 l5 13 13 5-13 5-5 13-5-13-13-5 13-5z" fill="#B56CFF"/>
+
+  <!-- Tagline -->
+  <line x1="500" y1="347" x2="585" y2="347" stroke="url(#flow)" stroke-width="5" stroke-linecap="round"/>
+  <text x="610" y="356" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" letter-spacing="7" fill="#7DDFFF">AUTOMATE</text>
+  <circle cx="785" cy="349" r="5" fill="#A855F7"/>
+  <text x="815" y="356" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" letter-spacing="7" fill="#7DDFFF">ENGAGE</text>
+  <circle cx="990" cy="349" r="5" fill="#A855F7"/>
+  <text x="1020" y="356" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" letter-spacing="7" fill="#7DDFFF">GROW</text>
+  <line x1="1115" y1="347" x2="1290" y2="347" stroke="url(#flow)" stroke-width="5" stroke-linecap="round"/>
+</svg>

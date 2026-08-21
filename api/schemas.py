@@ -194,3 +194,133 @@ class AlertPreferenceOut(BaseModel):
 class AlertPreferenceUpdate(BaseModel):
     enabled: bool
     threshold_value: Optional[float] = None
+
+
+class LeadOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    company: Optional[str] = None
+    role: Optional[str] = None
+    interest: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+    last_contact: Optional[datetime] = None
+    source: Optional[str] = None
+    status: str
+    created_at: Optional[datetime] = None
+
+
+class LeadCreate(BaseModel):
+    name: str
+    company: Optional[str] = None
+    role: Optional[str] = None
+    interest: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+    source: Optional[str] = None
+    status: str = "new"
+
+
+class LeadUpdate(BaseModel):
+    company: Optional[str] = None
+    role: Optional[str] = None
+    interest: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    email: Optional[str] = None
+    role: str
+    organisation_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class UserCreate(BaseModel):
+    id: str
+    name: str
+    email: Optional[str] = None
+    role: str = "employee"
+    organisation_id: Optional[str] = None
+
+
+class TeamMemberStatusOut(BaseModel):
+    user: UserOut
+    status: str  # active | idle | offline
+    focus_score: Optional[float] = None
+    active_hours_today: float = 0.0
+    current_app: Optional[str] = None
+
+
+class PostLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    date: date_type
+    time: str
+    topic: Optional[str] = None
+    content: str
+    post_id: Optional[str] = None
+    platform: str
+    status: str
+    likes: int = 0
+    comments: int = 0
+    error: Optional[str] = None
+
+
+class LinkedInStatusOut(BaseModel):
+    can_post_now: bool
+    last_post_at: Optional[datetime] = None
+    minutes_until_next_allowed: int = 0
+    posts_today: int = 0
+    daily_limit: int
+
+
+class CampaignLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    date: date_type
+    time: str
+    name: Optional[str] = None
+    email: str
+    company: Optional[str] = None
+    subject: Optional[str] = None
+    status: str
+    error: Optional[str] = None
+    follow_up_sent: bool
+
+
+class CampaignStatsOut(BaseModel):
+    total_sent: int
+    total_failed: int
+    sent_today: int
+    daily_limit: int
+
+
+class CommandRequest(BaseModel):
+    command: str
+
+
+class JobLogEntry(BaseModel):
+    at: datetime
+    message: str
+
+
+class JobOut(BaseModel):
+    id: str
+    command: str
+    action: str
+    status: str  # queued | running | completed | failed | cancelled
+    progress: int
+    logs: list[JobLogEntry]
+    result: Optional[str] = None
+    created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None

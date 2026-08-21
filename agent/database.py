@@ -270,6 +270,71 @@ CREATE TABLE IF NOT EXISTS alert_preferences (
     threshold_value REAL,
     UNIQUE(user_id, alert_type)
 );
+
+-- Schema owned here (module 5's leads route needs it to exist); the
+-- Playwright-based discovery that populates it in bulk belongs to module 20.
+CREATE TABLE IF NOT EXISTS leads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    company TEXT,
+    role TEXT,
+    interest TEXT,
+    email TEXT,
+    notes TEXT,
+    last_contact DATETIME,
+    source TEXT,
+    status TEXT NOT NULL DEFAULT 'new',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email);
+CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
+
+-- Module 21.1's multi-user model. Schema owned here so module 5's team
+-- routes can exist ahead of module 21's full team dashboard.
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE,
+    role TEXT NOT NULL DEFAULT 'employee',
+    organisation_id TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Schema owned here (module 5's linkedin route needs it to exist); module
+-- 18's Playwright poster is the only thing that populates it.
+CREATE TABLE IF NOT EXISTS post_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date DATE NOT NULL,
+    time TEXT NOT NULL,
+    topic TEXT,
+    content TEXT NOT NULL,
+    post_id TEXT,
+    platform TEXT NOT NULL DEFAULT 'linkedin',
+    status TEXT NOT NULL,
+    likes INTEGER DEFAULT 0,
+    comments INTEGER DEFAULT 0,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_post_log_date ON post_log(date);
+
+-- Module 17.3's background job runner state. id is a UUID string, not an
+-- autoincrement int, since job ids are handed to the client before any DB
+-- row could exist to generate one from.
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    command TEXT NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    progress INTEGER NOT NULL DEFAULT 0,
+    logs_json TEXT NOT NULL DEFAULT '[]',
+    result TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 """
 
 # Columns added after the initial daily_stats design (module 2.6 — longest

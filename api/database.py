@@ -187,6 +187,73 @@ class WeeklyReport(Base):
     emailed_at = Column(DateTime)
 
 
+class Lead(Base):
+    __tablename__ = "leads"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    company = Column(String)
+    role = Column(String)
+    interest = Column(String)
+    email = Column(String)
+    notes = Column(String)
+    last_contact = Column(DateTime)
+    source = Column(String)
+    status = Column(String, nullable=False, default="new")
+    created_at = Column(DateTime)
+
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    email = Column(String, unique=True)
+    role = Column(String, nullable=False, default="employee")
+    organisation_id = Column(String)
+    created_at = Column(DateTime)
+
+
+class PostLog(Base):
+    __tablename__ = "post_log"
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, nullable=False)
+    time = Column(String, nullable=False)
+    topic = Column(String)
+    content = Column(String, nullable=False)
+    post_id = Column(String)
+    platform = Column(String, nullable=False, default="linkedin")
+    status = Column(String, nullable=False)
+    likes = Column(Integer, default=0)
+    comments = Column(Integer, default=0)
+    error = Column(String)
+
+
+class CampaignLog(Base):
+    __tablename__ = "campaign_log"
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, nullable=False)
+    time = Column(String, nullable=False)
+    name = Column(String)
+    email = Column(String, nullable=False)
+    company = Column(String)
+    subject = Column(String)
+    status = Column(String, nullable=False)
+    error = Column(String)
+    follow_up_sent = Column(Integer, default=0)
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+    id = Column(String, primary_key=True)
+    command = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="queued")
+    progress = Column(Integer, nullable=False, default=0)
+    logs_json = Column(String, nullable=False, default="[]")
+    result = Column(String)
+    created_at = Column(DateTime)
+    completed_at = Column(DateTime)
+
+
 def init_db() -> None:
     """Ensure schema exists before the API serves any requests."""
     agent_db.init_db()

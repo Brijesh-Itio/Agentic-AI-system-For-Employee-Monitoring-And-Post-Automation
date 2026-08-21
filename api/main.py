@@ -14,7 +14,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from agent.logging_config import setup_logging
 from api.config import settings
 from api.database import init_db
-from api.routes import activity, alerts, productivity, reports, screenshots, status, websites
+from api.routes import (
+    activity,
+    alerts,
+    command,
+    email,
+    leads,
+    linkedin,
+    productivity,
+    reports,
+    screenshots,
+    status,
+    team,
+    websites,
+)
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -45,6 +58,11 @@ app.include_router(productivity.router)
 app.include_router(reports.router)
 app.include_router(status.router)
 app.include_router(alerts.router)
+app.include_router(leads.router)
+app.include_router(team.router)
+app.include_router(linkedin.router)
+app.include_router(email.router)
+app.include_router(command.router)
 
 
 @app.get("/")

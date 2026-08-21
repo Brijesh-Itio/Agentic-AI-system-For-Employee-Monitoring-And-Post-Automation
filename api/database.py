@@ -11,7 +11,7 @@ SQLAlchemy here is purely for ergonomic querying from route handlers.
 import logging
 from typing import Generator
 
-from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Integer, String, create_engine
+from sqlalchemy import Column, Date, DateTime, Float, Integer, String, create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from agent import database as agent_db
@@ -252,40 +252,6 @@ class Job(Base):
     result = Column(String)
     created_at = Column(DateTime)
     completed_at = Column(DateTime)
-
-
-class Department(Base):
-    __tablename__ = "departments"
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False, unique=True)
-    created_at = Column(DateTime)
-
-
-class DarTemplate(Base):
-    __tablename__ = "dar_templates"
-    id = Column(Integer, primary_key=True)
-    department_id = Column(Integer, ForeignKey("departments.id", ondelete="CASCADE"), unique=True)
-    fields_json = Column(String, nullable=False, default="[]")
-    updated_at = Column(DateTime)
-
-
-class DarEntry(Base):
-    __tablename__ = "dar_entries"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(String, nullable=False, default="local")
-    date = Column(Date, nullable=False)
-    department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"))
-    task = Column(String, nullable=False)
-    task_description = Column(String)
-    start_time = Column(DateTime)
-    end_time = Column(DateTime)
-    comment = Column(String)
-    remarks = Column(String)
-    link = Column(String)
-    custom_fields_json = Column(String, nullable=False, default="{}")
-    source = Column(String, nullable=False, default="manual")
-    created_at = Column(DateTime)
-    updated_at = Column(DateTime)
 
 
 def init_db() -> None:

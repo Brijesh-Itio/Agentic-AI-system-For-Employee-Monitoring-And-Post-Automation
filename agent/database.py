@@ -335,45 +335,6 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
-
--- Module 7 extension — department-custom DAR templates & structured entries
--- (see DEVELOPMENT.md, "Module 7 extension"). Purely additive: dar_reports/
--- the narrative generator above are untouched by any of this.
-CREATE TABLE IF NOT EXISTS departments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
--- department_id is nullable and UNIQUE-when-present so each department has
--- at most one template; a NULL-department row is the default/base template.
-CREATE TABLE IF NOT EXISTS dar_templates (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    department_id INTEGER UNIQUE REFERENCES departments(id) ON DELETE CASCADE,
-    fields_json TEXT NOT NULL DEFAULT '[]',
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS dar_entries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL DEFAULT 'local',
-    date DATE NOT NULL,
-    department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
-    task TEXT NOT NULL,
-    task_description TEXT,
-    start_time DATETIME,
-    end_time DATETIME,
-    comment TEXT,
-    remarks TEXT,
-    link TEXT,
-    custom_fields_json TEXT NOT NULL DEFAULT '{}',
-    source TEXT NOT NULL DEFAULT 'manual',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_dar_entries_user_date ON dar_entries(user_id, date);
-CREATE INDEX IF NOT EXISTS idx_dar_entries_department ON dar_entries(department_id);
 """
 
 # Columns added after the initial daily_stats design (module 2.6 — longest

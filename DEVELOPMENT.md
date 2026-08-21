@@ -540,66 +540,6 @@ Use `schedule.every().day.at("18:00").do(generate_and_save_dar)` to trigger DAR 
 
 ---
 
-#### Module 7 extension — Department-Custom DAR Templates, Structured Entries & Export/Import
-
-Not in the original module list above — added afterward because different
-departments genuinely need different structured fields on their DAR (an HR
-DAR tracking candidates is not shaped like a Sales DAR tracking deal value,
-which is not shaped like an IT DAR tracking ticket IDs), on top of the
-narrative report 7.1-7.4 already produce. This extension is purely
-additive: it does not change `generate_and_save_dar()`'s existing
-behaviour, prompt, or output in any way — every sub-module below is new
-tables and new routes layered next to it.
-
-**7.5 — Departments & custom field templates**
-A `departments` table (id, name) holds the org's departments (e.g. HR,
-Sales, IT), fully admin-creatable — nothing is hardcoded. Each department
-has at most one `dar_templates` row defining its **custom** fields as a
-JSON array of `{key, label, type, required, options?}` (type is one of
-`text`, `textarea`, `number`, `date`, `select`, `url`). A NULL-department
-template is the default/base template applied when a department has none
-of its own.
-
-**7.6 — Structured DAR entries (task log)**
-A `dar_entries` table holds the actual task-level rows for a given user's
-day, independent of and alongside the narrative DAR. Every entry always
-carries the same **base** fields regardless of department — `task`,
-`task_description`, `start_time`, `end_time`, `comment`, `remarks`,
-`link` — plus a `custom_fields_json` blob holding values for whatever
-extra fields that entry's department template defines. Entries are
-created/edited manually via the API (the realistic path — remarks and
-links are inherently human input) or drafted by 7.7.
-
-**7.7 — AI-assisted entry drafting**
-An optional endpoint that reuses 7.1's existing day log and asks Ollama to
-draft `dar_entries` rows matching the day's department template, returned
-as JSON and parsed defensively (a malformed/unparseable response fails
-the request with a clear error — it never fabricates entries or silently
-returns nothing). Drafted rows are tagged `source='ai_draft'` and are
-edited or deleted exactly like manual entries; nothing about 7.1-7.4's
-narrative generation path is touched by this.
-
-**7.8 — DAR export (CSV / DOCX / PDF)**
-Given a date, export the narrative DAR content plus that day's
-`dar_entries` (including each department's custom fields) as CSV, a
-formatted DOCX, or a formatted PDF — the same three formats, one
-document per date.
-
-**7.9 — DAR import (CSV)**
-Bulk-create `dar_entries` for a date from an uploaded CSV. Columns
-matching a base field or the department template's field keys map
-directly; unrecognised columns are preserved in `custom_fields_json`
-rather than silently dropped, so importing never loses data even if the
-CSV's shape doesn't perfectly match the current template.
-
-**Module 7 extension test:** Create a department with two custom fields,
-add three `dar_entries` for today (mixing manual and AI-drafted), export
-today's DAR as CSV/DOCX/PDF and confirm all three open correctly and
-contain every entry and custom field value, then re-import the exported
-CSV into a fresh date and confirm the entries recreate exactly.
-
----
-
 ### MODULE 8 — Gmail Email Delivery
 
 **File:** `automation/email/sender.py`
@@ -1145,11 +1085,6 @@ CREATE TABLE weekly_trends (id, user_id, week_start, avg_focus_score, total_hour
 CREATE TABLE dar_reports (id, user_id, date, content, productivity_score, total_active_seconds, productive_seconds, generated_at, emailed_at);
 CREATE TABLE weekly_reports (id, user_id, week_start, content, generated_at, emailed_at);
 CREATE TABLE alerts (id, user_id, alert_type, message, triggered_at, dismissed_at, emailed);
-
--- Module 7 extension: department-custom DAR templates & structured entries
-CREATE TABLE departments (id, name, created_at);
-CREATE TABLE dar_templates (id, department_id, fields_json, updated_at);
-CREATE TABLE dar_entries (id, user_id, date, department_id, task, task_description, start_time, end_time, comment, remarks, link, custom_fields_json, source, created_at, updated_at);
 
 -- User and team tables
 CREATE TABLE users (id, name, email, role, organisation_id, created_at);

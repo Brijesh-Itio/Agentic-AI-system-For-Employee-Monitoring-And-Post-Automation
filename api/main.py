@@ -18,8 +18,6 @@ from api.routes import (
     activity,
     alerts,
     command,
-    dar_entries,
-    departments,
     email,
     leads,
     linkedin,
@@ -65,8 +63,6 @@ app.include_router(team.router)
 app.include_router(linkedin.router)
 app.include_router(email.router)
 app.include_router(command.router)
-app.include_router(departments.router)
-app.include_router(dar_entries.router)
 
 
 @app.get("/")

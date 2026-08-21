@@ -28,5 +28,9 @@ langchain-core==1.5.4
 # ── Browser Automation (Module 4, 18, 20) ──
 playwright==1.47.0
 
+# ── DAR custom templates & export (Module 7.5-7.9) ──
+python-docx==1.1.2
+reportlab==4.2.5
+
 # ── Utilities ──
 python-dotenv==1.0.1

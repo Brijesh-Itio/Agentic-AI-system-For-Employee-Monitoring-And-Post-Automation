@@ -1,29 +1,33 @@
 """MODULE 5 — LinkedIn routes.
 
-GET endpoints are fully functional against the post_log table (schema owned
-by agent/database.py). POST /post stays 501: module 18's content_writer.py,
-image_finder.py and poster.py are all still empty stubs, so there is no
-Playwright automation yet for this route to call — faking a success here
-would hide that module 18 hasn't been built rather than honestly reflect it.
+GET endpoints are fully functional against the post_log table (schema
+owned by agent/database.py). POST /post calls module 18's real pipeline
+(content_writer -> image_finder -> poster) via the module 16.3 sub-agent —
+requires LINKEDIN_EMAIL/LINKEDIN_PASSWORD in .env to actually succeed;
+otherwise it fails with a clear reason rather than a fake success.
+
+The pipeline genuinely takes minutes (real Ollama calls, real local image
+generation, a real browser session), so POST /post runs it as a background
+job — reusing module 17's jobs table/thread pattern rather than a second
+one — and returns immediately with a job id the frontend polls via the
+existing GET /api/command/status/{job_id} for live stage progress (text
+generating -> image generating -> posting) instead of one opaque wait.
 """
 import logging
+import threading
+import uuid
 from datetime import date as date_type, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from api.database import PostLog, get_db
-from api.schemas import LinkedInStatusOut, PostLogOut
+from api.schemas import JobOut, LinkedInStatusOut, PostLogOut
+from automation.config import DAILY_POST_LIMIT, MIN_POST_INTERVAL_MINUTES
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/linkedin", tags=["linkedin"])
-
-# 18.6's rate-limit rule. Belongs in automation/config.py once module 18
-# actually exists to read it; hardcoded here to match DEVELOPMENT.md's
-# documented defaults in the meantime.
-MIN_POST_INTERVAL_MINUTES = 30
-DAILY_POST_LIMIT = 3
 
 
 @router.get("/posts", response_model=list[PostLogOut])
@@ -60,11 +64,44 @@ def linkedin_status(db: Session = Depends(get_db)):
     )
 
 
-@router.post("/post", status_code=501)
-def post_now():
-    raise HTTPException(
-        status_code=501,
-        detail="LinkedIn automation is not built yet — module 18's content_writer.py, "
-        "image_finder.py and poster.py are all empty. Nothing exists yet for this route "
-        "to call.",
-    )
+def _run_post_job(job_id: str, topic: str | None) -> None:
+    from api.routes.command import _append_log, _update_job
+    from ai.sub_agents import linkedin_agent
+
+    _update_job(job_id, status="running", progress=5)
+
+    def on_progress(label: str, pct: int) -> None:
+        _update_job(job_id, progress=pct)
+        _append_log(job_id, label)
+
+    try:
+        result = linkedin_agent.run(topic=topic, on_progress=on_progress)
+        if result["status"] != "success":
+            raise RuntimeError(result["detail"])
+        _update_job(
+            job_id, status="completed", progress=100, result=result["detail"],
+            completed_at=datetime.now().isoformat(sep=" "),
+        )
+        _append_log(job_id, result["detail"])
+    except Exception as exc:
+        logger.exception("LinkedIn post job %s failed", job_id)
+        _update_job(job_id, status="failed", result=str(exc), completed_at=datetime.now().isoformat(sep=" "))
+        _append_log(job_id, f"Failed: {exc}")
+
+
+@router.post("/post", response_model=JobOut, status_code=202)
+def post_now(topic: str | None = None, db: Session = Depends(get_db)):
+    """Kicks off the full module 18 pipeline (write -> generate image ->
+    post) as a background job and returns immediately — poll
+    GET /api/command/status/{job_id} for live progress. Same jobs table
+    module 17 already built; this route just creates a job of a different
+    "action" rather than duplicating the job-tracking machinery."""
+    from api.routes.command import _create_job, get_job_status
+
+    job_id = str(uuid.uuid4())
+    _create_job(job_id, command=f"post to linkedin{f' about {topic}' if topic else ''}", action="post")
+
+    thread = threading.Thread(target=_run_post_job, args=(job_id, topic), daemon=True)
+    thread.start()
+
+    return get_job_status(job_id, db)

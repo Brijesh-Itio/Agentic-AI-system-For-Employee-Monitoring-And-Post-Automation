@@ -1,8 +1,11 @@
 """MODULE 5 — Leads routes.
 
-Full CRUD against the leads table (schema owned by agent/database.py).
-Module 20's Playwright research agent is what populates this table in bulk
-once built; until then these routes are the only way leads get in or out.
+Full CRUD against the leads table (schema owned by agent/database.py),
+plus POST /research which triggers module 20's real Playwright pipeline
+(Google search -> LinkedIn public profile -> company enrichment -> store).
+Both Google and LinkedIn actively block automated access — verified
+empirically (reCAPTCHA and authwall respectively) — so a 0-lead result is
+an expected, honestly-reported outcome, not necessarily a bug.
 """
 import logging
 from datetime import datetime
@@ -77,3 +80,15 @@ def delete_lead(lead_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"No lead with id {lead_id}")
     db.delete(row)
     db.commit()
+
+
+@router.post("/research")
+def trigger_research(target_profile: str):
+    """Synchronous, like /api/reports/dar/generate — real Playwright
+    browser sessions against Google/LinkedIn, so this can take a while."""
+    from ai.sub_agents import research_agent
+
+    result = research_agent.run(target_profile=target_profile)
+    if result["status"] != "success":
+        raise HTTPException(status_code=502, detail=result["detail"])
+    return result

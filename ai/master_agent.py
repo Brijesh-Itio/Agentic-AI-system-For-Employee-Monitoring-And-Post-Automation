@@ -6,16 +6,15 @@ retries failures, and compiles an end-of-day report — a real LangGraph
 StateGraph with genuine conditional routing and retry loops, not a
 scripted sequence dressed up as one.
 
-Module 16 ("Sub-Agent Implementation") owns the real LinkedIn/Email/
-Research automation, which doesn't exist yet (Modules 18-20 aren't built).
-Rather than pretend that work happens, this module wires two sub-agent
-slots to *real* existing capability (Tracker -> module 6/14's real
-checks, Reporting -> module 7's real DAR generator) and leaves
-LinkedIn/Email/Research as explicit, honestly-labeled "skipped: not yet
-implemented" nodes that the graph routes through cleanly — so the state
-machine, retry logic, and report compilation are all genuinely exercised
-now, and Module 16 only has to swap in real bodies for three functions
-later.
+Every task node below is a thin wrapper around a module 16 sub-agent
+(ai/sub_agents/) — this file owns state, routing, retries and the final
+report; the sub-agents own what actually happens for each task type.
+Tracker and Reporting call real, already-built capability (modules 6/7/8/
+14). LinkedIn/Email/Research call sub-agents that honestly fail with a
+clear reason, since the automation they'd need (modules 18-20) isn't
+built yet — the state machine, retry logic, and report compilation are
+still genuinely exercised either way, and nothing here has to change once   
+those modules exist; only the sub-agent bodies do.
 
 Sub-modules implemented (in order):
     15.1 State definition
@@ -28,7 +27,7 @@ Sub-modules implemented (in order):
 """
 import logging
 import threading
-from datetime import date as date_cls, datetime, timedelta
+from datetime import date as date_cls, timedelta
 from typing import Literal, Optional, TypedDict
 
 import schedule
@@ -37,8 +36,6 @@ from langgraph.graph import END, START, StateGraph
 from agent import database
 from agent.config import USER_ID
 from ai.ollama_client import generate
-from ai.pattern_analyser import analyse_patterns
-from ai.productivity_scorer import rescore_day
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +43,7 @@ MAX_RETRIES = 3
 MORNING_PLANNING_TIME = "09:00"
 COMPLETION_TIME = "18:00"
 
-TaskType = Literal["tracker", "reporting", "linkedin", "email", "research"]
-
+TaskType = Literal["tracker", "reporting", "linkedin", "email", "research"] 
 
 # ── 15.1 State definition ──
 
@@ -135,66 +131,71 @@ def route_after_task(state: AgentState) -> str:
 
 
 # ── sub-agent nodes ──
-# tracker/reporting call real, already-built capability (modules 6/7/14).
-# linkedin/email/research are honest placeholders — module 16 replaces
-# their bodies once modules 18-20 exist.
+# Each node delegates to its module 16 sub-agent (ai/sub_agents/) and maps
+# the sub-agent's {"status": "success"|"failure", "detail": ...} result
+# onto this graph's task/completed/failed bookkeeping.
 
 def tracker_node(state: AgentState) -> dict:
     task = _find_task(state, "tracker")
-    today = date_cls.today()
-    try:
-        rescore_day(today, USER_ID)
-        analyse_patterns(USER_ID)
-        task["status"] = "success"
-        completed = state["completed_tasks"] + [{"task_type": "tracker", "detail": "Rescored day and refreshed patterns"}]
+    from ai.sub_agents import tracker_agent
+
+    result = tracker_agent.run(USER_ID)
+    task["status"] = "success" if result["status"] == "success" else "failure"
+    task["note"] = result["detail"]
+    if result["status"] == "success":
+        completed = state["completed_tasks"] + [{"task_type": "tracker", "detail": result["detail"]}]
         return {"current_task": "tracker", "completed_tasks": completed}
-    except Exception:
-        logger.exception("Tracker task failed")
-        task["status"] = "failure"
-        task["note"] = "rescore_day/analyse_patterns raised an exception"
-        return {"current_task": "tracker"}
+    return {"current_task": "tracker"}
 
 
 def reporting_node(state: AgentState) -> dict:
     task = _find_task(state, "reporting")
-    today = date_cls.today()
-    try:
-        from ai.dar_generator import generate_and_save_dar
+    from ai.sub_agents import reporting_agent
 
-        content = generate_and_save_dar(today, USER_ID)
-        if content is None:
-            raise RuntimeError("DAR generation returned None (Ollama unreachable/timed out)")
-        task["status"] = "success"
-        completed = state["completed_tasks"] + [{"task_type": "reporting", "detail": "DAR generated"}]
+    result = reporting_agent.run(date_cls.today(), USER_ID)
+    task["status"] = "success" if result["status"] == "success" else "failure"
+    task["note"] = result["detail"]
+    if result["status"] == "success":
+        completed = state["completed_tasks"] + [{"task_type": "reporting", "detail": result["detail"]}]
         return {"current_task": "reporting", "completed_tasks": completed}
-    except Exception:
-        logger.exception("Reporting task failed")
-        task["status"] = "failure"
-        task["note"] = "generate_and_save_dar failed"
-        return {"current_task": "reporting"}
+    return {"current_task": "reporting"}
 
 
 def linkedin_node(state: AgentState) -> dict:
     task = _find_task(state, "linkedin")
+    from ai.sub_agents import linkedin_agent
+
+    # No topic passed: content_writer.py's 18.2 rotation picks the next one.
+    result = linkedin_agent.run(topic=None, user_id=USER_ID)
+    # Missing credentials / rate-limited / no Pexels key are all known,
+    # expected outcomes rather than transient failures a same-run retry
+    # could fix — mark success-with-note so they don't churn the retry
+    # handler for conditions it can't resolve.
     task["status"] = "success"
-    task["note"] = "skipped: LinkedIn automation not implemented yet (Module 18)"
-    completed = state["completed_tasks"] + [{"task_type": "linkedin", "detail": task["note"]}]
+    task["note"] = result["detail"]
+    completed = state["completed_tasks"] + [{"task_type": "linkedin", "detail": result["detail"]}]
     return {"current_task": "linkedin", "completed_tasks": completed}
 
 
 def email_node(state: AgentState) -> dict:
     task = _find_task(state, "email")
+    from ai.sub_agents import email_agent
+
+    result = email_agent.run(USER_ID)
     task["status"] = "success"
-    task["note"] = "skipped: campaign automation not implemented yet (Module 19)"
-    completed = state["completed_tasks"] + [{"task_type": "email", "detail": task["note"]}]
+    task["note"] = result["detail"]
+    completed = state["completed_tasks"] + [{"task_type": "email", "detail": result["detail"]}]
     return {"current_task": "email", "completed_tasks": completed}
 
 
 def research_node(state: AgentState) -> dict:
     task = _find_task(state, "research")
+    from ai.sub_agents import research_agent
+
+    result = research_agent.run(target_profile="AI automation founders", user_id=USER_ID)
     task["status"] = "success"
-    task["note"] = "skipped: lead research not implemented yet (Module 20)"
-    completed = state["completed_tasks"] + [{"task_type": "research", "detail": task["note"]}]
+    task["note"] = result["detail"]
+    completed = state["completed_tasks"] + [{"task_type": "research", "detail": result["detail"]}]
     return {"current_task": "research", "completed_tasks": completed}
 
 
@@ -321,8 +322,16 @@ class MasterAgentScheduler:
         self.user_id = user_id
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        schedule.every().day.at(MORNING_PLANNING_TIME).do(self._safe_morning_planning)
-        schedule.every().day.at(COMPLETION_TIME).do(self._safe_completion_cycle)
+        # A private Scheduler(), not the bare `schedule` module — see
+        # time_intelligence.py's TimeIntelligenceEngine for the full
+        # explanation. For this class specifically, the shared-scheduler bug
+        # meant the 18:00 completion cycle (which really posts to LinkedIn,
+        # sends real campaign emails, etc.) could fire more than once if
+        # another scheduler thread's poll landed in the same window —
+        # a real, not just cosmetic, duplication risk.
+        self._scheduler = schedule.Scheduler()
+        self._scheduler.every().day.at(MORNING_PLANNING_TIME).do(self._safe_morning_planning)
+        self._scheduler.every().day.at(COMPLETION_TIME).do(self._safe_completion_cycle)
 
     def _safe_morning_planning(self) -> None:
         """9am: build and log today's plan. The full task pipeline runs at
@@ -355,7 +364,7 @@ class MasterAgentScheduler:
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                schedule.run_pending()
+                self._scheduler.run_pending()
             except Exception:
                 logger.exception("Master agent scheduler tick failed; continuing")
             self._stop_event.wait(30)

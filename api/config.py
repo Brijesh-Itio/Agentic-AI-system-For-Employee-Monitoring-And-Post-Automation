@@ -33,14 +33,41 @@ class Settings(BaseSettings):
     # matching module 8's own test ("send a test email to yourself").
     REPORT_RECIPIENT_EMAIL: str = ""
 
+    # ── LinkedIn (module 18) ──
+    # Only used for the *first* login, which saves a session cookie file
+    # (LINKEDIN_COOKIES_PATH in automation/config.py) — every run after
+    # that reuses the saved session instead of logging in again.
+    LINKEDIN_EMAIL: str = ""
+    LINKEDIN_PASSWORD: str = ""
+
+    # ── Pexels image search (module 18.3, fallback only) ──
+    # Free API key, not Playwright scraping: Pexels/Pixabay both sit behind
+    # Cloudflare bot-detection that blocks headless browsers outright (a
+    # "Verify you are human" wall, not a missing selector) — verified
+    # empirically, not assumed. Kept as a stock-photo fallback for when
+    # FastSD CPU (below) is unavailable or produces nothing usable.
+    PEXELS_API_KEY: str = ""
+
+    # ── FastSD CPU local image generation (module 18.3, primary) ──
+    # A second local-inference server, same pattern as Ollama: runs on this
+    # machine, not a paid/third-party API, matching the zero-API-cost goal.
+    # Not part of the Railway/cloud deployment (that stays lightweight) —
+    # like Ollama, it only ever needs to run wherever automation actually
+    # executes. Default port 8100 (not 8000) to avoid colliding with this
+    # backend's own uvicorn server.
+    FASTSD_API_URL: str = "http://127.0.0.1:8100"
+    FASTSD_TIMEOUT_SECONDS: int = 600
+
     # ── Ollama / AI stack (module 6+) ──
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen3:1.7b"
     OLLAMA_FAST_MODEL: str = "phi3:mini"
     OLLAMA_TIMEOUT_SECONDS: int = 120  # classification calls (fast=True)
     # Full narrative generation (DAR, etc.) genuinely takes longer than
-    # classification — observed ~167s for a full DAR on CPU inference.
-    OLLAMA_GENERATE_TIMEOUT_SECONDS: int = 300
+    # classification — observed ~167s for a full DAR on CPU inference, but
+    # AI-drafted task-log entries measured at ~275s under real load, only
+    # ~25s under the old 300s budget — raised for real margin under load.
+    OLLAMA_GENERATE_TIMEOUT_SECONDS: int = 420
 
     # ── ChromaDB (module 6+) ──
     CHROMADB_PATH: str = str(PROJECT_ROOT / "chromadb")

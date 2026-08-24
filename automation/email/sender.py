@@ -157,7 +157,7 @@ def send_campaign_email(
     return sent
 
 
-# ── 8.5 Connection tester ──
+# ── 8.5 Connection tester ──   
 
 def test_gmail_connection() -> bool:
     if not _credentials_configured():

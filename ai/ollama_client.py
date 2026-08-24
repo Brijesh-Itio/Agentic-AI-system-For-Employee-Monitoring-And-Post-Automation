@@ -15,14 +15,26 @@ from api.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Two separate clients, two separate timeout budgets: single-word
-# classification (fast=True) genuinely finishes in seconds, while a full
-# multi-section DAR narrative from qwen3:1.7b on CPU can legitimately take
-# a couple of minutes. Sharing one timeout meant either classification
-# calls waited too long to fail, or narrative generation timed out before
-# it could ever finish — observed in practice at ~167s on this hardware.
-_fast_client = ollama.Client(host=settings.OLLAMA_BASE_URL, timeout=settings.OLLAMA_TIMEOUT_SECONDS)
-_client = ollama.Client(host=settings.OLLAMA_BASE_URL, timeout=settings.OLLAMA_GENERATE_TIMEOUT_SECONDS)
+# A fresh client per call, not a shared module-level singleton: observed in
+# practice that a long-lived FastAPI backend process reusing one persistent
+# ollama.Client (and the keep-alive HTTP connection inside it) would hang on
+# stale-connection reuse until its full timeout expired, even though a
+# brand-new client to the same Ollama server responded in seconds — while
+# short-lived manual test scripts (which always create a fresh client) never
+# hit this. Two separate timeout budgets stay: single-word classification
+# (fast=True) genuinely finishes in seconds, while a full multi-section DAR
+# narrative from qwen3:1.7b on CPU can legitimately take a couple of
+# minutes — sharing one timeout meant either classification calls waited
+# too long to fail, or narrative generation timed out before it could ever
+# finish (observed in practice at ~167s on this hardware).
+
+
+def _fast_client() -> ollama.Client:
+    return ollama.Client(host=settings.OLLAMA_BASE_URL, timeout=settings.OLLAMA_TIMEOUT_SECONDS)
+
+
+def _client() -> ollama.Client:
+    return ollama.Client(host=settings.OLLAMA_BASE_URL, timeout=settings.OLLAMA_GENERATE_TIMEOUT_SECONDS)
 
 
 def _fix_mojibake(text: str) -> str:
@@ -43,7 +55,7 @@ def generate(prompt: str, model: Optional[str] = None, fast: bool = False) -> Op
     so callers can fall back to a safe default rather than crash a
     background thread."""
     chosen_model = model or (settings.OLLAMA_FAST_MODEL if fast else settings.OLLAMA_MODEL)
-    client = _fast_client if fast else _client
+    client = _fast_client() if fast else _client()
     try:
         response = client.generate(model=chosen_model, prompt=prompt, stream=False)
         text = (response.get("response") or "").strip()
@@ -58,7 +70,7 @@ def embed(text: str) -> Optional[list]:
     ChromaDB semantic memory across the AI layer). Embeddings are cheap and
     fast, so this uses the short-timeout client."""
     try:
-        response = _fast_client.embeddings(model="nomic-embed-text", prompt=text)
+        response = _fast_client().embeddings(model="nomic-embed-text", prompt=text)
         return response.get("embedding")
     except Exception:
         logger.exception("Ollama embed() failed")
@@ -67,7 +79,7 @@ def embed(text: str) -> Optional[list]:
 
 def is_reachable() -> bool:
     try:
-        _fast_client.list()
+        _fast_client().list()
         return True
     except Exception:
         return False

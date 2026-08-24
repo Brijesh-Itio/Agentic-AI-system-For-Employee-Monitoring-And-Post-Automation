@@ -10,12 +10,12 @@
 17.5 Job cancel endpoint: sets a threading.Event the job thread checks
      between steps.
 
-Only the "report" action is real end-to-end — it calls module 7's actual
-DAR generator. "post" (module 18), "email" (module 19) and "find"
-(module 20) route correctly but fail with a clear message, since the
-sub-agents/automation they'd need to call are still empty stubs (module 16
-hasn't been built). That is an honest reflection of build state, not a
-missing feature of this module.
+Every action is real end-to-end — "report" (module 7's DAR generator),
+"post" (module 18's LinkedIn pipeline), "email" (module 19's campaign
+runner) and "find" (module 20's research pipeline) all call real
+automation. Each still degrades honestly on missing prerequisites (no
+LinkedIn credentials, Google/LinkedIn blocking automated access, etc.)
+rather than faking success.
 """
 import json
 import logging
@@ -28,8 +28,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from agent import database as agent_db
-from api.config import settings
-from api.database import Job, get_db
+from api.auth import get_current_user
+from api.database import Job, User, get_db
 from api.schemas import CommandRequest, JobOut
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ def _update_job(job_id: str, **fields) -> None:
 
 # ── 17.2 Command router + 17.3 background execution ──
 
-def _run_job(job_id: str, action: str, params: dict) -> None:
+def _run_job(job_id: str, action: str, params: dict, user_id: str) -> None:
     cancel_event = _cancel_events[job_id]
     _update_job(job_id, status="running", progress=10)
     _append_log(job_id, f"Routing action={action!r}")
@@ -103,7 +103,7 @@ def _run_job(job_id: str, action: str, params: dict) -> None:
             _append_log(job_id, "Calling module 7's DAR generator")
             from ai.dar_generator import generate_and_save_dar
 
-            content = generate_and_save_dar(user_id=settings.DEFAULT_USER_ID)
+            content = generate_and_save_dar(user_id=user_id)
             if content is None:
                 raise RuntimeError("Ollama unreachable or timed out during DAR generation")
             _update_job(
@@ -115,12 +115,54 @@ def _run_job(job_id: str, action: str, params: dict) -> None:
             )
             _append_log(job_id, "DAR generated and saved")
 
-        elif action in ("post", "email", "find"):
-            module = {"post": "18 (LinkedIn automation)", "email": "19 (email campaigns)", "find": "20 (lead research)"}[action]
-            raise RuntimeError(
-                f"Module {module} is not built yet — the sub-agent/automation this action "
-                "needs to call is still an empty stub."
+        elif action == "post":
+            _append_log(job_id, "Calling module 16.3's LinkedIn sub-agent")
+            from ai.sub_agents import linkedin_agent
+
+            # topic=None was hardcoded here regardless of what the user
+            # actually typed (verified live: "write the post about how
+            # claude can boost our productivity" still posted about a
+            # rotation-list topic instead) — the raw command text itself
+            # is the topic; only fall back to rotation for a truly generic
+            # command like "post to linkedin" with no topic of its own.
+            requested_topic = params["raw"].strip()
+            generic_trigger_only = bool(re.fullmatch(r"(post( to)?( linkedin)?|linkedin)\W*", requested_topic, re.I))
+            result = linkedin_agent.run(topic=None if generic_trigger_only else requested_topic)
+            if result["status"] != "success":
+                raise RuntimeError(result["detail"])
+            _update_job(
+                job_id, status="completed", progress=100, result=result["detail"],
+                completed_at=datetime.now().isoformat(sep=" "),
             )
+            _append_log(job_id, result["detail"])
+
+        elif action == "email":
+            _append_log(job_id, "Calling module 19's campaign runner")
+            from automation.email.campaign import run_campaign
+
+            result = run_campaign()
+            summary = (
+                f"{result['attempted']} attempted, {result['sent']} sent, "
+                f"{result['skipped_unpersonalisable']} skipped, {result['failed']} failed"
+            )
+            _update_job(
+                job_id, status="completed", progress=100, result=summary,
+                completed_at=datetime.now().isoformat(sep=" "),
+            )
+            _append_log(job_id, summary)
+
+        elif action == "find":
+            _append_log(job_id, "Calling module 16.5's research sub-agent")
+            from ai.sub_agents import research_agent
+
+            result = research_agent.run(target_profile=params["raw"])
+            if result["status"] != "success":
+                raise RuntimeError(result["detail"])
+            _update_job(
+                job_id, status="completed", progress=100, result=result["detail"],
+                completed_at=datetime.now().isoformat(sep=" "),
+            )
+            _append_log(job_id, result["detail"])
 
         else:
             raise RuntimeError(
@@ -140,7 +182,9 @@ def _run_job(job_id: str, action: str, params: dict) -> None:
 
 
 @router.post("", response_model=JobOut, status_code=202)
-def run_command(payload: CommandRequest, db: Session = Depends(get_db)):
+def run_command(
+    payload: CommandRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
     action, params = parse_command(payload.command)
     job_id = str(uuid.uuid4())
     _create_job(job_id, payload.command, action)
@@ -148,7 +192,7 @@ def run_command(payload: CommandRequest, db: Session = Depends(get_db)):
     with _cancel_events_lock:
         _cancel_events[job_id] = threading.Event()
 
-    thread = threading.Thread(target=_run_job, args=(job_id, action, params), daemon=True)
+    thread = threading.Thread(target=_run_job, args=(job_id, action, params, current_user.id), daemon=True)
     thread.start()
 
     return get_job_status(job_id, db)
@@ -157,7 +201,7 @@ def run_command(payload: CommandRequest, db: Session = Depends(get_db)):
 # ── 17.4 Job status endpoint ──
 
 @router.get("/status/{job_id}", response_model=JobOut)
-def get_job_status(job_id: str, db: Session = Depends(get_db)):
+def get_job_status(job_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     row = db.query(Job).filter(Job.id == job_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No job {job_id}")
@@ -175,7 +219,7 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/history", response_model=list[JobOut])
-def job_history(db: Session = Depends(get_db)):
+def job_history(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     rows = db.query(Job).order_by(Job.created_at.desc()).limit(50).all()
     return [
         JobOut(
@@ -196,7 +240,7 @@ def job_history(db: Session = Depends(get_db)):
 # ── 17.5 Job cancel endpoint ──
 
 @router.post("/cancel/{job_id}", response_model=JobOut)
-def cancel_job(job_id: str, db: Session = Depends(get_db)):
+def cancel_job(job_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     with _cancel_events_lock:
         event = _cancel_events.get(job_id)
     if event is None:

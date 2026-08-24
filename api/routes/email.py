@@ -1,10 +1,10 @@
 """MODULE 5 — Email routes.
 
 GET endpoints are fully functional against campaign_log (module 8.4's
-send_campaign_email already writes to it). POST /campaign/run stays 501:
-module 19's writer.py (RAG personalisation) and campaign.py (orchestration)
-are both empty, so there is no bulk-send logic yet for this route to
-trigger — module 8 only provides the per-lead send-and-log primitive.
+send_campaign_email already writes to it). POST /campaign/run calls
+module 19's real pipeline (lead loader -> RAG writer -> Gmail sender) —
+requires GMAIL_ADDRESS/GMAIL_APP_PASSWORD in .env to actually send;
+otherwise leads still get written for, just not sent.
 """
 import logging
 from datetime import date as date_type
@@ -15,14 +15,10 @@ from sqlalchemy.orm import Session
 
 from api.database import CampaignLog, get_db
 from api.schemas import CampaignLogOut, CampaignStatsOut
+from automation.config import DAILY_EMAIL_LIMIT
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/email", tags=["email"])
-
-# 19.6's daily send cap. Belongs in automation/config.py once module 19
-# actually exists to read it; hardcoded here to match DEVELOPMENT.md's
-# documented default in the meantime.
-DAILY_EMAIL_LIMIT = 500
 
 
 @router.get("/campaigns", response_model=list[CampaignLogOut])
@@ -48,15 +44,20 @@ def campaign_stats(db: Session = Depends(get_db)):
     )
 
 
-@router.post("/campaign/run", status_code=501)
-def run_campaign():
-    raise HTTPException(
-        status_code=501,
-        detail="Bulk email campaigns are not built yet — module 19's writer.py "
-        "(RAG personalisation) and campaign.py (orchestration) are both empty. "
-        "Module 8's send_campaign_email() exists as the per-lead primitive they'll "
-        "call once built.",
-    )
+@router.post("/campaign/run")
+def trigger_campaign(limit: int | None = None):
+    """Synchronous, like /api/reports/dar/generate — a real Ollama call per
+    lead plus real SMTP sends, so this can take a while for a large batch."""
+    from automation.email.campaign import run_campaign as run_campaign_pipeline
+
+    return run_campaign_pipeline(limit)
+
+
+@router.post("/follow-ups/run")
+def trigger_follow_ups():
+    from automation.email.campaign import run_follow_ups
+
+    return run_follow_ups()
 
 
 @router.post("/test-connection")

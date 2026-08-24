@@ -17,10 +17,12 @@ Sub-modules implemented (in order):
     6.3 Score calculator (wires real categories into module 2's engine)
 """
 import logging
+import threading
 from datetime import date as date_cls
 from typing import Optional
 
 import chromadb
+import schedule
 
 from agent import database
 from agent.config import USER_ID
@@ -239,6 +241,58 @@ def rescore_day(day: date_cls, user_id: str = USER_ID) -> None:
         engine.calculate_hourly_focus_score(day, hour)
     engine.calculate_daily_focus_score(day)
     engine.detect_longest_focus_session(day)
+
+
+LIVE_RESCORE_INTERVAL_SECONDS = 60
+
+
+class LiveScoringScheduler:
+    """Keeps today's focus_score/productive_seconds current *during* the
+    day, not just at the 18:00 completion cycle or when a DAR is manually
+    generated — those were the only two callers of rescore_day() before
+    this, so the dashboard's "Active Hours"/"Focus Score" stayed frozen at
+    0 all day even while activity_logs was genuinely accumulating in real
+    time. Runs every 60s (not e.g. every 10 minutes) because the user
+    correctly rejected that as not actually feeling real-time — cheap to
+    run this often: classify_app()/classify_website() only call Ollama for
+    a genuinely new app/window or domain, everything else is a ChromaDB
+    cache hit, and the rescore itself is pure SQL/arithmetic."""
+
+    def __init__(self, user_id: str = USER_ID):
+        self.user_id = user_id
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        # A private Scheduler(), not the bare `schedule` module — see
+        # time_intelligence.py's TimeIntelligenceEngine for the full
+        # explanation of why every scheduler class needs its own instance.
+        self._scheduler = schedule.Scheduler()
+        self._scheduler.every(LIVE_RESCORE_INTERVAL_SECONDS).seconds.do(self._safe_rescore)
+
+    def _safe_rescore(self) -> None:
+        try:
+            rescore_day(date_cls.today(), self.user_id)
+        except Exception:
+            logger.exception("Live rescore tick failed")
+
+    def start(self) -> None:
+        self._safe_rescore()  # don't wait a full interval before the first real numbers show up
+        self._thread = threading.Thread(target=self._run_loop, name="LiveScoringSchedulerThread", daemon=True)
+        self._thread.start()
+        logger.info("LiveScoringScheduler started (every %ds)", LIVE_RESCORE_INTERVAL_SECONDS)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        logger.info("LiveScoringScheduler stopped")
+
+    def _run_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self._scheduler.run_pending()
+            except Exception:
+                logger.exception("Live rescore scheduler tick failed; continuing")
+            self._stop_event.wait(10)
 
 
 if __name__ == "__main__":

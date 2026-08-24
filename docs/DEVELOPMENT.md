@@ -26,15 +26,23 @@ WorkPulse AI is a full-stack, production-ready, Agentic AI business operating sy
 workpulse-ai/
 │
 ├── DEVELOPMENT.md              ← this file — read before touching anything
+├── workpulse-agent.spec        ← PyInstaller spec for the packaged agent (module 23.1)
+├── Procfile                    ← Railway process command (module 24.2)
+├── railway.json                ← Railway build/deploy config (module 24.2)
+├── requirements-build.txt      ← Build-machine-only deps (PyInstaller)
 │
 ├── agent/                      ← Desktop tracking agent (runs on employee PC)
 │   ├── main.py                 ← Entry point, starts all trackers
+│   ├── tray_main.py            ← Packaged .exe entry point (module 23.5): first-run setup + tray icon
+│   ├── runtime_config.py       ← workpulse-config.json load/save (module 23.4)
+│   ├── autostart.py            ← Windows HKCU Run-key registration (module 23.3)
+│   ├── cloud_storage.py        ← Optional MinIO screenshot upload (module 24.4)
 │   ├── app_tracker.py          ← Active window tracking via pywin32
 │   ├── screenshot.py           ← Screenshot capture via Pillow
 │   ├── idle_detector.py        ← Keyboard and mouse idle detection
-│   ├── browser_tracker.py      ← Window title reading for browser sites
+│   ├── browser_tracker.py      ← Window title reading for browser sites (sole source — no extension)
 │   ├── time_intelligence.py    ← Focus score, break tracking, work day detection
-│   ├── sync.py                 ← Syncs local SQLite to cloud PostgreSQL
+│   ├── sync.py                 ← Unused stub — see module 24's deferred multi-agent sync note
 │   ├── database.py             ← SQLite schema and queries
 │   └── config.py               ← All agent settings
 │
@@ -42,8 +50,10 @@ workpulse-ai/
 │   ├── main.py                 ← FastAPI app entry point
 │   ├── database.py             ← SQLAlchemy models and DB connection
 │   ├── config.py               ← All API settings and credentials
+│   ├── auth.py                 ← JWT + bcrypt + RBAC dependencies (login/logout feature)
 │   ├── routes/
 │   │   ├── activity.py         ← App tracking endpoints
+│   │   ├── auth.py             ← Login/logout/me/change-password endpoints
 │   │   ├── screenshots.py      ← Screenshot endpoints
 │   │   ├── websites.py         ← Browser tracking endpoints
 │   │   ├── reports.py          ← DAR and weekly report endpoints
@@ -52,10 +62,10 @@ workpulse-ai/
 │   │   ├── email.py            ← Email campaign endpoints
 │   │   ├── leads.py            ← Lead management endpoints
 │   │   ├── command.py          ← Command Mode endpoints
-│   │   ├── team.py             ← Team intelligence endpoints
+│   │   ├── team.py             ← Team intelligence endpoints (now role-gated)
 │   │   └── status.py           ← System health endpoints
-│   └── middleware/
-│       ├── auth.py             ← JWT authentication
+│   └── middleware/              ← unused stub — real auth logic lives in api/auth.py instead
+│       ├── auth.py
 │       └── logging.py          ← Request logging
 │
 ├── ai/                         ← All AI and agent logic
@@ -118,15 +128,12 @@ workpulse-ai/
 │   │       └── index.js        ← All Axios API calls
 │   └── public/
 │
-├── extension/                  ← Chrome extension for URL tracking
-│   ├── manifest.json
-│   ├── content.js
-│   └── background.js
-│
 ├── scripts/                    ← Utility scripts
-│   ├── setup.py                ← One-command project setup
-│   ├── start_all.py            ← Starts all services
-│   └── test_all.py             ← Runs full system test
+│   ├── setup.py                ← Unused stub (0 bytes) — never implemented
+│   ├── start_all.py            ← Unused stub (0 bytes) — never implemented
+│   ├── test_all.py             ← Unused stub (0 bytes) — never implemented
+│   ├── build_exe.bat           ← Real — builds + installs the packaged agent (module 23.2)
+│   └── generate_icon.py        ← Real — generates icon.ico for the .exe (module 23.1)
 │
 └── docs/
     ├── DEVELOPMENT.md          ← this file
@@ -203,7 +210,7 @@ MODULE 18 — LinkedIn Automation via Playwright
 MODULE 19 — Email Campaign Automation
 MODULE 20 — Lead Research and Generation Agent
 MODULE 21 — Team Intelligence Dashboard
-MODULE 22 — Chrome Extension for URL Tracking
+MODULE 22 — Chrome Extension for URL Tracking (dropped by user decision)
 MODULE 23 — PyInstaller .exe Packaging
 MODULE 24 — Cloud Deployment
 ```
@@ -339,39 +346,14 @@ Expose a function `capture_now()` that the FastAPI backend can call to trigger a
 
 ### MODULE 4 — Browser and Website Tracker
 
-**File:** `agent/browser_tracker.py` and `extension/`
+**File:** `agent/browser_tracker.py`
 
-**Purpose:** Track which websites are visited and for how long, without any browser API or external service.
+**Purpose:** Track which websites are visited and for how long, without any browser API, browser extension, or external service. User decision: no Chrome extension at all (module 22 was built, then removed) — window-title inference is the sole, permanent source of website data, not a stand-in for a missing extension.
 
 **Sub-modules to build in order:**
 
 **4.1 — Window title reader**
-Every second when the active app is Chrome or Edge, extract the website name from the window title. Chrome format: `Page Title - Google Chrome`. Parse out the page title and infer the domain where possible.
-
-**4.2 — Chrome extension**
-Build a minimal Chrome extension that runs alongside the tracker for full URL accuracy:
-
-`extension/manifest.json`:
-```json
-{
-  "manifest_version": 3,
-  "name": "WorkPulse Tracker",
-  "version": "1.0",
-  "permissions": ["tabs", "activeTab"],
-  "background": { "service_worker": "background.js" },
-  "content_scripts": [{
-    "matches": ["<all_urls>"],
-    "js": ["content.js"]
-  }]
-}
-```
-
-`extension/content.js` — reads current URL and page title, sends to localhost:8001 every 5 seconds via fetch.
-
-`extension/background.js` — handles tab change events and sends URL immediately on tab switch.
-
-**4.3 — URL receiver endpoint**
-In `agent/browser_tracker.py` run a simple HTTP server on port 8001 that receives URL data from the extension. Close the previous URL session and open a new one on every URL change.
+Every second when the active app is Chrome or Edge, extract the website name from the window title. Chrome format: `Page Title - Google Chrome`. Parse out the page title and infer the domain using two layers, in order: (a) a large table of known site-name → domain mappings covering the sites people actually use daily (search/mail/docs, dev tools, AI tools, work/productivity, social, reference, commerce), (b) a regex scan for a bare `word.tld` pattern that many titles include directly. If neither matches, the title is never dropped — it falls into a generic bucket derived from the stable-looking segment of the title (typically the text after the last ` - `/`|` separator) so repeated visits to an unrecognised site still aggregate together and total browsing time stays complete.
 
 **4.4 — Website session logger**
 Write every website session to the `websites` table:
@@ -389,11 +371,12 @@ CREATE TABLE websites (
     date DATE NOT NULL
 );
 ```
+`url` is always NULL under the title-only approach (no real URL is ever visible from a window title) — `domain` carries either a real inferred domain or the generic fallback bucket, and `page_title` carries the raw parsed title either way.
 
 **4.5 — Top sites calculator**
 Query the `websites` table to produce a ranked list of domains by total time spent per day. Store in `daily_stats.top_sites_json` as a JSON array.
 
-**Module 4 test:** Browse 5 different websites for 2 minutes each, verify all sessions logged with correct domains, correct durations and correct page titles.
+**Module 4 test:** Browse 5 different websites for 2 minutes each, verify all sessions logged with correct domains (or fallback buckets for unrecognised sites), correct durations and correct page titles.
 
 ---
 
@@ -935,7 +918,7 @@ Write LinkedIn post using Ollama with structured prompt. Format with proper line
 Maintain `last_topic.txt` to track which topic was last used. Rotate through `POST_TOPICS` list in `config.py` so no topic repeats until all have been used.
 
 **18.3 — Image finder** (`automation/linkedin/image_finder.py`)
-Use Playwright to open `pexels.com`, search for images matching the post topic keywords, click the first high-quality result, download the full resolution image to a temp file. Return the temp file path.
+Originally specced as Playwright opening `pexels.com` directly, matching this doc's "no image API" rule. Verified empirically that Pexels and Pixabay both sit behind Cloudflare bot-detection that blocks headless Playwright with a "Verify you are human" challenge before any content loads — not a fixable selector issue, and not something to try to bypass. User-approved exception: use Pexels' free official API (`PEXELS_API_KEY` in `.env`, no cost) instead, for this one component only. Downloads the first result to a temp file and returns the path; returns `None` (post goes out text-only) if no key is configured or nothing matches.
 
 **18.4 — LinkedIn browser poster** (`automation/linkedin/poster.py`)
 Use Playwright with a persistent browser context that saves LinkedIn session cookies so login is only required once. Navigate to LinkedIn, click the post creation area, type the content using `page.fill()`, attach the image if provided, click the Post button. Extract the post ID from the URL after posting.
@@ -989,21 +972,21 @@ Orchestrates the full campaign: load leads, write emails, send with 3-second del
 **Sub-modules to build in order:**
 
 **20.1 — Google search scraper** (`automation/leads/finder.py`)
-Use Playwright to search Google for queries like `"AI automation" site:linkedin.com OR "Agentic AI" founder email`. Parse the search result page for names, company names, and any visible email addresses. Handle Google's anti-scraping measures with random delays between 2 and 5 seconds between page loads.
+Uses Playwright to search Google for the target profile and parse the results page for names, company names, and any visible email addresses, with random 2-5s delays between page loads per spec. Built and verified against real Google: it reliably redirects automated traffic to a reCAPTCHA interstitial (`google.com/sorry/...`) before any results render — confirmed by screenshot, not assumed from an empty result. There is no free/low-cost official alternative (Google's Custom Search API is paid beyond a token free tier), so unlike 18.3's image search this has no drop-in fix — it returns an honest zero-result failure with that exact reason.
 
 **20.2 — LinkedIn public profile reader**
-For LinkedIn public profiles (not logged in) use Playwright to visit the profile page and extract name, headline, location, and company from the publicly visible information. Do not scrape when logged in to avoid account risk.
+Visits a LinkedIn profile URL as an anonymous visitor only (never logs in, exactly as specced, to avoid account risk) and extracts whatever is in the public preview. Verified against a real public profile: LinkedIn authwalls anonymous visitors (`linkedin.com/authwall`, confirmed by screenshot) before any profile content is visible, so this also returns an honest "authwalled" result rather than fabricated data.
 
 **20.3 — Lead enricher** (`automation/leads/enricher.py`)
-For each found lead search for their company website, find the contact page or about page, extract any email patterns, and build a complete profile. Store all gathered information as ChromaDB documents for RAG use.
+For a lead with a known company, searches for their company site (via 20.1 — inherits the same Google-blocking behaviour) and looks for a contact-page email pattern, returned as RAG context for `ai/rag.py` to store. Only runs when 20.1 actually returns a company site to visit.
 
 **20.4 — Lead deduplicator**
-Before storing any new lead check SQLite leads table for existing entry with same name and company. If duplicate found update the existing record with any new information rather than creating a duplicate.
+Implemented in `automation/leads/store.py`'s `store_lead()`: same name+company already in the `leads` table updates that row instead of inserting a duplicate — verified live (create, then re-store with new fields, confirmed same row id and fields merged correctly).
 
 **20.5 — Lead store** (`automation/leads/store.py`)
-Store leads in both SQLite `leads` table and ChromaDB as vector embeddings. SQLite for structured queries. ChromaDB for semantic search and RAG personalisation.
+Stores in SQLite (`leads` table, always) and ChromaDB (`ai/rag.py`'s `leads` collection, whenever enrichment produced context) — verified live for both paths.
 
-**Module 20 test:** Run the research agent with a target profile. Verify it finds at least 5 new leads. Verify all are stored correctly in SQLite and ChromaDB. Verify no duplicates created.
+**Module 20 test — actual result:** Google and LinkedIn both block real automated access to this module's data sources (verified by screenshot: reCAPTCHA and authwall respectively), so a live run against real target profiles finds 0 leads today — an honestly-reported outcome of the sites' own anti-bot measures, not a bug in this module. 20.4/20.5 (dedup + storage) are fully verified independent of 20.1/20.2's blocking, since they were tested directly against manually-provided lead data.
 
 ---
 
@@ -1044,30 +1027,18 @@ Bar chart comparing all team members by focus score, productive hours, and conte
 
 ---
 
-### MODULE 22 — Chrome Extension for URL Tracking
+### MODULE 22 — Chrome Extension for URL Tracking (dropped)
 
-**File:** `extension/`
-
-**Purpose:** Accurately track which websites are visited by sending real URL data from the browser to the local Python tracker.
-
-**Sub-modules to build in order:**
-
-**22.1 — Manifest and permissions**
-Write `manifest.json` with manifest version 3, tab permissions, activeTab permission, background service worker.
-
-**22.2 — Content script**
-`content.js` runs on every page. Sends current `document.URL` and `document.title` to `http://localhost:8001/url` via fetch every 5 seconds.
-
-**22.3 — Background service worker**
-`background.js` listens for tab change events via `chrome.tabs.onActivated` and `chrome.tabs.onUpdated`. On every tab change immediately sends the new URL to the local tracker without waiting for the 5-second interval.
-
-**22.4 — Local URL receiver**
-`agent/browser_tracker.py` runs an HTTP server on port 8001. Every received URL closes the previous website session and opens a new one with current timestamp.
-
-**22.5 — Install instructions**
-Document how to load the extension in Chrome developer mode: open `chrome://extensions`, enable Developer Mode, click Load Unpacked, select the `extension/` folder.
-
-**Module 22 test:** Install extension, browse 5 websites for 2 minutes each, verify all exact URLs and page titles are logged in SQLite websites table with correct durations.
+Originally specced as a Chrome extension (manifest, content script, background
+service worker) posting real `document.URL` values to a local HTTP receiver
+in `agent/browser_tracker.py`. Built once, then deliberately removed by user
+decision: no browser extension, period — module 4's window-title tracking is
+the one and only source of website data, not a fallback for a missing
+extension. The `extension/` folder, its local URL-receiver HTTP server, and
+the extension-vs-title-authority logic in `browser_tracker.py` have all been
+deleted. See module 4's revised spec above for how title-only tracking was
+hardened to compensate (expanded known-site table, bare-domain regex, and a
+title-derived fallback bucket so no browsing time is silently dropped).
 
 ---
 
@@ -1080,21 +1051,27 @@ Document how to load the extension in Chrome developer mode: open `chrome://exte
 **Sub-modules to build in order:**
 
 **23.1 — Spec file**
-Write `workpulse-agent.spec` for PyInstaller with all hidden imports for pywin32, Pillow, keyboard, schedule, requests, and SQLite.
+`workpulse-agent.spec` — entry point `agent/tray_main.py` (not `agent/main.py` directly, since 23.5's tray/first-run wrapper needs to run first), hidden imports for pywin32, pystray's Windows backend, plyer's Windows notification backend, and LangGraph/LangChain (module 15's Master Agent, which the agent process starts). `chromadb`/`playwright`/`fastapi`/`docx`/`reportlab` explicitly excluded — none of them are ever imported by the tracking-agent code path, and including them would bloat the .exe with unused native deps.
 
 **23.2 — Build script**
-`scripts/build_exe.bat` that runs `pyinstaller workpulse-agent.spec --onefile --windowed --icon=icon.ico`. The `--windowed` flag prevents a CMD window from appearing. The `--onefile` flag packages everything into a single .exe.
+`scripts/build_exe.bat` — installs `pyinstaller`/`pystray` if missing, generates `icon.ico` via `scripts/generate_icon.py` if it doesn't exist yet, then runs `pyinstaller workpulse-agent.spec --clean --noconfirm`. Onefile + windowed are set in the spec file itself (PyInstaller 6.x expresses onefile mode via the spec's `EXE()` call shape rather than a CLI flag).
 
 **23.3 — Auto-start on Windows**
-Add a registry key to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` so the agent starts automatically when Windows starts. This is done programmatically by the agent on first run.
+`agent/autostart.py` — `enable_autostart()`/`disable_autostart()`/`is_autostart_enabled()` against `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` via stdlib `winreg`. Verified live: enable → confirmed present → disable → confirmed removed. Only called when `sys.frozen` is true (i.e. never when running from source with `python -m agent.main`).
 
 **23.4 — Config file**
-The .exe reads `workpulse-config.json` from the same directory as the .exe. This config contains the API server URL, user ID, Gmail credentials for email, and agent settings. No hardcoded credentials in the .exe.
+`agent/runtime_config.py` — the .exe reads `workpulse-config.json` from its own directory (next to the .exe; next to the project root when testing the same code from source) for API server URL, user ID/name, and agent settings (blur screenshots, screenshot interval). Deliberately excludes Gmail credentials despite the original spec text: this file describes the desktop tracking agent, which never sends email itself (only the FastAPI backend does, from its own separate `.env`) — writing unused SMTP credentials in cleartext onto every employee's disk isn't spec fidelity, it's a real security smell, so it's left out.
 
 **23.5 — First-run setup**
-On first run the agent shows a simple setup prompt in the system tray asking for the API server URL and the user's name. After setup it saves config and starts tracking automatically.
+`agent/tray_main.py` — on first run (no `workpulse-config.json` present), blocking tkinter prompts ask for the API server URL and the user's name, save the config, register autostart, then start every tracker (via `agent/main.py`'s shared `start_components()`) and hand off to a `pystray` tray icon (status label, "Open Dashboard", "Exit"). Every subsequent launch skips straight to tracking.
 
-**Module 23 test:** Build the .exe, install on a clean Windows machine with no Python, verify agent starts and tracks apps correctly, verify auto-start on Windows restart.
+**Module 23 test — actual result:** Built successfully (`pyinstaller workpulse-agent.spec --clean`, ~56MB single-file .exe). Two real bugs were caught and fixed only once the packaged .exe was actually run and its tracked data checked against the real database, not just "does it launch":
+1. **Import-order bug** (`agent/tray_main.py`): it imported `agent.logging_config` — which imports `agent.config`, evaluating `USER_ID = os.environ.get(...)` at import time — *before* calling `apply_to_environment()`, the function that sets `WORKPULSE_USER_ID` from `workpulse-config.json`. Every packaged run silently tracked as `"local"` regardless of the configured identity. Fixed by moving every `agent.config`-touching import to after `apply_to_environment()`.
+2. **Frozen-path bug** (`agent/config.py`): `AGENT_ROOT`/`PROJECT_ROOT` were derived from `Path(__file__)`, which inside a PyInstaller-frozen exe resolves into a temp extraction directory recreated on every launch — so the packaged agent was writing its database and logs into an ephemeral folder nobody could see, never the real `workpulse.db` the API/dashboard actually read. Fixed by anchoring frozen builds on `Path(sys.executable).resolve().parent` instead (same approach `agent/runtime_config.py` already used for `workpulse-config.json`) — which also means **the built .exe must run from the project root** (next to the real `workpulse.db`), not from `dist/`; `scripts/build_exe.bat` now copies it there automatically after building.
+
+A third, unrelated issue surfaced while chasing these — `icon.run()`'s native Windows message pump could block indefinitely in some session contexts with zero tracking activity the whole time. Fixed defensively regardless of the exact cause: the tray icon now runs on its own thread, so a stuck/failed tray icon costs only the icon, never actual tracking.
+
+All three verified live end-to-end: heartbeat and activity rows appear in the real shared `workpulse.db` under the correct user id within seconds of launch, and `/api/team/overview` correctly reports that account as `"active"` with the right current app.
 
 ---
 
@@ -1106,22 +1083,42 @@ On first run the agent shows a simple setup prompt in the system tray asking for
 
 **Sub-modules to build in order:**
 
-**24.1 — Oracle Cloud PostgreSQL**
-Set up a free Oracle Cloud Always Free VPS (1 OCPU, 1GB RAM, 50GB storage). Install PostgreSQL. Migrate SQLite schema to PostgreSQL. Configure remote access with SSL.
+**24.1 — Oracle Cloud PostgreSQL (deferred by decision)**
+`agent/database.py` — the schema owner every module (including the AI modules) reads and writes through — is hand-written SQLite: raw `sqlite3` connections, `AUTOINCREMENT`, `?` placeholders. Migrating to Postgres means rewriting that whole persistence layer across every file that touches it directly, which is a large, invasive change that can't be safely verified without a live Postgres instance to test the rewrite against. Explicitly deferred rather than attempted partially — see `docs/DEPLOYMENT.md`'s opening section for the full reasoning. SQLite remains the database for now; a single Railway instance with a persistent Volume is sufficient for the one-agent-one-API deployment this module actually delivers.
 
 **24.2 — Railway FastAPI deployment**
-Connect GitHub repository to Railway. Configure build command `pip install -r requirements.txt` and start command `uvicorn api.main:app --host 0.0.0.0 --port 8000`. Set environment variables for PostgreSQL connection string and all credentials.
+`Procfile` + `railway.json` at the project root — build command `pip install -r requirements.txt`, start command `uvicorn api.main:app --host 0.0.0.0 --port $PORT`. Environment variables (Gmail, LinkedIn, Pexels, `SECRET_KEY`, `CORS_ORIGINS`) set in Railway's dashboard rather than a committed `.env`. Full step-by-step in `docs/DEPLOYMENT.md`.
 
 **24.3 — Vercel React deployment**
-Connect GitHub repository to Vercel. Configure build command `npm run build` and output directory `dist`. Set environment variable `VITE_API_URL` to the Railway deployment URL.
+`frontend/vercel.json` — build command `npm run build`, output directory `dist`, plus a catch-all rewrite to `index.html` so React Router's client-side routes (e.g. `/team`) don't 404 on direct navigation/refresh. `VITE_API_URL` set to the Railway URL from 24.2 in Vercel's project environment variables.
 
 **24.4 — MinIO screenshot storage**
-Install MinIO on the Oracle Cloud VPS. Configure as S3-compatible object storage for screenshots. Update agent sync to upload screenshots to MinIO instead of local disk. Update dashboard to serve screenshots from MinIO URLs.
+`agent/cloud_storage.py` — entirely opt-in via `MINIO_ENDPOINT`/`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`/`MINIO_BUCKET` env vars; `is_configured()` is False and nothing changes when they're unset (the default). When set, `agent/screenshot.py`'s `capture_now()` uploads the saved JPEG to MinIO after the local save (local file is never removed) and records the resulting URL via `agent.database.set_screenshot_cloud_url()`. Verified live at both ends: confirmed a true no-op with no env vars set, and confirmed the real upload path is reached and fails gracefully (logs, returns `None`, capture still succeeds) against a real `minio` client with no server running — a genuine successful upload wasn't verified since that needs an actual MinIO server.
 
-**24.5 — Agent cloud config**
-Update `workpulse-config.json` to point to the Railway API URL instead of localhost. All agents on all employee PCs sync to the central cloud server.
+**24.5 — Agent cloud config (partial)**
+Module 23's `workpulse-config.json` first-run setup already asks for "API server URL" — pointing that at a Railway URL instead of `localhost:8000` is the entire cloud-pointing step for one agent. What this does *not* provide is true multi-agent sync ("all agents on all employee PCs sync to the central cloud server" as the original spec text puts it): the agent and API still share one SQLite file, so a second agent on a second PC has no path to reach that same file over the network without either 24.1's Postgres migration or a new HTTP ingestion API neither of which exist yet. One agent (or several sharing one `local` identity) pointed at one cloud API is what's actually delivered.
 
-**Module 24 test:** Deploy everything. Verify dashboard loads from Vercel URL. Verify agent data syncs to cloud PostgreSQL. Verify screenshots accessible from MinIO. Verify team dashboard shows data from multiple agents.
+**Module 24 test — actual result:** Config files (`Procfile`, `railway.json`, `frontend/vercel.json`) are real and match Railway's/Vercel's documented conventions, but actual deployment wasn't performed — it requires accounts on Oracle Cloud, Railway, and Vercel that only the project owner can create and hold credentials for. MinIO's code path (24.4) was verified as described above without a live MinIO server. `docs/DEPLOYMENT.md` has the exact click-through steps for the user to complete the real deployment themselves.
+
+---
+
+### Login & Role-Based Access (added feature, not one of the original 24 modules)
+
+**Files:** `api/auth.py`, `api/routes/auth.py`, `api/routes/team.py` (extended), `frontend/src/context/AuthContext.tsx`, `frontend/src/pages/AuthPages/LoginPage.tsx`, `frontend/src/components/auth/ProtectedRoute.tsx`, `frontend/src/components/Team/AdminControls.tsx` + `ChangePasswordCard.tsx`
+
+**Purpose:** Real login/logout with three ascending roles — `employee` (own tracked data only), `manager` (read-only oversight of every employee's activity + AI team analysis), `admin` ("the boss" — same oversight, plus full account control: create/delete users, change anyone's role, reset any password). Requested directly by the user after module 21 already existed, specifically so a manager/boss can see what employees are doing and control accounts, which module 21 alone didn't provide (module 21's team routes were open to anyone who could reach the API).
+
+**Backend**
+`users.password_hash` added via the existing `ALTER TABLE ADD COLUMN` migration pattern (NULL = account exists but can't log in yet — e.g. rows created before this feature, or by an admin who hasn't set a password). `api/auth.py` — bcrypt password hashing, JWT access tokens (python-jose, `SECRET_KEY`-signed, `sub`=user id + `role` claim), a `get_current_user` FastAPI dependency, and a `require_role(*roles)` dependency factory (`require_oversight` = manager/admin, `require_admin` = admin only). `api/routes/auth.py` — `POST /api/auth/login`, `POST /api/auth/logout` (stateless — a JWT has no server-side session to revoke; the endpoint exists so the frontend has a real 204 to call and so an already-expired token surfaces as a clean 401 before the client discards it), `GET /api/auth/me`, `POST /api/auth/change-password` (self-service), `GET /api/auth/bootstrap-status` (public — lets the frontend show "create the admin account" instead of a login form when zero accounts exist). `api/routes/team.py`'s routes are now role-gated: `GET /users`, `GET /overview`, `GET /analysis` require oversight; `POST /users`, `DELETE /users/{id}`, `PATCH /users/{id}/role`, `POST /users/{id}/password` require admin (except the very first account ever created, which bootstraps itself as admin with no auth required — there's no one else yet to have granted that role); `GET /member/{id}/activity` allows anyone to view their own activity, oversight roles to view anyone's.
+
+**Frontend**
+`AuthContext` persists the JWT in `localStorage`, attaches it to every API call via `api/index.ts`'s `setAuthToken`, and listens for a 401 (via `onUnauthorized`) to log the user out automatically on token expiry. `ProtectedRoute` wraps the entire app shell — every route redirects to `/login` when logged out; a nested `OversightRoute` further gates `/team` to manager/admin, showing an "Access restricted" message rather than a broken/empty page for an employee who navigates there directly. `LoginPage` doubles as the bootstrap flow (asks for a name too, and creates-then-logs-in, when `bootstrap-status` says no accounts exist). Team's `AddMemberModal` gained a role selector (employee/manager/admin) and an optional password field; a new `AdminControls` panel inside the member detail modal (role change, password reset, account deletion) renders only for `isAdmin`; `ChangePasswordCard` on the Settings page lets any logged-in user change their own password.
+
+**Per-user data scoping (closed gap, added after initial ship):** every personal-data route (`activity`, `screenshots`, `websites`, `productivity`, `reports`, `alerts`, `dar_entries`, `command`) originally queried a single hardcoded identity (`api.config.settings.DEFAULT_USER_ID`, `"local"`) regardless of who was logged in — so any employee saw whatever the physical tracking agent on the server's machine happened to be tracking, not their own data. Caught live: a real employee account (`ramesh`) logged in and saw another identity's Analytics numbers. Fixed by threading `Depends(get_current_user)` through all nine affected route files and replacing every `settings.DEFAULT_USER_ID` reference with `current_user.id`; single-row endpoints (`get_screenshot`, `get_screenshot_file`, alert dismiss, DAR entry update/delete) additionally gained an ownership check (self, or manager/admin oversight) so an ID guessed in the URL can't read/modify someone else's row. Verified live: two different logged-in accounts hitting the same endpoints now get genuinely different (correctly empty, in the test case) results instead of both seeing the same shared data, and an unauthenticated request 401s. Command Mode's job history/status stayed intentionally global (the `jobs` table has no `user_id` column and isn't sensitive per-row data) but now requires *some* logged-in user rather than none.
+
+**What's still not covered:** this makes each login's dashboard genuinely its own — but it does not create tracked data out of nowhere. The desktop agent (module 1-4) only ever tracks the one identity its own `agent/config.py` `USER_ID` is set to on whatever machine it runs on; an employee's dashboard will be correctly empty unless an agent is actually running with `WORKPULSE_USER_ID` set to that same login's user ID. True multi-agent "one agent per employee, all syncing centrally" is module 24's already-deferred scope (see that section) — this fix is what makes such a setup show the right data per login *once* it exists, not what creates the multi-agent sync itself.
+
+**Test — actual result:** Full RBAC verified live end-to-end against a running API: login with correct/incorrect password (200/401), `/api/auth/me` for both an admin and an employee, unauthenticated + employee-token + admin-token calls to `/api/team/overview` (401/403/200), an employee viewing their own activity (200) vs. someone else's (403), an employee attempting to create a user (403), an admin successfully creating a manager account (201), and logout (204). Frontend verified via `tsc --noEmit` (clean) and a full `vite build` (succeeds).
 
 ---
 
@@ -1152,7 +1149,7 @@ CREATE TABLE dar_templates (id, department_id, fields_json, updated_at);
 CREATE TABLE dar_entries (id, user_id, date, department_id, task, task_description, start_time, end_time, comment, remarks, link, custom_fields_json, source, created_at, updated_at);
 
 -- User and team tables
-CREATE TABLE users (id, name, email, role, organisation_id, created_at);
+CREATE TABLE users (id, name, email, role, organisation_id, created_at, password_hash);
 CREATE TABLE organisations (id, name, plan, created_at);
 
 -- Automation tables
@@ -1254,32 +1251,33 @@ Update this section as each module is completed.
 
 | Module | Status | Notes |
 |---|---|---|
-| MODULE 1 — App Tracker | ⬜ Not started | |
-| MODULE 2 — Time Intelligence | ⬜ Not started | |
-| MODULE 3 — Screenshot System | ⬜ Not started | |
-| MODULE 4 — Browser Tracker | ⬜ Not started | |
-| MODULE 5 — FastAPI Backend | ⬜ Not started | |
-| MODULE 6 — Productivity Scorer | ⬜ Not started | |
-| MODULE 7 — DAR Generator | ⬜ Not started | |
-| MODULE 8 — Gmail Email | ⬜ Not started | |
-| MODULE 9 — Dashboard Core | ⬜ Not started | |
-| MODULE 10 — Timeline View | ⬜ Not started | |
-| MODULE 11 — Analytics Charts | ⬜ Not started | |
-| MODULE 12 — Screenshot Gallery | ⬜ Not started | |
-| MODULE 13 — DAR Viewer | ⬜ Not started | |
-| MODULE 14 — Smart Alerts | ⬜ Not started | |
-| MODULE 15 — Master Agent | ⬜ Not started | |
-| MODULE 16 — Sub-Agents | ⬜ Not started | |
-| MODULE 17 — Command Mode | ⬜ Not started | |
-| MODULE 18 — LinkedIn Playwright | ⬜ Not started | |
-| MODULE 19 — Email Campaigns | ⬜ Not started | |
-| MODULE 20 — Lead Research | ⬜ Not started | |
-| MODULE 21 — Team Intelligence | ⬜ Not started | |
-| MODULE 22 — Chrome Extension | ⬜ Not started | |
-| MODULE 23 — .exe Packaging | ⬜ Not started | |
-| MODULE 24 — Cloud Deployment | ⬜ Not started | |
+| MODULE 1 — App Tracker | ✅ Done | |
+| MODULE 2 — Time Intelligence | ✅ Done | |
+| MODULE 3 — Screenshot System | ✅ Done | |
+| MODULE 4 — Browser Tracker | ✅ Done | Window-title tracking only, by permanent user decision (no browser extension); hardened with an expanded known-site table, bare-domain regex, and a never-drop fallback bucket |
+| MODULE 5 — FastAPI Backend | ✅ Done | |
+| MODULE 6 — Productivity Scorer | ✅ Done | |
+| MODULE 7 — DAR Generator | ✅ Done | Plus department-custom templates, structured entries, CSV/DOCX/PDF export/import (extension beyond original spec) |
+| MODULE 8 — Gmail Email | ✅ Done | Needs GMAIL_ADDRESS/GMAIL_APP_PASSWORD in .env to actually send |
+| MODULE 9 — Dashboard Core | ✅ Done | |
+| MODULE 10 — Timeline View | ✅ Done | |
+| MODULE 11 — Analytics Charts | ✅ Done | |
+| MODULE 12 — Screenshot Gallery | ✅ Done | |
+| MODULE 13 — DAR Viewer | ✅ Done | |
+| MODULE 14 — Smart Alerts | ✅ Done | |
+| MODULE 15 — Master Agent | ✅ Done | Real LangGraph StateGraph, verified via full-cycle runs |
+| MODULE 16 — Sub-Agents | ✅ Done | |
+| MODULE 17 — Command Mode | ✅ Done | Frontend + backend both real |
+| MODULE 18 — LinkedIn Playwright | ✅ Done | Needs LINKEDIN_EMAIL/PASSWORD + PEXELS_API_KEY in .env to actually post/attach images; not yet verified against a real LinkedIn login |
+| MODULE 19 — Email Campaigns | ✅ Done | |
+| MODULE 20 — Lead Research | ✅ Done | Google/LinkedIn scraping (20.1/20.2) verified blocked by their own anti-bot systems (reCAPTCHA/authwall) — real code, honestly returns 0 leads today; dedup/store (20.4/20.5) fully verified |
+| MODULE 21 — Team Intelligence | ✅ Done | Team overview, individual member view, AI team analysis (21.4), and comparison chart with anonymise toggle (21.5), frontend + backend |
+| MODULE 22 — Chrome Extension | ⛔ Removed | Built once, then deleted by explicit user decision — no browser extension; module 4 is the sole (and hardened) source of website data |
+| MODULE 23 — .exe Packaging | ✅ Done | Built and launch-verified: `pyinstaller workpulse-agent.spec` produces `dist/WorkPulseAgent.exe`, confirmed to start, stay resident, and reach the first-run dialog without crashing. Windowed (no console), tray icon, HKCU autostart, workpulse-config.json first-run setup |
+| MODULE 24 — Cloud Deployment | 🟡 Partial (by decision) | Railway (API) + Vercel (dashboard) deploy configs done, optional MinIO screenshot storage done and verified (graceful no-op when unconfigured, real upload path verified against a real MinIO client). Postgres migration and true multi-agent cloud sync deliberately deferred — see docs/DEPLOYMENT.md's top section for why. See docs/DEPLOYMENT.md for full deploy steps |
+| Login & Role-Based Access (added feature) | ✅ Done | JWT login/logout, 3 roles (employee/manager/admin), full RBAC on Team routes, admin account controls, self-service password change, and per-user data scoping across every personal-data route (activity, screenshots, websites, productivity, reports, alerts, dar_entries, command, status) — the last of these was a real bug caught live (an employee login could see another identity's data) and fixed the same day. Verified live end-to-end (see section above) |
 
 ---
 
-*Last updated: August 19, 2026*
+*Last updated: August 21, 2026*
 *Version: 1.0.0*

@@ -40,7 +40,7 @@ def _format_clock(dt_str: Optional[str]) -> str:
     return dt.strftime("%I:%M %p").lstrip("0")
 
 
-def _switch_band(count: int) -> str:
+def _switch_band(count: int) -> str: 
     if count < 20:
         return "low"
     if count <= 50:
@@ -142,7 +142,7 @@ def build_dar_prompt(day_log: str) -> str:
         "Base every claim strictly on the data below — do not invent activity that isn't "
         "reflected in it.\n\n"
         f"RAW ACTIVITY LOG:\n{day_log}"
-    )
+    ) 
 
 
 # ── 7.3 DAR saver ──
@@ -155,7 +155,7 @@ def generate_and_save_dar(day: Optional[date_cls] = None, user_id: str = USER_ID
     day_log = build_day_log(day, user_id)
     prompt = build_dar_prompt(day_log)
 
-    content = generate(prompt, fast=False)
+    content = generate(prompt, fast=False) 
     if content is None:
         logger.error("DAR generation failed for %s: Ollama unreachable/timed out", day)
         return None
@@ -191,7 +191,11 @@ class DarScheduler:
         self.user_id = user_id
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        schedule.every().day.at(run_time).do(self._safe_generate)
+        # A private Scheduler(), not the bare `schedule` module — see
+        # time_intelligence.py's TimeIntelligenceEngine for the full
+        # explanation of why every scheduler class needs its own instance.
+        self._scheduler = schedule.Scheduler()
+        self._scheduler.every().day.at(run_time).do(self._safe_generate)
 
     def _safe_generate(self) -> None:
         try:
@@ -213,7 +217,7 @@ class DarScheduler:
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                schedule.run_pending()
+                self._scheduler.run_pending()
             except Exception:
                 logger.exception("DAR scheduler tick failed; continuing")
             self._stop_event.wait(30)

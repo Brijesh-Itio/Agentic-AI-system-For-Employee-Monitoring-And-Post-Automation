@@ -5,6 +5,7 @@ import { Focus, Frown, HeartPulse, Loader2, Users } from "lucide-react";
 import PageMeta from "../../components/common/PageMeta";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/shadcn/card";
 import { getAlertPreferences, updateAlertPreference, type AlertType, type AlertPreference } from "@/api";
+import ChangePasswordCard from "@/components/Team/ChangePasswordCard";
 
 const ALERT_META: Record<AlertType, { label: string; description: string; icon: typeof Focus; disabled?: boolean }> = {
   focus: {
@@ -74,6 +75,8 @@ export default function SettingsPage() {
           <h1 className="text-xl font-bold text-gray-900 dark:text-white">Settings</h1>
           <p className="text-theme-sm text-gray-500 dark:text-gray-400">Configure alert preferences.</p>
         </div>
+
+        <ChangePasswordCard />
 
         <Card>
           <CardHeader>

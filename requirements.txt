@@ -6,6 +6,7 @@ keyboard==0.13.5
 schedule==1.2.2
 requests==2.34.2
 plyer==2.1.0
+pystray==0.19.5
 
 # ── API Backend (Module 5) ──
 fastapi==0.115.0
@@ -15,6 +16,7 @@ pydantic==2.9.2
 pydantic-settings==2.5.2
 python-jose[cryptography]==3.3.0
 python-multipart==0.0.9
+bcrypt==4.2.0
 
 # ── AI / Agentic Stack ──
 # ollama + chromadb installed for Module 6 (classification + vector memory).
@@ -34,3 +36,8 @@ reportlab==4.2.5
 
 # ── Utilities ──
 python-dotenv==1.0.1
+
+# ── Optional cloud screenshot storage (Module 24.4) ──
+# Only actually used if MINIO_* env vars are set (agent/cloud_storage.py
+# imports it lazily); harmless to have installed otherwise.
+minio==7.2.9

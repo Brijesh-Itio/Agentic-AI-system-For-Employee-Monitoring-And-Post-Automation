@@ -166,6 +166,16 @@ def capture_now(user_id: str = USER_ID) -> dict:
         raise
 
     logger.info("Screenshot captured: %s (blurred=%s)", main_file, is_blurred)
+
+    # 24.4 — optional MinIO mirror; no-op (and no dependency needed) unless
+    # MINIO_* env vars are set. Local file remains the source of truth either way.
+    from agent import cloud_storage
+
+    if cloud_storage.is_configured():
+        cloud_url = cloud_storage.upload_screenshot(str(main_file), f"{now.date().isoformat()}/{main_file.name}")
+        if cloud_url:
+            database.set_screenshot_cloud_url(screenshot_id, cloud_url)
+
     return {
         "id": screenshot_id,
         "file_path": str(main_file),
@@ -186,7 +196,14 @@ class ScreenshotScheduler:
         self.user_id = user_id
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        schedule.every(interval_minutes).minutes.do(self._safe_capture)
+        # A private Scheduler(), not the bare `schedule` module — see
+        # time_intelligence.py's TimeIntelligenceEngine for why: every
+        # scheduler class polling the shared global default scheduler from
+        # its own thread made this job fire once per polling thread,
+        # producing the duplicate screenshots seen live (2-3 near-identical
+        # captures within milliseconds of each other, every 5 minutes).
+        self._scheduler = schedule.Scheduler()
+        self._scheduler.every(interval_minutes).minutes.do(self._safe_capture)
 
     def _safe_capture(self) -> None:
         try:
@@ -209,7 +226,7 @@ class ScreenshotScheduler:
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                schedule.run_pending()
+                self._scheduler.run_pending()
             except Exception:
                 logger.exception("Screenshot scheduler tick failed; continuing")
             self._stop_event.wait(1)

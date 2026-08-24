@@ -1,4 +1,4 @@
-"""MODULE 5.5 — Productivity routes.
+"""MODULE 5.5 — Productivity routes. Scoped to the logged-in user.
 
 get_weekly_trend, get_patterns etc. are module 5.5. daily-scores,
 focus-sessions/today, and heatmap were added for module 11 (Analytics),
@@ -14,8 +14,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from agent.time_intelligence import TimeIntelligenceEngine, compute_focus_runs
-from api.config import settings
-from api.database import ContextSwitchFlag, DailyStats, HourlyScore, WeeklyTrend, get_db
+from api.auth import get_current_user
+from api.database import ContextSwitchFlag, DailyStats, HourlyScore, User, WeeklyTrend, get_db
 from api.schemas import (
     DailyScoreOut,
     FocusSessionOut,
@@ -31,12 +31,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/productivity", tags=["productivity"])
 
 
-def _score_for_date(db: Session, day: date_type) -> ProductivityScoreOut:
-    row = (
-        db.query(DailyStats)
-        .filter(DailyStats.user_id == settings.DEFAULT_USER_ID, DailyStats.date == day)
-        .first()
-    )
+def _score_for_date(db: Session, day: date_type, user_id: str) -> ProductivityScoreOut:
+    row = db.query(DailyStats).filter(DailyStats.user_id == user_id, DailyStats.date == day).first()
     if row is None:
         return ProductivityScoreOut(date=day)
 
@@ -53,20 +49,22 @@ def _score_for_date(db: Session, day: date_type) -> ProductivityScoreOut:
 
 
 @router.get("/score/today", response_model=ProductivityScoreOut)
-def get_today_score(db: Session = Depends(get_db)):
-    return _score_for_date(db, date_type.today())
+def get_today_score(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return _score_for_date(db, date_type.today(), current_user.id)
 
 
 @router.get("/score/date/{target_date}", response_model=ProductivityScoreOut)
-def get_score_by_date(target_date: date_type, db: Session = Depends(get_db)):
-    return _score_for_date(db, target_date)
+def get_score_by_date(
+    target_date: date_type, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
+    return _score_for_date(db, target_date, current_user.id)
 
 
 @router.get("/weekly", response_model=list[WeeklyTrendOut])
-def get_weekly_trend(db: Session = Depends(get_db)):
+def get_weekly_trend(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     rows = (
         db.query(WeeklyTrend)
-        .filter(WeeklyTrend.user_id == settings.DEFAULT_USER_ID)
+        .filter(WeeklyTrend.user_id == current_user.id)
         .order_by(WeeklyTrend.week_start.desc())
         .limit(12)
         .all()
@@ -75,13 +73,13 @@ def get_weekly_trend(db: Session = Depends(get_db)):
 
 
 @router.get("/patterns", response_model=ProductivityPatternsOut)
-def get_patterns(db: Session = Depends(get_db)):
+def get_patterns(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Best-effort patterns computed live from hourly_scores/context_switch_flags.
     Module 6 (AI pattern analyser) later enriches this with a dedicated,
     14-day-trained `user_patterns` table; this endpoint keeps working either way."""
     peak_rows = (
         db.query(HourlyScore.hour, func.avg(HourlyScore.focus_score).label("avg_score"))
-        .filter(HourlyScore.user_id == settings.DEFAULT_USER_ID, HourlyScore.focus_score.isnot(None))
+        .filter(HourlyScore.user_id == current_user.id, HourlyScore.focus_score.isnot(None))
         .group_by(HourlyScore.hour)
         .order_by(func.avg(HourlyScore.focus_score).desc())
         .limit(3)
@@ -91,7 +89,7 @@ def get_patterns(db: Session = Depends(get_db)):
 
     fragmented_rows = (
         db.query(HourlyScore.hour, func.avg(HourlyScore.switch_count).label("avg_switches"))
-        .filter(HourlyScore.user_id == settings.DEFAULT_USER_ID)
+        .filter(HourlyScore.user_id == current_user.id)
         .group_by(HourlyScore.hour)
         .having(func.avg(HourlyScore.switch_count) > 10)
         .all()
@@ -101,7 +99,7 @@ def get_patterns(db: Session = Depends(get_db)):
     high_switching_today = (
         db.query(func.count(ContextSwitchFlag.id))
         .filter(
-            ContextSwitchFlag.user_id == settings.DEFAULT_USER_ID,
+            ContextSwitchFlag.user_id == current_user.id,
             ContextSwitchFlag.date == date_type.today(),
             ContextSwitchFlag.is_high_switching == 1,
         )
@@ -116,13 +114,13 @@ def get_patterns(db: Session = Depends(get_db)):
 
 
 @router.get("/daily-scores", response_model=list[DailyScoreOut])
-def get_daily_scores(days: int = 7, db: Session = Depends(get_db)):
+def get_daily_scores(days: int = 7, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """11.4 — day-by-day focus scores (not week-aggregated) for a line chart."""
     since = date_type.today() - timedelta(days=days - 1)
     rows = (
         db.query(DailyStats.date, DailyStats.focus_score)
         .filter(
-            DailyStats.user_id == settings.DEFAULT_USER_ID,
+            DailyStats.user_id == current_user.id,
             DailyStats.date >= since,
             DailyStats.date <= date_type.today(),
         )
@@ -137,10 +135,10 @@ def get_daily_scores(days: int = 7, db: Session = Depends(get_db)):
 
 
 @router.get("/focus-sessions/today", response_model=FocusSessionsSummaryOut)
-def get_focus_sessions_today():
+def get_focus_sessions_today(current_user: User = Depends(get_current_user)):
     """11.5 — every focus run today (reusing module 2.6/11's shared
     compute_focus_runs), plus the aggregate stats the summary cards need."""
-    runs = compute_focus_runs(date_type.today(), settings.DEFAULT_USER_ID)
+    runs = compute_focus_runs(date_type.today(), current_user.id)
     if not runs:
         return FocusSessionsSummaryOut(
             session_count=0, average_session_seconds=0, longest_session_seconds=0,
@@ -164,13 +162,15 @@ def get_focus_sessions_today():
 
 
 @router.get("/heatmap", response_model=list[HeatmapCellOut])
-def get_peak_hours_heatmap(days: int = 7, db: Session = Depends(get_db)):
+def get_peak_hours_heatmap(
+    days: int = 7, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
     """11.6 — hour x day focus-score grid for the past N days."""
     since = date_type.today() - timedelta(days=days - 1)
     rows = (
         db.query(HourlyScore.date, HourlyScore.hour, HourlyScore.focus_score)
         .filter(
-            HourlyScore.user_id == settings.DEFAULT_USER_ID,
+            HourlyScore.user_id == current_user.id,
             HourlyScore.date >= since,
             HourlyScore.date <= date_type.today(),
         )

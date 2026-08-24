@@ -1,4 +1,9 @@
-"""MODULE 5.3 — Screenshots routes."""
+"""MODULE 5.3 — Screenshots routes.
+
+Scoped to the logged-in user — an employee only ever sees their own
+screenshots; viewing/serving someone else's requires oversight (manager/
+admin), same rule as team.py's member activity endpoint.
+"""
 import logging
 from datetime import date as date_type
 from pathlib import Path
@@ -7,8 +12,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from api.config import settings
-from api.database import Screenshot, get_db
+from api.auth import get_current_user
+from api.database import Screenshot, User, get_db
 from api.schemas import CaptureScreenshotOut, ScreenshotOut
 
 logger = logging.getLogger(__name__)
@@ -28,11 +33,16 @@ def _to_out(row: Screenshot) -> ScreenshotOut:
     )
 
 
+def _require_access(row_user_id: str, current_user: User) -> None:
+    if row_user_id != current_user.id and current_user.role not in ("manager", "admin"):
+        raise HTTPException(status_code=403, detail="Not authorised to view this user's screenshots")
+
+
 @router.get("/today", response_model=list[ScreenshotOut])
-def get_today_screenshots(db: Session = Depends(get_db)):
+def get_today_screenshots(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     rows = (
         db.query(Screenshot)
-        .filter(Screenshot.user_id == settings.DEFAULT_USER_ID, Screenshot.date == date_type.today())
+        .filter(Screenshot.user_id == current_user.id, Screenshot.date == date_type.today())
         .order_by(Screenshot.timestamp.asc())
         .all()
     )
@@ -40,10 +50,12 @@ def get_today_screenshots(db: Session = Depends(get_db)):
 
 
 @router.get("/date/{target_date}", response_model=list[ScreenshotOut])
-def get_screenshots_by_date(target_date: date_type, db: Session = Depends(get_db)):
+def get_screenshots_by_date(
+    target_date: date_type, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
     rows = (
         db.query(Screenshot)
-        .filter(Screenshot.user_id == settings.DEFAULT_USER_ID, Screenshot.date == target_date)
+        .filter(Screenshot.user_id == current_user.id, Screenshot.date == target_date)
         .order_by(Screenshot.timestamp.asc())
         .all()
     )
@@ -51,21 +63,22 @@ def get_screenshots_by_date(target_date: date_type, db: Session = Depends(get_db
 
 
 @router.get("/{screenshot_id}", response_model=ScreenshotOut)
-def get_screenshot(screenshot_id: int, db: Session = Depends(get_db)):
+def get_screenshot(
+    screenshot_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
     row = db.query(Screenshot).filter(Screenshot.id == screenshot_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail="Screenshot not found")
+    _require_access(row.user_id, current_user)
     return _to_out(row)
 
 
 @router.post("/capture", response_model=CaptureScreenshotOut)
-def capture_screenshot_now():
-    # Imported lazily: pulls in PIL/win32 only when this endpoint is hit,
-    # keeping the API importable on a machine without the desktop deps.
+def capture_screenshot_now(current_user: User = Depends(get_current_user)):
     from agent.screenshot import capture_now
 
     try:
-        result = capture_now(settings.DEFAULT_USER_ID)
+        result = capture_now(current_user.id)
     except Exception:
         logger.exception("Manual screenshot capture failed")
         raise HTTPException(status_code=500, detail="Screenshot capture failed")
@@ -74,13 +87,16 @@ def capture_screenshot_now():
         id=result["id"],
         file_path=result["file_path"],
         thumbnail_path=result["thumbnail_path"],
+        original_path=result["original_path"],
         timestamp=result["timestamp"],
         is_blurred=result["is_blurred"],
     )
 
 
 @router.get("/file/{filename}")
-def get_screenshot_file(filename: str, db: Session = Depends(get_db)):
+def get_screenshot_file(
+    filename: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
     """Serve a screenshot image by filename. Resolved via the DB rather than
     joining user input onto the filesystem path directly, to prevent path
     traversal (`..`, absolute paths, etc.) from ever reaching disk I/O."""
@@ -98,6 +114,7 @@ def get_screenshot_file(filename: str, db: Session = Depends(get_db)):
     )
     if row is None:
         raise HTTPException(status_code=404, detail="Screenshot file not found")
+    _require_access(row.user_id, current_user)
 
     # original_path included so module 12.4's blur toggle can fetch the
     # unblurred audit copy, not just the blurred/manager-facing version.

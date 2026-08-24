@@ -82,6 +82,10 @@ class AppTracker:
         self._switch_timestamps: deque = deque()
         self._window_currently_flagged = False
 
+        # Liveness heartbeat — independent of session boundaries, see
+        # agent_heartbeat's schema comment in agent/database.py.
+        self._last_heartbeat_at: Optional[float] = None
+
     # ── lifecycle ──
 
     def start(self) -> None:
@@ -109,7 +113,21 @@ class AppTracker:
 
     # ── 1.2 session detector ──
 
+    _HEARTBEAT_INTERVAL_SECONDS = 15
+
+    def _maybe_touch_heartbeat(self) -> None:
+        now = time.monotonic()
+        if self._last_heartbeat_at is not None and now - self._last_heartbeat_at < self._HEARTBEAT_INTERVAL_SECONDS:
+            return
+        self._last_heartbeat_at = now
+        try:
+            database.touch_heartbeat(self.user_id)
+        except Exception:
+            logger.exception("Failed to update agent heartbeat")
+
     def poll(self) -> None:
+        self._maybe_touch_heartbeat()
+
         info = get_active_window_info()
         if info is None:
             return

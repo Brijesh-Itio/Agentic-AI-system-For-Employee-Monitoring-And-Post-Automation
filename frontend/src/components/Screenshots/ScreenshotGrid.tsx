@@ -1,6 +1,6 @@
 import type { ActivityLogEntry, ScreenshotEntry } from "@/api";
-import { API_BASE_URL } from "@/api";
 import { formatClock } from "@/components/Timeline/timeScale";
+import AuthImage from "@/components/common/AuthImage";
 
 interface ScreenshotGridProps {
   screenshots: ScreenshotEntry[];
@@ -23,14 +23,6 @@ function appActiveAt(sessions: ActivityLogEntry[], timestamp: string): string | 
 }
 
 export default function ScreenshotGrid({ screenshots, sessions, selectedId, onSelect }: ScreenshotGridProps) {
-  if (screenshots.length === 0) {
-    return (
-      <div className="flex h-40 items-center justify-center text-theme-sm text-gray-400">
-        No screenshots captured for this day.
-      </div>
-    );
-  }
-
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
       {screenshots.map((shot) => {
@@ -47,11 +39,10 @@ export default function ScreenshotGrid({ screenshots, sessions, selectedId, onSe
             }`}
           >
             <div className="aspect-video w-full overflow-hidden bg-gray-100 dark:bg-white/5">
-              <img
-                src={`${API_BASE_URL}/api/screenshots/file/${filename}`}
+              <AuthImage
+                src={`/api/screenshots/file/${filename}`}
                 alt={`Screenshot at ${formatClock(shot.timestamp)}`}
                 className="h-full w-full object-cover transition-transform group-hover:scale-105"
-                loading="lazy"
               />
             </div>
             <div className="p-2.5">

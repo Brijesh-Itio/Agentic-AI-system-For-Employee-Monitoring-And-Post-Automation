@@ -1,9 +1,9 @@
 import { useEffect } from "react";
 import { ChevronLeft, ChevronRight, Eye, EyeOff, X } from "lucide-react";
 import type { ScreenshotEntry } from "@/api";
-import { API_BASE_URL } from "@/api";
 import { formatClock } from "@/components/Timeline/timeScale";
 import { Button } from "@/components/shadcn/button";
+import AuthImage from "@/components/common/AuthImage";
 
 interface ScreenshotDetailModalProps {
   screenshots: ScreenshotEntry[];
@@ -73,8 +73,8 @@ export default function ScreenshotDetailModal({
         className="max-h-full max-w-4xl overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-gray-900"
         onClick={(e) => e.stopPropagation()}
       >
-        <img
-          src={`${API_BASE_URL}/api/screenshots/file/${filename}`}
+        <AuthImage
+          src={`/api/screenshots/file/${filename}`}
           alt="Screenshot"
           className="max-h-[75vh] w-full object-contain"
         />

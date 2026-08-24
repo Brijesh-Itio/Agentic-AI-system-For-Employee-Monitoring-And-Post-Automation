@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router";
 import {
   LayoutDashboard,
   Clock,
+  CalendarCheck,
   ImageIcon,
   FileText,
   BarChart3,
@@ -27,6 +28,7 @@ type NavItem = {
 const navItems: NavItem[] = [
   { icon: <LayoutDashboard />, name: "Dashboard", path: "/" },
   { icon: <Clock />, name: "Timeline", path: "/timeline" },
+  { icon: <CalendarCheck />, name: "Attendance", path: "/attendance" },
   { icon: <ImageIcon />, name: "Screenshots", path: "/screenshots" },
   { icon: <FileText />, name: "Reports", path: "/reports" },
   { icon: <BarChart3 />, name: "Analytics", path: "/analytics" },

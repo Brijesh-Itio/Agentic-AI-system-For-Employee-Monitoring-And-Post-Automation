@@ -13,6 +13,7 @@ import {
   Send,
   Clock,
   Loader2,
+  LogIn,
 } from "lucide-react";
 
 import PageMeta from "../../components/common/PageMeta";
@@ -67,6 +68,17 @@ export default function DashboardHome() {
   const focusScore = scoreQuery.data?.focus_score;
   const activeHours = scoreQuery.data?.productive_hours_formatted ?? "0h 0m";
   const appsTracked = appsQuery.data?.length ?? 0;
+
+  // work_start/work_end aren't a manual clock-in — they're set automatically
+  // from the first and last tracked activity of the day (agent/database.py's
+  // set_work_start_if_unset / the daily aggregation), so "checked out" here
+  // means "no more activity has been tracked yet today", which is only
+  // meaningfully true once the day is actually over.
+  const formatTime = (iso: string | null) =>
+    iso ? new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true }) : null;
+  const workStart = formatTime(scoreQuery.data?.work_start ?? null);
+  const workEnd = formatTime(scoreQuery.data?.work_end ?? null);
+  const workHoursValue = workStart ? `${workStart} – ${workEnd ?? "now"}` : "Not started yet";
 
   return (
     <>
@@ -129,6 +141,13 @@ export default function DashboardHome() {
             loading={scoreQuery.isLoading}
           />
           <StatCard
+            label="Work Hours Today"
+            value={workHoursValue}
+            icon={LogIn}
+            hint="Auto-detected from your first/last tracked activity — not a manual clock-in"
+            loading={scoreQuery.isLoading}
+          />
+          <StatCard
             label="Total Apps Tracked"
             value={String(appsTracked)}
             icon={LayoutGrid}
@@ -154,11 +173,11 @@ export default function DashboardHome() {
               <Clock className="h-4 w-4" />
               View Today's Timeline
             </Button>
-            <Button variant="secondary" disabled title="Coming in Module 18 — LinkedIn Automation">
+            <Button variant="secondary" onClick={() => navigate("/linkedin")}>
               <Briefcase className="h-4 w-4" />
               Post to LinkedIn
             </Button>
-            <Button variant="secondary" disabled title="Coming in Module 19 — Email Campaign Automation">
+            <Button variant="secondary" onClick={() => navigate("/email")}>
               <Send className="h-4 w-4" />
               Run Email Campaign
             </Button>

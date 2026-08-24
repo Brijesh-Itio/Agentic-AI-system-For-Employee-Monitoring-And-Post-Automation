@@ -9,6 +9,33 @@ export const api = axios.create({
   timeout: 15000,
 });
 
+// Login/logout + RBAC — attaches the bearer token to every request once
+// AuthContext has one, and notifies AuthContext when a token is rejected
+// (expired/invalid) so it can log the user out instead of every screen
+// independently handling its own 401s.
+export const setAuthToken = (token: string | null) => {
+  if (token) {
+    api.defaults.headers.common.Authorization = `Bearer ${token}`;
+  } else {
+    delete api.defaults.headers.common.Authorization;
+  }
+};
+
+let unauthorizedHandler: (() => void) | null = null;
+export const onUnauthorized = (handler: () => void) => {
+  unauthorizedHandler = handler;
+};
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401 && unauthorizedHandler) {
+      unauthorizedHandler();
+    }
+    return Promise.reject(error);
+  }
+);
+
 // ── Types (mirrors api/schemas.py) ──
 
 export interface StatusComponent {
@@ -212,3 +239,406 @@ export const getAlertPreferences = () =>
 
 export const updateAlertPreference = (alertType: AlertType, update: AlertPreference) =>
   api.put<AlertPreference>(`/api/alerts/preferences/${alertType}`, update).then((r) => r.data);
+
+// ── Module 7 extension: department-custom DAR templates & structured entries ──
+
+export type FieldType = "text" | "textarea" | "number" | "date" | "select" | "url";
+
+export interface FieldDef {
+  key: string;
+  label: string;
+  type: FieldType;
+  required: boolean;
+  options: string[] | null;
+}
+
+export interface Department {
+  id: number;
+  name: string;
+  created_at: string | null;
+}
+
+export interface DarTemplate {
+  department_id: number | null;
+  fields: FieldDef[];
+  updated_at: string | null;
+}
+
+export interface DarEntry {
+  id: number;
+  date: string;
+  department_id: number | null;
+  task: string;
+  task_description: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  comment: string | null;
+  remarks: string | null;
+  link: string | null;
+  custom_fields: Record<string, unknown>;
+  source: "manual" | "ai_draft";
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface DarEntryInput {
+  date: string;
+  department_id: number | null;
+  task: string;
+  task_description?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  comment?: string | null;
+  remarks?: string | null;
+  link?: string | null;
+  custom_fields: Record<string, unknown>;
+}
+
+export const getDepartments = () => api.get<Department[]>("/api/departments").then((r) => r.data);
+
+export const createDepartment = (name: string) =>
+  api.post<Department>("/api/departments", { name }).then((r) => r.data);
+
+export const deleteDepartment = (id: number) => api.delete(`/api/departments/${id}`);
+
+export const getDepartmentTemplate = (departmentId: number) =>
+  api.get<DarTemplate>(`/api/departments/${departmentId}/template`).then((r) => r.data);
+
+export const setDepartmentTemplate = (departmentId: number, fields: FieldDef[]) =>
+  api.put<DarTemplate>(`/api/departments/${departmentId}/template`, { fields }).then((r) => r.data);
+
+export const getEntriesByDate = (date: string) =>
+  api.get<DarEntry[]>(`/api/reports/dar/date/${date}/entries`).then((r) => r.data);
+
+export const createEntry = (payload: DarEntryInput) =>
+  api.post<DarEntry>("/api/reports/dar/entries", payload).then((r) => r.data);
+
+export const updateEntry = (id: number, payload: Partial<DarEntryInput>) =>
+  api.patch<DarEntry>(`/api/reports/dar/entries/${id}`, payload).then((r) => r.data);
+
+export const deleteEntry = (id: number) => api.delete(`/api/reports/dar/entries/${id}`);
+
+// AI drafting runs a full Ollama pass over the day log — measured at
+// ~275s on this CPU-only hardware, uncomfortably close to a 300s timeout,
+// so this uses the same generous margin as postToLinkedInNow.
+export const draftEntries = (date: string, departmentId: number) =>
+  api
+    .post<DarEntry[]>("/api/reports/dar/entries/draft", { date, department_id: departmentId }, { timeout: 420_000 })
+    .then((r) => r.data);
+
+export const exportDarUrl = (date: string, format: "csv" | "docx" | "pdf") =>
+  `${API_BASE_URL}/api/reports/dar/date/${date}/export?format=${format}`;
+
+export const importDarCsv = (date: string, file: File, departmentId: number | null) => {
+  const form = new FormData();
+  form.append("file", file);
+  const params = departmentId != null ? { department_id: departmentId } : {};
+  return api
+    .post<DarEntry[]>(`/api/reports/dar/date/${date}/import`, form, { params })
+    .then((r) => r.data);
+};
+
+// ── Module 17: Command Mode ──
+
+export interface JobLogEntry {
+  at: string;
+  message: string;
+}
+
+export interface Job {
+  id: string;
+  command: string;
+  action: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  progress: number;
+  logs: JobLogEntry[];
+  result: string | null;
+  created_at: string | null;
+  completed_at: string | null;
+}
+
+// Command actions call real Ollama/Playwright pipelines that can run for
+// minutes — the job itself runs in the background on the server regardless
+// of this client timeout, so a slow response here just means polling picks
+// it up on the next status check rather than the command failing.
+export const runCommand = (command: string) =>
+  api.post<Job>("/api/command", { command }, { timeout: 20_000 }).then((r) => r.data);
+
+export const getJobStatus = (jobId: string) => api.get<Job>(`/api/command/status/${jobId}`).then((r) => r.data);
+
+export const getJobHistory = () => api.get<Job[]>("/api/command/history").then((r) => r.data);
+
+export const cancelJob = (jobId: string) => api.post<Job>(`/api/command/cancel/${jobId}`).then((r) => r.data);
+
+// ── Module 18: LinkedIn ──
+
+export interface PostLogEntry {
+  id: number;
+  date: string;
+  time: string;
+  topic: string | null;
+  content: string;
+  post_id: string | null;
+  platform: string;
+  status: string;
+  likes: number;
+  comments: number;
+  error: string | null;
+}
+
+export interface LinkedInStatus {
+  can_post_now: boolean;
+  last_post_at: string | null;
+  minutes_until_next_allowed: number;
+  posts_today: number;
+  daily_limit: number;
+}
+
+export const getLinkedInPosts = () => api.get<PostLogEntry[]>("/api/linkedin/posts").then((r) => r.data);
+
+export const getLinkedInStatus = () => api.get<LinkedInStatus>("/api/linkedin/status").then((r) => r.data);
+
+// Kicks off the real pipeline (Ollama post writing -> Ollama image prompt +
+// FastSD CPU image generation -> real Playwright posting, ~3-4 minutes
+// total on CPU) as a background job and returns immediately — poll
+// getJobStatus(job.id) (same job system as Command Mode) for live stage
+// progress instead of waiting on one long request.
+export const postToLinkedInNow = (topic?: string) =>
+  api
+    .post<Job>("/api/linkedin/post", null, { params: topic ? { topic } : {}, timeout: 20_000 })
+    .then((r) => r.data);
+
+// ── Module 19: Email Campaigns ──
+
+export interface CampaignLogEntry {
+  id: number;
+  date: string;
+  time: string;
+  name: string | null;
+  email: string;
+  company: string | null;
+  subject: string | null;
+  status: string;
+  error: string | null;
+  follow_up_sent: boolean;
+}
+
+export interface CampaignStats {
+  total_sent: number;
+  total_failed: number;
+  sent_today: number;
+  daily_limit: number;
+}
+
+export interface CampaignRunResult {
+  attempted: number;
+  sent: number;
+  skipped_unpersonalisable: number;
+  failed: number;
+}
+
+export const getCampaignLog = () => api.get<CampaignLogEntry[]>("/api/email/campaigns").then((r) => r.data);
+
+export const getCampaignStats = () => api.get<CampaignStats>("/api/email/campaigns/stats").then((r) => r.data);
+
+// Real Ollama call per lead + real SMTP sends — can take a while for a
+// larger batch.
+export const runEmailCampaign = (limit?: number) =>
+  api
+    .post<CampaignRunResult>("/api/email/campaign/run", null, { params: limit ? { limit } : {}, timeout: 300_000 })
+    .then((r) => r.data);
+
+export const runFollowUps = () =>
+  api.post<CampaignRunResult>("/api/email/follow-ups/run", null, { timeout: 300_000 }).then((r) => r.data);
+
+export const testGmailConnection = () =>
+  api.post<{ connected: boolean }>("/api/email/test-connection").then((r) => r.data);
+
+// ── Module 5 / 20: Leads ──
+
+export interface LeadEntry {
+  id: number;
+  name: string;
+  company: string | null;
+  role: string | null;
+  interest: string | null;
+  email: string | null;
+  notes: string | null;
+  last_contact: string | null;
+  source: string | null;
+  status: string;
+  created_at: string | null;
+}
+
+export interface LeadInput {
+  name: string;
+  company?: string | null;
+  role?: string | null;
+  interest?: string | null;
+  email?: string | null;
+  notes?: string | null;
+  source?: string | null;
+  status?: string;
+}
+
+export const getLeads = (status?: string) =>
+  api.get<LeadEntry[]>("/api/leads", { params: status ? { status } : {} }).then((r) => r.data);
+
+export const createLead = (payload: LeadInput) => api.post<LeadEntry>("/api/leads", payload).then((r) => r.data);
+
+export const updateLead = (id: number, payload: Partial<LeadInput>) =>
+  api.patch<LeadEntry>(`/api/leads/${id}`, payload).then((r) => r.data);
+
+export const deleteLead = (id: number) => api.delete(`/api/leads/${id}`);
+
+// Real Playwright sessions against Google/LinkedIn — can take a while, and
+// commonly fails honestly (both sites block automated access; see
+// DEVELOPMENT.md Module 20).
+export const runLeadResearch = (targetProfile: string) =>
+  api
+    .post<{ status: string; detail: string; leads_found: number }>(
+      "/api/leads/research", null, { params: { target_profile: targetProfile }, timeout: 120_000 }
+    )
+    .then((r) => r.data);
+
+// ── Login & Role-Based Access (not one of the original 24 modules — added
+// afterward so managers/admins can see what employees are doing) ──
+
+export type Role = "employee" | "manager" | "admin";
+export const OVERSIGHT_ROLES: Role[] = ["manager", "admin"];
+
+export interface TeamUser {
+  id: string;
+  name: string;
+  email: string | null;
+  role: Role;
+  organisation_id: string | null;
+  created_at: string | null;
+  has_password: boolean;
+}
+
+export interface TeamUserInput {
+  id: string;
+  name: string;
+  email?: string | null;
+  role?: Role;
+  organisation_id?: string | null;
+  password?: string | null;
+}
+
+export interface AuthTokenResponse {
+  access_token: string;
+  token_type: string;
+  user: TeamUser;
+}
+
+export const getBootstrapStatus = () =>
+  api.get<{ needs_setup: boolean }>("/api/auth/bootstrap-status").then((r) => r.data);
+
+export const login = (userId: string, password: string) =>
+  api.post<AuthTokenResponse>("/api/auth/login", { user_id: userId, password }).then((r) => r.data);
+
+export const logout = () => api.post("/api/auth/logout").then((r) => r.data);
+
+export const getMe = () => api.get<TeamUser>("/api/auth/me").then((r) => r.data);
+
+export const changePassword = (password: string) =>
+  api.post("/api/auth/change-password", { password }).then((r) => r.data);
+
+export const setUserPassword = (userId: string, password: string) =>
+  api.post(`/api/team/users/${userId}/password`, { password }).then((r) => r.data);
+
+export const updateUserRole = (userId: string, role: Role) =>
+  api.patch<TeamUser>(`/api/team/users/${userId}/role`, { role }).then((r) => r.data);
+
+export const deleteTeamUser = (userId: string) => api.delete(`/api/team/users/${userId}`);
+
+export type MemberStatus = "active" | "idle" | "offline";
+
+export interface TeamMemberStatus {
+  user: TeamUser;
+  status: MemberStatus;
+  focus_score: number | null;
+  active_hours_today: number;
+  current_app: string | null;
+}
+
+export interface MemberWeeklyStats {
+  user_id: string;
+  name: string;
+  avg_focus_score: number | null;
+  total_hours: number;
+  productive_hours: number;
+  avg_switch_count: number;
+  days_with_data: number;
+}
+
+export interface BurnoutRisk {
+  name: string;
+  risk: string;
+  reason: string;
+}
+
+export interface TeamAnalysis {
+  members: MemberWeeklyStats[];
+  high_performers: string[];
+  struggling_members: string[];
+  workload_imbalance: string;
+  bottlenecks: string;
+  rebalancing_suggestions: string[];
+  burnout_risk: BurnoutRisk[];
+  raw_summary: string | null;
+}
+
+export const getTeamUsers = () => api.get<TeamUser[]>("/api/team/users").then((r) => r.data);
+
+export const createTeamUser = (payload: TeamUserInput) =>
+  api.post<TeamUser>("/api/team/users", payload).then((r) => r.data);
+
+export const getTeamOverview = () => api.get<TeamMemberStatus[]>("/api/team/overview").then((r) => r.data);
+
+export const getMemberActivity = (userId: string, targetDate?: string) =>
+  api
+    .get<ActivityLogEntry[]>(`/api/team/member/${userId}/activity`, {
+      params: targetDate ? { target_date: targetDate } : {},
+    })
+    .then((r) => r.data);
+
+// Real Ollama call over the whole team's weekly data — same cost profile as
+// other on-demand generation endpoints.
+export const getTeamAnalysis = (windowDays = 7) =>
+  api
+    .get<TeamAnalysis>("/api/team/analysis", { params: { window_days: windowDays }, timeout: 120_000 })
+    .then((r) => r.data);
+
+// ── Attendance ──
+// Entirely derived from daily_stats (itself built from real activity_logs
+// tracking) — no manual clock-in/out exists anywhere in this app.
+
+export type AttendanceStatus = "week_off" | "full_day" | "half_day" | "absent" | "upcoming";
+
+export interface AttendanceDay {
+  date: string;
+  status: AttendanceStatus;
+  week_off_reason: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  active_seconds: number;
+  active_hours_formatted: string;
+  focus_score: number | null;
+}
+
+export interface AttendanceSummary {
+  month: string;
+  full_days: number;
+  half_days: number;
+  absents: number;
+  week_offs: number;
+  days: AttendanceDay[];
+}
+
+export const getMyAttendance = (month: string) =>
+  api.get<AttendanceSummary>("/api/attendance/me", { params: { month } }).then((r) => r.data);
+
+export const getMemberAttendance = (userId: string, month: string) =>
+  api.get<AttendanceSummary>(`/api/attendance/${userId}`, { params: { month } }).then((r) => r.data);

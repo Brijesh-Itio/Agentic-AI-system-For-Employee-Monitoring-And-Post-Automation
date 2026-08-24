@@ -1,7 +1,7 @@
 import { X } from "lucide-react";
 import type { ScreenshotEntry } from "@/api";
-import { API_BASE_URL } from "@/api";
 import { formatClock } from "./timeScale";
+import AuthImage from "@/components/common/AuthImage";
 
 interface ScreenshotModalProps {
   screenshot: ScreenshotEntry;
@@ -26,7 +26,7 @@ export default function ScreenshotModal({ screenshot, onClose }: ScreenshotModal
         >
           <X className="h-4 w-4" />
         </button>
-        <img src={`${API_BASE_URL}/api/screenshots/file/${filename}`} alt="Screenshot" className="max-h-[80vh] w-full object-contain" />
+        <AuthImage src={`/api/screenshots/file/${filename}`} alt="Screenshot" className="max-h-[80vh] w-full object-contain" />
         <div className="flex items-center justify-between px-4 py-3 text-sm text-gray-500 dark:text-gray-400">
           <span>{formatClock(screenshot.timestamp)}</span>
           {screenshot.is_blurred && (

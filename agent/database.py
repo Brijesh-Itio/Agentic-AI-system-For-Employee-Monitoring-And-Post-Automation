@@ -290,6 +290,19 @@ CREATE TABLE IF NOT EXISTS leads (
 CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email);
 CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
 
+-- Added after a real bug: /api/status's "is the agent running" check used
+-- MAX(activity_logs.created_at) as its only liveness signal, but a session
+-- only gets written to activity_logs once it *closes* (app_tracker.py's
+-- session detector) — so staying on one app/window for a long stretch,
+-- entirely normal behaviour, made a perfectly healthy agent falsely report
+-- "offline" after ~30s. This table is touched on a fixed interval
+-- independent of session boundaries, so liveness and "last completed
+-- session" are no longer the same (flawed) signal.
+CREATE TABLE IF NOT EXISTS agent_heartbeat (
+    user_id TEXT PRIMARY KEY,
+    last_seen DATETIME NOT NULL
+);
+
 -- Module 21.1's multi-user model. Schema owned here so module 5's team
 -- routes can exist ahead of module 21's full team dashboard.
 CREATE TABLE IF NOT EXISTS users (
@@ -390,6 +403,14 @@ _SCREENSHOTS_EXTRA_COLUMNS = {
     "original_path": "TEXT",
 }
 
+# Login/logout + role-based access (added after module 21's users table —
+# see DEVELOPMENT.md's "Login & Role-Based Access" section). NULL
+# password_hash means the account can't log in yet (e.g. rows created by
+# module 21's team-management UI before this feature existed).
+_USERS_EXTRA_COLUMNS = {
+    "password_hash": "TEXT",
+}
+
 
 def _ensure_extra_columns(conn: sqlite3.Connection, table: str, columns: dict) -> None:
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -406,6 +427,7 @@ def init_db() -> None:
             conn.executescript(SCHEMA)
             _ensure_extra_columns(conn, "daily_stats", _DAILY_STATS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "screenshots", _SCREENSHOTS_EXTRA_COLUMNS)
+            _ensure_extra_columns(conn, "users", _USERS_EXTRA_COLUMNS)
             conn.commit()
             logger.info("Local SQLite schema ready at %s", LOCAL_DB_PATH)
         except Exception:
@@ -446,6 +468,21 @@ def insert_activity_session(
             ),
         )
         return cur.lastrowid
+
+
+def touch_heartbeat(user_id: str = "local") -> None:
+    """Called on a fixed interval by AppTracker's poll loop, independent of
+    whether the active app/window has changed — see agent_heartbeat's
+    schema comment for why this can't just reuse activity_logs."""
+    now = datetime.now().isoformat(sep=" ")
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO agent_heartbeat (user_id, last_seen) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET last_seen = excluded.last_seen
+            """,
+            (user_id, now),
+        )
 
 
 # ── daily_stats ──
@@ -714,6 +751,15 @@ def insert_screenshot(
             ),
         )
         return cur.lastrowid
+
+
+def set_screenshot_cloud_url(screenshot_id: int, cloud_url: str) -> None:
+    """MODULE 24.4 — records the MinIO object URL after an optional cloud
+    upload. Never called when MINIO_* env vars aren't set (see
+    agent/cloud_storage.py) — cloud_url just stays NULL and every screenshot
+    route continues serving from local disk exactly as before."""
+    with write_cursor() as cur:
+        cur.execute("UPDATE screenshots SET cloud_url = ? WHERE id = ?", (cloud_url, screenshot_id))
 
 
 def get_screenshots_for_date(day: date_cls, user_id: str = "local"):

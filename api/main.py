@@ -17,6 +17,8 @@ from api.database import init_db
 from api.routes import (
     activity,
     alerts,
+    attendance,
+    auth,
     command,
     dar_entries,
     departments,
@@ -53,6 +55,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
+app.include_router(attendance.router)
 app.include_router(activity.router)
 app.include_router(screenshots.router)
 app.include_router(websites.router)

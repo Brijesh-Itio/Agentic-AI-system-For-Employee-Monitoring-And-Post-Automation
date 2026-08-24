@@ -1,7 +1,7 @@
 import { X } from "lucide-react";
 import type { ActivityLogEntry, ScreenshotEntry } from "@/api";
 import { CATEGORY_COLOR, CATEGORY_LABEL, formatClock, formatDuration } from "./timeScale";
-import { API_BASE_URL } from "@/api";
+import AuthImage from "@/components/common/AuthImage";
 
 interface SessionDetailPanelProps {
   session: ActivityLogEntry;
@@ -62,8 +62,8 @@ export default function SessionDetailPanel({ session, nearbyScreenshot, onClose 
         {nearbyScreenshot && (
           <div>
             <p className="text-theme-xs font-medium uppercase text-gray-400">Nearby screenshot</p>
-            <img
-              src={`${API_BASE_URL}/api/screenshots/file/${nearbyScreenshot.thumbnail_path?.split(/[\\/]/).pop()}`}
+            <AuthImage
+              src={`/api/screenshots/file/${nearbyScreenshot.thumbnail_path?.split(/[\\/]/).pop()}`}
               alt="Screenshot near this session"
               className="mt-2 w-full rounded-lg border border-gray-200 dark:border-gray-700"
             />

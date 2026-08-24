@@ -2,6 +2,7 @@
 layer(base);
 
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -693,6 +694,19 @@ span.flatpickr-weekday,
 .input-date-icon::-webkit-calendar-picker-indicator {
   opacity: 0;
   -webkit-appearance: none;
+}
+
+/* Scoped opt-out of the global "hide date/time picker icon" rule above
+   (section 283-292): those inputs are always paired with a custom overlay
+   icon/label built by their component, so hiding the native affordance is
+   correct there. Plain <input type="time"> fields with no such overlay
+   (e.g. the DAR task-log form) need the native picker button visible —
+   otherwise there is zero visual cue that typing digits is expected. */
+.time-picker-input::-webkit-calendar-picker-indicator {
+  display: block;
+  -webkit-appearance: auto;
+  opacity: 1;
+  cursor: pointer;
 }
 
 .swiper-button-prev svg,

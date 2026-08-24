@@ -143,7 +143,16 @@ class TimeIntelligenceEngine:
         self._thread: Optional[threading.Thread] = None
         self._last_processed_hour: Optional[datetime] = None  # (date, hour) tuple key
 
-        schedule.every().day.at(WEEKLY_TRENDS_TIME).do(self.calculate_weekly_trends)
+        # A private Scheduler(), not the bare `schedule` module: every
+        # scheduler class in this codebase runs its own polling thread, and
+        # `schedule.every()`/`schedule.run_pending()` with no instance both
+        # operate on one shared global default scheduler — verified live
+        # that this made every due job (e.g. the 5-minute screenshot
+        # capture) fire once per thread that happened to poll it, producing
+        # near-simultaneous duplicate screenshots/rescores/posts. A private
+        # instance means this thread only ever sees and runs its own jobs.
+        self._scheduler = schedule.Scheduler()
+        self._scheduler.every().day.at(WEEKLY_TRENDS_TIME).do(self.calculate_weekly_trends)
 
     # ── lifecycle ──
 
@@ -178,7 +187,7 @@ class TimeIntelligenceEngine:
             database.set_work_start_if_unset(now.date(), now, self.user_id)
 
         self._maybe_roll_hourly_score(now)
-        schedule.run_pending()
+        self._scheduler.run_pending()
 
     # ── 2.2 work day detector + 2.3 break classifier (idle callbacks) ──
 

@@ -210,6 +210,19 @@ class User(Base):
     role = Column(String, nullable=False, default="employee")
     organisation_id = Column(String)
     created_at = Column(DateTime)
+    # Login/logout + RBAC. NULL means the account was created before this
+    # feature existed (or by an admin who hasn't set a password yet) and
+    # can't log in until one is set.
+    password_hash = Column(String)
+
+
+class AgentHeartbeat(Base):
+    """Liveness signal independent of activity_logs — see the table's
+    schema comment in agent/database.py for why activity_logs alone (which
+    only gets a row when a session *closes*) was the wrong liveness check."""
+    __tablename__ = "agent_heartbeat"
+    user_id = Column(String, primary_key=True)
+    last_seen = Column(DateTime, nullable=False)
 
 
 class PostLog(Base):

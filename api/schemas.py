@@ -241,14 +241,35 @@ class UserOut(BaseModel):
     role: str
     organisation_id: Optional[str] = None
     created_at: Optional[datetime] = None
+    has_password: bool = False
 
 
 class UserCreate(BaseModel):
     id: str
     name: str
     email: Optional[str] = None
-    role: str = "employee"
+    role: Literal["employee", "manager", "admin"] = "employee"
     organisation_id: Optional[str] = None
+    password: Optional[str] = None
+
+
+class UserRoleUpdate(BaseModel):
+    role: Literal["employee", "manager", "admin"]
+
+
+class SetPasswordRequest(BaseModel):
+    password: str
+
+
+class LoginRequest(BaseModel):
+    user_id: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
 
 
 class TeamMemberStatusOut(BaseModel):
@@ -257,6 +278,30 @@ class TeamMemberStatusOut(BaseModel):
     focus_score: Optional[float] = None
     active_hours_today: float = 0.0
     current_app: Optional[str] = None
+
+
+class MemberWeeklyStatsOut(BaseModel):
+    user_id: str
+    name: str
+    avg_focus_score: Optional[float] = None
+    total_hours: float
+    productive_hours: float
+    avg_switch_count: float
+    days_with_data: int
+
+
+class TeamAnalysisOut(BaseModel):
+    members: list[MemberWeeklyStatsOut]
+    high_performers: list[str]
+    struggling_members: list[str]
+    workload_imbalance: str
+    bottlenecks: str
+    rebalancing_suggestions: list[str]
+    # AI-authored objects with an unpredictable exact shape (model may omit a
+    # key) — kept loose rather than a strict sub-model so a slightly off
+    # response still renders instead of failing response validation.
+    burnout_risk: list[dict]
+    raw_summary: Optional[str] = None
 
 
 class PostLogOut(BaseModel):
@@ -273,6 +318,26 @@ class PostLogOut(BaseModel):
     likes: int = 0
     comments: int = 0
     error: Optional[str] = None
+
+
+class AttendanceDayOut(BaseModel):
+    date: date_type
+    status: str  # week_off | full_day | half_day | absent | upcoming
+    week_off_reason: Optional[str] = None
+    check_in: Optional[datetime] = None
+    check_out: Optional[datetime] = None
+    active_seconds: int = 0
+    active_hours_formatted: str = "0h 0m"
+    focus_score: Optional[float] = None
+
+
+class AttendanceSummaryOut(BaseModel):
+    month: str  # YYYY-MM
+    full_days: int
+    half_days: int
+    absents: int
+    week_offs: int
+    days: list[AttendanceDayOut]
 
 
 class LinkedInStatusOut(BaseModel):

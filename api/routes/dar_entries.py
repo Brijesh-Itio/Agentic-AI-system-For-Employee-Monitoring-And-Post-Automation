@@ -16,8 +16,8 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from api.config import settings
-from api.database import DarEntry, DarReport, DarTemplate, Department, get_db
+from api.auth import get_current_user
+from api.database import DarEntry, DarReport, DarTemplate, Department, User, get_db
 from api.schemas import DarEntryCreate, DarEntryDraftRequest, DarEntryOut, DarEntryUpdate
 
 logger = logging.getLogger(__name__)
@@ -70,10 +70,12 @@ def _validate_custom_fields(db: Session, department_id: int | None, custom_field
 # ── 7.6 Structured DAR entries (task log) — CRUD ──
 
 @router.get("/date/{target_date}/entries", response_model=list[DarEntryOut])
-def list_entries(target_date: date_type, db: Session = Depends(get_db)):
+def list_entries(
+    target_date: date_type, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
     rows = (
         db.query(DarEntry)
-        .filter(DarEntry.user_id == settings.DEFAULT_USER_ID, DarEntry.date == target_date)
+        .filter(DarEntry.user_id == current_user.id, DarEntry.date == target_date)
         .order_by(DarEntry.start_time.asc().nulls_last(), DarEntry.id.asc())
         .all()
     )
@@ -81,14 +83,16 @@ def list_entries(target_date: date_type, db: Session = Depends(get_db)):
 
 
 @router.post("/entries", response_model=DarEntryOut, status_code=201)
-def create_entry(payload: DarEntryCreate, db: Session = Depends(get_db)):
+def create_entry(
+    payload: DarEntryCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
     if payload.department_id is not None:
         if db.query(Department).filter(Department.id == payload.department_id).first() is None:
             raise HTTPException(status_code=404, detail=f"No department {payload.department_id}")
     _validate_custom_fields(db, payload.department_id, payload.custom_fields)
 
     row = DarEntry(
-        user_id=settings.DEFAULT_USER_ID,
+        user_id=current_user.id,
         date=payload.date,
         department_id=payload.department_id,
         task=payload.task,
@@ -110,10 +114,17 @@ def create_entry(payload: DarEntryCreate, db: Session = Depends(get_db)):
 
 
 @router.patch("/entries/{entry_id}", response_model=DarEntryOut)
-def update_entry(entry_id: int, payload: DarEntryUpdate, db: Session = Depends(get_db)):
+def update_entry(
+    entry_id: int,
+    payload: DarEntryUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     row = db.query(DarEntry).filter(DarEntry.id == entry_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No entry {entry_id}")
+    if row.user_id != current_user.id and current_user.role not in ("manager", "admin"):
+        raise HTTPException(status_code=403, detail="Not authorised to edit this entry")
 
     updates = payload.model_dump(exclude_unset=True)
     if "custom_fields" in updates:
@@ -128,10 +139,14 @@ def update_entry(entry_id: int, payload: DarEntryUpdate, db: Session = Depends(g
 
 
 @router.delete("/entries/{entry_id}", status_code=204)
-def delete_entry(entry_id: int, db: Session = Depends(get_db)):
+def delete_entry(
+    entry_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
     row = db.query(DarEntry).filter(DarEntry.id == entry_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No entry {entry_id}")
+    if row.user_id != current_user.id and current_user.role not in ("manager", "admin"):
+        raise HTTPException(status_code=403, detail="Not authorised to delete this entry")
     db.delete(row)
     db.commit()
 
@@ -139,7 +154,9 @@ def delete_entry(entry_id: int, db: Session = Depends(get_db)):
 # ── 7.7 AI-assisted entry drafting ──
 
 @router.post("/entries/draft", response_model=list[DarEntryOut])
-def draft_entries(payload: DarEntryDraftRequest, db: Session = Depends(get_db)):
+def draft_entries(
+    payload: DarEntryDraftRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
     """Asks Ollama to draft dar_entries rows matching the department's
     template, from the same day log 7.1 already builds. Never fabricates
     silently: an unparseable model response is a 502, not empty/fake rows."""
@@ -152,7 +169,7 @@ def draft_entries(payload: DarEntryDraftRequest, db: Session = Depends(get_db)):
     from ai.dar_generator import build_day_log
     from ai.ollama_client import generate
 
-    day_log = build_day_log(payload.date, settings.DEFAULT_USER_ID)
+    day_log = build_day_log(payload.date, current_user.id)
     field_spec = ", ".join(f'"{f["key"]}" ({f["type"]})' for f in fields) or "(no custom fields defined)"
     prompt = (
         "You are drafting a structured task log for a Daily Activity Report, department: "
@@ -200,7 +217,7 @@ def draft_entries(payload: DarEntryDraftRequest, db: Session = Depends(get_db)):
                 return None
 
         row = DarEntry(
-            user_id=settings.DEFAULT_USER_ID,
+            user_id=current_user.id,
             date=payload.date,
             department_id=payload.department_id,
             task=str(item.get("task"))[:500],
@@ -378,19 +395,24 @@ def _export_pdf(db: Session, target_date: date_type, entries: list[DarEntry], na
 
 
 @router.get("/date/{target_date}/export")
-def export_dar(target_date: date_type, format: str = "csv", db: Session = Depends(get_db)):
+def export_dar(
+    target_date: date_type,
+    format: str = "csv",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     if format not in ("csv", "docx", "pdf"):
         raise HTTPException(status_code=422, detail="format must be one of: csv, docx, pdf")
 
     entries = (
         db.query(DarEntry)
-        .filter(DarEntry.user_id == settings.DEFAULT_USER_ID, DarEntry.date == target_date)
+        .filter(DarEntry.user_id == current_user.id, DarEntry.date == target_date)
         .order_by(DarEntry.start_time.asc().nulls_last(), DarEntry.id.asc())
         .all()
     )
     report = (
         db.query(DarReport)
-        .filter(DarReport.user_id == settings.DEFAULT_USER_ID, DarReport.date == target_date)
+        .filter(DarReport.user_id == current_user.id, DarReport.date == target_date)
         .first()
     )
     narrative = report.content if report else None
@@ -418,7 +440,8 @@ async def import_dar_csv(
     target_date: date_type,
     file: UploadFile,
     department_id: int | None = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     if department_id is not None and db.query(Department).filter(Department.id == department_id).first() is None:
         raise HTTPException(status_code=404, detail=f"No department {department_id}")
@@ -449,7 +472,7 @@ async def import_dar_csv(
             if k not in _BASE_COLUMNS and k not in _META_COLUMNS and v not in (None, "")
         }
         entry = DarEntry(
-            user_id=settings.DEFAULT_USER_ID,
+            user_id=current_user.id,
             date=target_date,
             department_id=row_department_id,
             task=task,

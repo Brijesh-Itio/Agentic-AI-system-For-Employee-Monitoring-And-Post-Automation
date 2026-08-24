@@ -8,6 +8,8 @@ import { Card, CardContent } from "@/components/shadcn/card";
 import { Badge } from "@/components/shadcn/badge";
 import ReportsList from "@/components/Reports/ReportsList";
 import DarContent from "@/components/Reports/DarContent";
+import TaskLog from "@/components/Reports/TaskLog";
+import DateSelector from "@/components/Timeline/DateSelector";
 import {
   getAllDars,
   generateDarNow,
@@ -15,11 +17,12 @@ import {
   getLatestWeeklyReport,
 } from "@/api";
 
-type Tab = "daily" | "weekly";
+type Tab = "daily" | "weekly" | "tasklog";
 
 export default function ReportsPage() {
   const [tab, setTab] = useState<Tab>("daily");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [taskLogDate, setTaskLogDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
@@ -104,6 +107,14 @@ export default function ReportsPage() {
           >
             Weekly Reports
           </button>
+          <button
+            onClick={() => setTab("tasklog")}
+            className={`rounded-md px-4 py-1.5 text-theme-sm font-medium transition-colors ${
+              tab === "tasklog" ? "bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-white" : "text-gray-500"
+            }`}
+          >
+            Task Log
+          </button>
         </div>
 
         {tab === "daily" ? (
@@ -163,6 +174,15 @@ export default function ReportsPage() {
               </CardContent>
             </Card>
           </div>
+        ) : tab === "tasklog" ? (
+          <Card>
+            <CardContent className="p-6">
+              <div className="mb-4">
+                <DateSelector date={taskLogDate} onChange={setTaskLogDate} />
+              </div>
+              <TaskLog date={taskLogDate} />
+            </CardContent>
+          </Card>
         ) : (
           <Card>
             <CardContent className="p-6">

@@ -6,6 +6,7 @@ __pycache__/
 
 # Agent local data
 agent/data/
+/data/
 *.db
 *.db-journal
 *.db-wal
@@ -17,10 +18,19 @@ agent/data/
 # Env / secrets
 .env
 workpulse-config.json
+linkedin_cookies.json
+last_topic.txt
 
 # Node / dashboard
 node_modules/
 dist/
+
+# PyInstaller build output (module 23) — a build artifact, not source;
+# rebuild with scripts/build_exe.bat. Copied to the project root (not left
+# in dist/) so its data/db paths resolve next to the real workpulse.db.
+build/
+/WorkPulseAgent.exe
+trace.log
 
 # ChromaDB
 chromadb/

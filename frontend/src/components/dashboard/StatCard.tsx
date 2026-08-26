@@ -18,10 +18,23 @@ const toneClasses: Record<NonNullable<StatCardProps["tone"]>, string> = {
   error: "bg-error-50 text-error-600 dark:bg-error-500/10 dark:text-error-400",
 };
 
+const accentClasses: Record<NonNullable<StatCardProps["tone"]>, string> = {
+  neutral: "before:bg-brand-400",
+  success: "before:bg-success-500",
+  warning: "before:bg-warning-500",
+  error: "before:bg-error-500",
+};
+
 export default function StatCard({ label, value, icon: Icon, tone = "neutral", hint, loading }: StatCardProps) {
   return (
-    <Card className="transition-shadow hover:shadow-md">
-      <CardContent className="flex items-start justify-between gap-4 p-5">
+    <Card
+      className={cn(
+        "relative overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-md",
+        "before:absolute before:inset-y-0 before:left-0 before:w-1 before:content-['']",
+        accentClasses[tone]
+      )}
+    >
+      <CardContent className="flex items-start justify-between gap-4 p-5 pl-6">
         <div className="min-w-0">
           <p className="text-theme-xs font-medium text-gray-500 dark:text-gray-400">{label}</p>
           {loading ? (

@@ -271,6 +271,23 @@ CREATE TABLE IF NOT EXISTS alert_preferences (
     UNIQUE(user_id, alert_type)
 );
 
+-- Admin-controlled per-employee monitoring toggles (separate from
+-- alert_preferences above, which an employee sets for themselves). An
+-- admin disabling a feature here actually stops that component on the
+-- employee's own desktop agent — see agent/app_tracker.py,
+-- agent/browser_tracker.py, agent/screenshot.py and ai/dar_generator.py,
+-- which all check is_feature_enabled() before doing their automatic work.
+-- Feasible without any agent<->server network call because the packaged
+-- agent and the FastAPI backend already read/write this same SQLite file
+-- (see agent/config.py's LOCAL_DB_PATH vs api/config.py's DATABASE_PATH).
+CREATE TABLE IF NOT EXISTS feature_flags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT 'local',
+    feature TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(user_id, feature)
+);
+
 -- Schema owned here (module 5's leads route needs it to exist); the
 -- Playwright-based discovery that populates it in bulk belongs to module 20.
 CREATE TABLE IF NOT EXISTS leads (
@@ -387,6 +404,66 @@ CREATE TABLE IF NOT EXISTS dar_entries (
 
 CREATE INDEX IF NOT EXISTS idx_dar_entries_user_date ON dar_entries(user_id, date);
 CREATE INDEX IF NOT EXISTS idx_dar_entries_department ON dar_entries(department_id);
+
+-- DAR system Layer 1/2 extension: manager-assigned tasks (distinct from
+-- dar_entries, which is a per-day activity LOG, not an assignment-with-
+-- deadline-and-progress system), plus two new automatic tracker sources.
+-- Purely additive — nothing above this comment changes behaviour.
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    assigned_by TEXT,
+    department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+    project TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'not_started',
+    progress INTEGER NOT NULL DEFAULT 0,
+    priority TEXT NOT NULL DEFAULT 'medium',
+    due_date DATE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
+
+-- Parsed .ics meetings. UNIQUE(user_id, uid) makes re-parsing the same
+-- calendar file idempotent — the tracker upserts, never duplicate-inserts.
+CREATE TABLE IF NOT EXISTS calendar_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT 'local',
+    uid TEXT,
+    subject TEXT NOT NULL,
+    organizer TEXT,
+    attendees_json TEXT NOT NULL DEFAULT '[]',
+    meeting_type TEXT,
+    start_time DATETIME NOT NULL,
+    end_time DATETIME,
+    duration_seconds INTEGER,
+    location TEXT,
+    date DATE NOT NULL,
+    source_file TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_calendar_events_user_date ON calendar_events(user_id, date);
+
+CREATE TABLE IF NOT EXISTS file_activity_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT 'local',
+    file_path TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    timestamp DATETIME NOT NULL,
+    date DATE NOT NULL,
+    watched_root TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_activity_logs_user_date ON file_activity_logs(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_file_activity_logs_path ON file_activity_logs(file_path);
 """
 
 # Columns added after the initial daily_stats design (module 2.6 — longest
@@ -411,6 +488,19 @@ _USERS_EXTRA_COLUMNS = {
     "password_hash": "TEXT",
 }
 
+# DAR system extension — Project/Status/Progress as first-class columns
+# (previously only expressible per-department via custom_fields_json),
+# plus an optional link back to an assigned tasks row. ALTER TABLE ADD
+# COLUMN keeps every existing dar_entries row intact; status defaults to
+# "in_progress" rather than "not_started" since an existing logged entry
+# already represents work that happened, not an unstarted assignment.
+_DAR_ENTRIES_EXTRA_COLUMNS = {
+    "project": "TEXT",
+    "status": "TEXT NOT NULL DEFAULT 'in_progress'",
+    "progress": "INTEGER NOT NULL DEFAULT 0",
+    "task_id": "INTEGER REFERENCES tasks(id) ON DELETE SET NULL",
+}
+
 
 def _ensure_extra_columns(conn: sqlite3.Connection, table: str, columns: dict) -> None:
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -428,6 +518,10 @@ def init_db() -> None:
             _ensure_extra_columns(conn, "daily_stats", _DAILY_STATS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "screenshots", _SCREENSHOTS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "users", _USERS_EXTRA_COLUMNS)
+            # tasks already exists by this point (created above in SCHEMA),
+            # so the task_id column's FK reference resolves correctly.
+            _ensure_extra_columns(conn, "dar_entries", _DAR_ENTRIES_EXTRA_COLUMNS)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_dar_entries_task ON dar_entries(task_id)")
             conn.commit()
             logger.info("Local SQLite schema ready at %s", LOCAL_DB_PATH)
         except Exception:
@@ -902,6 +996,143 @@ def get_screenshot_count_for_date(day: date_cls, user_id: str = "local") -> int:
     return row["c"] if row else 0
 
 
+# ── tasks (manager-assigned work, distinct from dar_entries' daily log) ──
+
+def insert_task(
+    user_id: str,
+    title: str,
+    assigned_by: Optional[str] = None,
+    department_id: Optional[int] = None,
+    project: Optional[str] = None,
+    description: Optional[str] = None,
+    priority: str = "medium",
+    due_date: Optional[date_cls] = None,
+) -> int:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO tasks
+                (user_id, assigned_by, department_id, project, title, description, priority, due_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id, assigned_by, department_id, project, title, description,
+                priority, due_date.isoformat() if due_date else None,
+            ),
+        )
+        return cur.lastrowid
+
+
+def get_task(task_id: int):
+    conn = get_connection()
+    return conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+
+
+def get_tasks_for_user(user_id: str, status: Optional[str] = None):
+    conn = get_connection()
+    if status:
+        return conn.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND status = ? ORDER BY due_date IS NULL, due_date ASC",
+            (user_id, status),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM tasks WHERE user_id = ? ORDER BY due_date IS NULL, due_date ASC", (user_id,)
+    ).fetchall()
+
+
+def update_task(task_id: int, **fields) -> None:
+    if not fields:
+        return
+    fields["updated_at"] = datetime.now().isoformat(sep=" ")
+    if fields.get("status") == "completed" and "completed_at" not in fields:
+        fields["completed_at"] = datetime.now().isoformat(sep=" ")
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    with write_cursor() as cur:
+        cur.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", (*fields.values(), task_id))
+
+
+def delete_task(task_id: int) -> None:
+    with write_cursor() as cur:
+        cur.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+
+
+# ── calendar_events (Layer 1 — .ics tracker) ──
+
+def upsert_calendar_event(
+    user_id: str,
+    uid: Optional[str],
+    subject: str,
+    start_time: datetime,
+    end_time: Optional[datetime] = None,
+    organizer: Optional[str] = None,
+    attendees_json: str = "[]",
+    location: Optional[str] = None,
+    source_file: Optional[str] = None,
+) -> None:
+    duration_seconds = (
+        max(0, int((end_time - start_time).total_seconds())) if end_time else None
+    )
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO calendar_events
+                (user_id, uid, subject, organizer, attendees_json, start_time, end_time,
+                 duration_seconds, location, date, source_file)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, uid) DO UPDATE SET
+                subject = excluded.subject,
+                organizer = excluded.organizer,
+                attendees_json = excluded.attendees_json,
+                start_time = excluded.start_time,
+                end_time = excluded.end_time,
+                duration_seconds = excluded.duration_seconds,
+                location = excluded.location,
+                source_file = excluded.source_file
+            """,
+            (
+                user_id, uid, subject, organizer, attendees_json,
+                start_time.isoformat(sep=" "), end_time.isoformat(sep=" ") if end_time else None,
+                duration_seconds, location, start_time.date().isoformat(), source_file,
+            ),
+        )
+
+
+def get_calendar_events_for_date(day: date_cls, user_id: str = "local"):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM calendar_events WHERE user_id = ? AND date = ? ORDER BY start_time ASC",
+        (user_id, day.isoformat()),
+    ).fetchall()
+
+
+# ── file_activity_logs (Layer 1 — file watcher) ──
+
+def insert_file_activity(
+    file_path: str,
+    event_type: str,
+    timestamp: datetime,
+    watched_root: Optional[str] = None,
+    user_id: str = "local",
+) -> int:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO file_activity_logs (user_id, file_path, event_type, timestamp, date, watched_root)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, file_path, event_type, timestamp.isoformat(sep=" "), timestamp.date().isoformat(), watched_root),
+        )
+        return cur.lastrowid
+
+
+def get_file_activity_for_date(day: date_cls, user_id: str = "local"):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM file_activity_logs WHERE user_id = ? AND date = ? ORDER BY timestamp ASC",
+        (user_id, day.isoformat()),
+    ).fetchall()
+
+
 # ── alerts ──
 
 def insert_alert(alert_type: str, message: str, triggered_at: datetime, user_id: str = "local") -> int:
@@ -989,4 +1220,46 @@ def set_alert_preference(alert_type: str, enabled: bool, threshold_value: Option
                 threshold_value = COALESCE(excluded.threshold_value, alert_preferences.threshold_value)
             """,
             (user_id, alert_type, 1 if enabled else 0, threshold_value),
+        )
+
+
+# ── feature_flags — admin-controlled per-employee monitoring toggles ──
+
+DEFAULT_FEATURE_TYPES = (
+    "screenshot_capture", "activity_tracking", "dar_generation", "alerts_enabled",
+    "calendar_sync", "file_activity_tracking",
+)
+
+
+def get_feature_flags(user_id: str = "local") -> dict:
+    conn = get_connection()
+    rows = {
+        r["feature"]: r
+        for r in conn.execute("SELECT * FROM feature_flags WHERE user_id = ?", (user_id,)).fetchall()
+    }
+    # Any feature without a stored row is enabled by default.
+    return {
+        feature: bool(rows[feature]["enabled"]) if feature in rows else True
+        for feature in DEFAULT_FEATURE_TYPES
+    }
+
+
+def is_feature_enabled(feature: str, user_id: str = "local") -> bool:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT enabled FROM feature_flags WHERE user_id = ? AND feature = ?",
+        (user_id, feature),
+    ).fetchone()
+    return bool(row["enabled"]) if row else True
+
+
+def set_feature_flag(feature: str, enabled: bool, user_id: str = "local") -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO feature_flags (user_id, feature, enabled)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, feature) DO UPDATE SET enabled = excluded.enabled
+            """,
+            (user_id, feature, 1 if enabled else 0),
         )

@@ -28,7 +28,15 @@ import {
   getDepartments,
   getEntriesByDate,
   importDarCsv,
+  type DarStatus,
 } from "@/api";
+
+const STATUS_META: Record<DarStatus, { label: string; variant: "success" | "warning" | "destructive" | "outline" }> = {
+  not_started: { label: "Not Started", variant: "outline" },
+  in_progress: { label: "In Progress", variant: "warning" },
+  blocked: { label: "Blocked", variant: "destructive" },
+  completed: { label: "Completed", variant: "success" },
+};
 
 interface TaskLogProps {
   date: string;
@@ -90,7 +98,7 @@ export default function TaskLog({ date }: TaskLogProps) {
     const q = search.trim().toLowerCase();
     return allEntries.filter((entry) => {
       if (q) {
-        const haystack = `${entry.task} ${entry.task_description ?? ""} ${deptName(entry.department_id)}`.toLowerCase();
+        const haystack = `${entry.task} ${entry.task_description ?? ""} ${entry.project ?? ""} ${deptName(entry.department_id)}`.toLowerCase();
         if (!haystack.includes(q)) return false;
       }
       if (timeFrom || timeTo) {
@@ -289,9 +297,12 @@ export default function TaskLog({ date }: TaskLogProps) {
           <thead className="sticky top-0 z-10 bg-gray-50 text-xs uppercase tracking-wide text-gray-500 dark:bg-gray-900 dark:text-gray-400">
             <tr>
               <th className="px-3 py-2.5">Task</th>
+              <th className="px-3 py-2.5">Project</th>
               <th className="px-3 py-2.5">Department</th>
               <th className="px-3 py-2.5">Time</th>
               <th className="px-3 py-2.5">Comment</th>
+              <th className="px-3 py-2.5">Status</th>
+              <th className="px-3 py-2.5">Progress</th>
               <th className="px-3 py-2.5">Custom Fields</th>
               <th className="px-3 py-2.5">Source</th>
               <th className="px-3 py-2.5" />
@@ -300,13 +311,13 @@ export default function TaskLog({ date }: TaskLogProps) {
           <tbody>
             {entriesQuery.isLoading ? (
               <tr>
-                <td colSpan={7} className="p-6 text-center text-gray-400">
+                <td colSpan={10} className="p-6 text-center text-gray-400">
                   <Loader2 className="mx-auto h-5 w-5 animate-spin" />
                 </td>
               </tr>
             ) : entries.length === 0 ? (
               <tr>
-                <td colSpan={7} className="p-8 text-center text-gray-400">
+                <td colSpan={10} className="p-8 text-center text-gray-400">
                   <div className="flex flex-col items-center gap-2">
                     <FileSpreadsheet className="h-8 w-8" />
                     {allEntries.length === 0 ? (
@@ -334,6 +345,7 @@ export default function TaskLog({ date }: TaskLogProps) {
                       <div className="text-xs text-gray-400">{entry.task_description}</div>
                     )}
                   </td>
+                  <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{entry.project || "—"}</td>
                   <td className="px-3 py-2">{deptName(entry.department_id)}</td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     {formatClock(entry.start_time, entry.date)} – {formatClock(entry.end_time, entry.date)}
@@ -349,6 +361,20 @@ export default function TaskLog({ date }: TaskLogProps) {
                     )}
                   </td>
                   <td className="px-3 py-2">
+                    <Badge variant={STATUS_META[entry.status].variant}>{STATUS_META[entry.status].label}</Badge>
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      <div className="h-1.5 w-14 overflow-hidden rounded-full bg-gray-100 dark:bg-white/10">
+                        <div
+                          className={`h-full rounded-full ${entry.progress >= 100 ? "bg-success-500" : "bg-brand-500"}`}
+                          style={{ width: `${entry.progress}%` }}
+                        />
+                      </div>
+                      <span className="text-theme-xs text-gray-500 dark:text-gray-400">{entry.progress}%</span>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2">
                     <div className="flex flex-wrap gap-1">
                       {Object.entries(entry.custom_fields).map(([k, v]) => (
                         <Badge key={k} variant="outline">
@@ -358,7 +384,7 @@ export default function TaskLog({ date }: TaskLogProps) {
                     </div>
                   </td>
                   <td className="px-3 py-2">
-                    <Badge variant={entry.source === "ai_draft" ? "default" : "outline"}>{entry.source}</Badge>
+                    <Badge variant={entry.source === "manual" ? "outline" : "default"}>{entry.source}</Badge>
                   </td>
                   <td className="px-3 py-2">
                     <button

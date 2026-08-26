@@ -57,6 +57,10 @@ export interface ProductivityScore {
   productive_seconds: number;
   total_active_seconds: number;
   productive_hours_formatted: string;
+  active_seconds_live: number;
+  active_hours_formatted: string;
+  idle_seconds: number;
+  idle_formatted: string;
   work_start: string | null;
   work_end: string | null;
   longest_focus_seconds: number;
@@ -154,6 +158,12 @@ export const getContextSwitchingByDate = (date: string) =>
 export const getScreenshotsByDate = (date: string) =>
   api.get<ScreenshotEntry[]>(`/api/screenshots/date/${date}`).then((r) => r.data);
 
+export const getMemberScreenshotsToday = (userId: string) =>
+  api.get<ScreenshotEntry[]>(`/api/screenshots/member/${userId}/today`).then((r) => r.data);
+
+export const getMemberScreenshotsByDate = (userId: string, date: string) =>
+  api.get<ScreenshotEntry[]>(`/api/screenshots/member/${userId}/date/${date}`).then((r) => r.data);
+
 export interface DailyScore {
   date: string;
   focus_score: number | null;
@@ -198,6 +208,9 @@ export interface WeeklyReport {
 }
 
 export const getAllDars = () => api.get<DarReport[]>("/api/reports/dar/all").then((r) => r.data);
+
+export const getMemberDars = (userId: string) =>
+  api.get<DarReport[]>(`/api/reports/dar/member/${userId}/all`).then((r) => r.data);
 
 export const getDarByDate = (date: string) =>
   api.get<DarReport>(`/api/reports/dar/date/${date}`).then((r) => r.data);
@@ -264,6 +277,8 @@ export interface DarTemplate {
   updated_at: string | null;
 }
 
+export type DarStatus = "not_started" | "in_progress" | "blocked" | "completed";
+
 export interface DarEntry {
   id: number;
   date: string;
@@ -276,7 +291,11 @@ export interface DarEntry {
   remarks: string | null;
   link: string | null;
   custom_fields: Record<string, unknown>;
-  source: "manual" | "ai_draft";
+  source: "manual" | "ai_draft" | "ai_pipeline";
+  project: string | null;
+  status: DarStatus;
+  progress: number;
+  task_id: number | null;
   created_at: string | null;
   updated_at: string | null;
 }
@@ -292,6 +311,10 @@ export interface DarEntryInput {
   remarks?: string | null;
   link?: string | null;
   custom_fields: Record<string, unknown>;
+  project?: string | null;
+  status?: DarStatus;
+  progress?: number;
+  task_id?: number | null;
 }
 
 export const getDepartments = () => api.get<Department[]>("/api/departments").then((r) => r.data);
@@ -319,11 +342,12 @@ export const updateEntry = (id: number, payload: Partial<DarEntryInput>) =>
 export const deleteEntry = (id: number) => api.delete(`/api/reports/dar/entries/${id}`);
 
 // AI drafting runs a full Ollama pass over the day log — measured at
-// ~275s on this CPU-only hardware, uncomfortably close to a 300s timeout,
-// so this uses the same generous margin as postToLinkedInNow.
+// ~275s on this CPU-only hardware normally, but a real attempt still timed
+// out at 420s under heavy system load (many Chrome/VS Code windows open
+// competing for CPU) — matches the server-side 600s budget in api/config.py.
 export const draftEntries = (date: string, departmentId: number) =>
   api
-    .post<DarEntry[]>("/api/reports/dar/entries/draft", { date, department_id: departmentId }, { timeout: 420_000 })
+    .post<DarEntry[]>("/api/reports/dar/entries/draft", { date, department_id: departmentId }, { timeout: 600_000 })
     .then((r) => r.data);
 
 export const exportDarUrl = (date: string, format: "csv" | "docx" | "pdf") =>
@@ -538,6 +562,13 @@ export const getBootstrapStatus = () =>
 export const login = (userId: string, password: string) =>
   api.post<AuthTokenResponse>("/api/auth/login", { user_id: userId, password }).then((r) => r.data);
 
+export const getSsoStatus = () =>
+  api.get<{ google_enabled: boolean }>("/api/auth/sso/status").then((r) => r.data);
+
+// Full-page redirect, not an axios call — the browser needs to actually
+// navigate to Google, not fetch this URL in the background.
+export const googleSsoLoginUrl = () => `${API_BASE_URL}/api/auth/sso/google/login`;
+
 export const logout = () => api.post("/api/auth/logout").then((r) => r.data);
 
 export const getMe = () => api.get<TeamUser>("/api/auth/me").then((r) => r.data);
@@ -550,6 +581,9 @@ export const setUserPassword = (userId: string, password: string) =>
 
 export const updateUserRole = (userId: string, role: Role) =>
   api.patch<TeamUser>(`/api/team/users/${userId}/role`, { role }).then((r) => r.data);
+
+export const updateUserProfile = (userId: string, payload: { name?: string; email?: string | null }) =>
+  api.patch<TeamUser>(`/api/team/users/${userId}/profile`, payload).then((r) => r.data);
 
 export const deleteTeamUser = (userId: string) => api.delete(`/api/team/users/${userId}`);
 
@@ -642,3 +676,26 @@ export const getMyAttendance = (month: string) =>
 
 export const getMemberAttendance = (userId: string, month: string) =>
   api.get<AttendanceSummary>(`/api/attendance/${userId}`, { params: { month } }).then((r) => r.data);
+
+// ── Feature flags — admin-controlled per-employee monitoring toggles ──
+// Independent of AlertPreference above, which the employee sets for
+// themselves; these are the admin's kill switches, enforced by the
+// desktop agent itself (see agent/app_tracker.py etc.), not just hidden
+// on the dashboard.
+
+export type FeatureFlag = "screenshot_capture" | "activity_tracking" | "dar_generation" | "alerts_enabled";
+
+export const FEATURE_FLAG_LABELS: Record<FeatureFlag, string> = {
+  screenshot_capture: "Screenshot Capture",
+  activity_tracking: "App & Website Tracking",
+  dar_generation: "Automatic DAR Generation",
+  alerts_enabled: "Alert Notifications",
+};
+
+export const getMemberFeatures = (userId: string) =>
+  api.get<Record<FeatureFlag, boolean>>(`/api/team/member/${userId}/features`).then((r) => r.data);
+
+export const setMemberFeature = (userId: string, feature: FeatureFlag, enabled: boolean) =>
+  api
+    .put<Record<FeatureFlag, boolean>>(`/api/team/member/${userId}/features/${feature}`, { enabled })
+    .then((r) => r.data);

@@ -11,6 +11,7 @@ import { getJobStatus, getLinkedInPosts, getLinkedInStatus, postToLinkedInNow } 
 export default function LinkedInPage() {
   const queryClient = useQueryClient();
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [topic, setTopic] = useState("");
   const statusQuery = useQuery({ queryKey: ["linkedin", "status"], queryFn: getLinkedInStatus });
   const postsQuery = useQuery({ queryKey: ["linkedin", "posts"], queryFn: getLinkedInPosts });
 
@@ -31,8 +32,11 @@ export default function LinkedInPage() {
   });
 
   const postMutation = useMutation({
-    mutationFn: () => postToLinkedInNow(),
-    onSuccess: (job) => setActiveJobId(job.id),
+    mutationFn: () => postToLinkedInNow(topic.trim() || undefined),
+    onSuccess: (job) => {
+      setActiveJobId(job.id);
+      setTopic("");
+    },
   });
 
   const status = statusQuery.data;
@@ -51,13 +55,23 @@ export default function LinkedInPage() {
               Module 18 — Ollama-written posts, real Playwright browser automation.
             </p>
           </div>
-          <Button
-            onClick={() => postMutation.mutate()}
-            disabled={postMutation.isPending || isRunning || status?.can_post_now === false}
-          >
-            {postMutation.isPending || isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-            Post Now
-          </Button>
+          <div className="flex gap-2">
+            <input
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && postMutation.mutate()}
+              placeholder="Topic (optional) — e.g. agentic AI in the workplace"
+              disabled={postMutation.isPending || isRunning}
+              className="w-64 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-700 disabled:opacity-60 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
+            />
+            <Button
+              onClick={() => postMutation.mutate()}
+              disabled={postMutation.isPending || isRunning || status?.can_post_now === false}
+            >
+              {postMutation.isPending || isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Post Now
+            </Button>
+          </div>
         </div>
 
         {postMutation.isError && (

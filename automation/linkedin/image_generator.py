@@ -149,7 +149,11 @@ def generate_image(post_content: str) -> Optional[Path]:
     if image_bytes is None:
         return None
 
-    fd, temp_path = tempfile.mkstemp(suffix=".png", prefix="workpulse_fastsd_")
+    # FastSD CPU's /api/generate returns JPEG-encoded bytes despite what its
+    # own docs might suggest — verified directly (`file` on a real output:
+    # "JPEG image data, JFIF standard"), so the suffix here must match, not
+    # just look plausible.
+    fd, temp_path = tempfile.mkstemp(suffix=".jpg", prefix="workpulse_fastsd_")
     Path(temp_path).write_bytes(image_bytes)
     import os
 

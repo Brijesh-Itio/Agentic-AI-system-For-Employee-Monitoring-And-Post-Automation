@@ -10,6 +10,7 @@ import {
   getDepartmentTemplate,
   getDepartments,
   type DarEntryInput,
+  type DarStatus,
 } from "@/api";
 
 interface EntryFormModalProps {
@@ -21,6 +22,13 @@ interface EntryFormModalProps {
 const inputClass =
   "w-full rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200";
 
+const STATUS_OPTIONS: { value: DarStatus; label: string }[] = [
+  { value: "not_started", label: "Not Started" },
+  { value: "in_progress", label: "In Progress" },
+  { value: "blocked", label: "Blocked" },
+  { value: "completed", label: "Completed" },
+];
+
 export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModalProps) {
   const queryClient = useQueryClient();
   const [departmentId, setDepartmentId] = useState<number | null>(null);
@@ -31,6 +39,9 @@ export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModal
   const [comment, setComment] = useState("");
   const [remarks, setRemarks] = useState("");
   const [link, setLink] = useState("");
+  const [project, setProject] = useState("");
+  const [status, setStatus] = useState<DarStatus>("in_progress");
+  const [progress, setProgress] = useState(0);
   const [customFields, setCustomFields] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
@@ -50,6 +61,9 @@ export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModal
     setComment("");
     setRemarks("");
     setLink("");
+    setProject("");
+    setStatus("in_progress");
+    setProgress(0);
     setCustomFields({});
     setError(null);
   };
@@ -95,6 +109,9 @@ export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModal
       comment: comment || null,
       remarks: remarks || null,
       link: link || null,
+      project: project || null,
+      status,
+      progress,
       custom_fields: customFields,
     });
   };
@@ -132,6 +149,16 @@ export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModal
           </div>
 
           <div>
+            <label className="mb-1 block text-xs font-medium text-gray-500">Project</label>
+            <input
+              className={inputClass}
+              value={project}
+              onChange={(e) => setProject(e.target.value)}
+              placeholder="e.g. Q3 Revenue Forecasting"
+            />
+          </div>
+
+          <div>
             <label className="mb-1 block text-xs font-medium text-gray-500">Task Description</label>
             <textarea
               className={inputClass}
@@ -159,6 +186,35 @@ export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModal
                 min={startTime || undefined}
                 value={endTime}
                 onChange={(e) => setEndTime(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-500">Status</label>
+              <select
+                className={inputClass}
+                value={status}
+                onChange={(e) => setStatus(e.target.value as DarStatus)}
+              >
+                {STATUS_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-500">Progress ({progress}%)</label>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                className="w-full accent-brand-500"
+                value={progress}
+                onChange={(e) => setProgress(Number(e.target.value))}
               />
             </div>
           </div>

@@ -11,6 +11,8 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_all
+
 block_cipher = None
 PROJECT_ROOT = Path(SPECPATH)
 
@@ -27,23 +29,37 @@ hidden_imports = [
     "sqlite3", "email.mime.text", "email.mime.multipart",
 ]
 
+# chromadb (module 6's classification memory) is now a real, direct
+# dependency of the packaged agent too: agent/main.py starts
+# ai.productivity_scorer.LiveScoringScheduler (the live "Active Hours"
+# fix), and that module imports chromadb at the top level. It used to be
+# excluded below as API-only — that became stale and made every packaged
+# build crash at import time with "No module named 'chromadb'", silently,
+# behind a Tkinter error dialog with no console to show it. chromadb pulls
+# in enough dynamic/plugin-style imports (onnxruntime, tokenizers, its own
+# bundled migration SQL files) that plain hiddenimports isn't reliable —
+# collect_all is PyInstaller's documented way to bundle packages like this.
+chroma_datas, chroma_binaries, chroma_hiddenimports = collect_all("chromadb")
+hidden_imports += chroma_hiddenimports
+
 icon_path = PROJECT_ROOT / "icon.ico"
 
 a = Analysis(
     [str(PROJECT_ROOT / "agent" / "tray_main.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
-    datas=[],
+    binaries=chroma_binaries,
+    datas=chroma_datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         # The agent process never needs these — they belong to the FastAPI
-        # backend / automation modules, not the tracking agent. Excluding
-        # them keeps the .exe from bundling chromadb/onnxruntime/playwright,
-        # which are large and irrelevant to what actually gets imported.
-        "chromadb", "playwright", "fastapi", "uvicorn", "docx", "reportlab",
+        # backend / automation modules, not the tracking agent. chromadb
+        # was removed from this list (see collect_all("chromadb") above) —
+        # the packaged agent genuinely imports it now via
+        # ai.productivity_scorer.LiveScoringScheduler.
+        "playwright", "fastapi", "uvicorn", "docx", "reportlab",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

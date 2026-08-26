@@ -7,7 +7,7 @@ didn't cover — module 5's weekly_trends table only stores one aggregate
 row per week, not the daily series module 11.4's chart needs.
 """
 import logging
-from datetime import date as date_type, timedelta
+from datetime import date as date_type, datetime, timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func
@@ -36,12 +36,31 @@ def _score_for_date(db: Session, day: date_type, user_id: str) -> ProductivitySc
     if row is None:
         return ProductivityScoreOut(date=day)
 
+    idle_seconds = row.idle_seconds or 0
+
+    # "Active hours" is a live, moment-by-moment stat for today (system
+    # on/attended time since work_start, minus completed idle periods) —
+    # unlike total_active_seconds/productive_seconds/focus_score, which are
+    # snapshots only refreshed once an hour rolls over (see
+    # TimeIntelligenceEngine._maybe_roll_hourly_score) and would otherwise
+    # look frozen/zero for most of the day. Past days are already final, so
+    # they just use the stored total.
+    if day == date_type.today() and row.work_start is not None:
+        elapsed_seconds = int((datetime.now() - row.work_start).total_seconds())
+        active_seconds = max(0, elapsed_seconds - idle_seconds)
+    else:
+        active_seconds = row.total_active_seconds or 0
+
     return ProductivityScoreOut(
         date=row.date,
         focus_score=row.focus_score,
         productive_seconds=row.productive_seconds or 0,
         total_active_seconds=row.total_active_seconds or 0,
         productive_hours_formatted=TimeIntelligenceEngine.format_hours_minutes(row.productive_seconds or 0),
+        active_seconds_live=active_seconds,
+        active_hours_formatted=TimeIntelligenceEngine.format_hours_minutes(active_seconds),
+        idle_seconds=idle_seconds,
+        idle_formatted=TimeIntelligenceEngine.format_hours_minutes(idle_seconds),
         work_start=row.work_start,
         work_end=row.work_end,
         longest_focus_seconds=row.longest_focus_seconds or 0,

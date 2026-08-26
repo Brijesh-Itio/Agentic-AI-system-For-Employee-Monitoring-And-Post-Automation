@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     # ── CORS ──
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
 
+    # ── SSO (Google OAuth) ──
+    # Leave both blank to keep SSO off — /api/auth/sso/status reports it as
+    # disabled and the frontend hides the "Sign in with Google" button.
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    # This backend's own publicly reachable base URL — must exactly match
+    # the "Authorized redirect URI" registered in the Google Cloud OAuth
+    # client (this value + /api/auth/sso/google/callback), or Google
+    # rejects the token exchange.
+    API_PUBLIC_URL: str = "http://localhost:8000"
+    # Where the browser lands after SSO completes (success or failure).
+    FRONTEND_URL: str = "http://localhost:5173"
+
     # ── Gmail (module 8) ──
     GMAIL_ADDRESS: str = ""
     GMAIL_APP_PASSWORD: str = ""
@@ -65,9 +78,11 @@ class Settings(BaseSettings):
     OLLAMA_TIMEOUT_SECONDS: int = 120  # classification calls (fast=True)
     # Full narrative generation (DAR, etc.) genuinely takes longer than
     # classification — observed ~167s for a full DAR on CPU inference, but
-    # AI-drafted task-log entries measured at ~275s under real load, only
-    # ~25s under the old 300s budget — raised for real margin under load.
-    OLLAMA_GENERATE_TIMEOUT_SECONDS: int = 420
+    # AI-drafted task-log entries measured at ~275s under real load. A real
+    # AI-draft attempt still hit the 420s budget and timed out outright
+    # under heavy system load (many Chrome/VS Code windows open) — raised
+    # again for real margin on this CPU-only hardware under load.
+    OLLAMA_GENERATE_TIMEOUT_SECONDS: int = 600
 
     # ── ChromaDB (module 6+) ──
     CHROMADB_PATH: str = str(PROJECT_ROOT / "chromadb")

@@ -297,8 +297,59 @@ class DarEntry(Base):
     link = Column(String)
     custom_fields_json = Column(String, nullable=False, default="{}")
     source = Column(String, nullable=False, default="manual")
+    project = Column(String)
+    status = Column(String, nullable=False, default="in_progress")
+    progress = Column(Integer, nullable=False, default=0)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"))
     created_at = Column(DateTime)
     updated_at = Column(DateTime)
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String, nullable=False)
+    assigned_by = Column(String)
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"))
+    project = Column(String)
+    title = Column(String, nullable=False)
+    description = Column(String)
+    status = Column(String, nullable=False, default="not_started")
+    progress = Column(Integer, nullable=False, default=0)
+    priority = Column(String, nullable=False, default="medium")
+    due_date = Column(Date)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+    completed_at = Column(DateTime)
+
+
+class CalendarEvent(Base):
+    __tablename__ = "calendar_events"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String, nullable=False, default="local")
+    uid = Column(String)
+    subject = Column(String, nullable=False)
+    organizer = Column(String)
+    attendees_json = Column(String, nullable=False, default="[]")
+    meeting_type = Column(String)
+    start_time = Column(DateTime, nullable=False)
+    end_time = Column(DateTime)
+    duration_seconds = Column(Integer)
+    location = Column(String)
+    date = Column(Date, nullable=False)
+    source_file = Column(String)
+    created_at = Column(DateTime)
+
+
+class FileActivityLog(Base):
+    __tablename__ = "file_activity_logs"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String, nullable=False, default="local")
+    file_path = Column(String, nullable=False)
+    event_type = Column(String, nullable=False)
+    timestamp = Column(DateTime, nullable=False)
+    date = Column(Date, nullable=False)
+    watched_root = Column(String)
 
 
 def init_db() -> None:

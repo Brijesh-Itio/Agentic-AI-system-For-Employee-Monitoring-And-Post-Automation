@@ -62,6 +62,37 @@ def get_screenshots_by_date(
     return [_to_out(r) for r in rows]
 
 
+@router.get("/member/{user_id}/today", response_model=list[ScreenshotOut])
+def get_member_today_screenshots(
+    user_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
+    _require_access(user_id, current_user)
+    rows = (
+        db.query(Screenshot)
+        .filter(Screenshot.user_id == user_id, Screenshot.date == date_type.today())
+        .order_by(Screenshot.timestamp.asc())
+        .all()
+    )
+    return [_to_out(r) for r in rows]
+
+
+@router.get("/member/{user_id}/date/{target_date}", response_model=list[ScreenshotOut])
+def get_member_screenshots_by_date(
+    user_id: str,
+    target_date: date_type,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_access(user_id, current_user)
+    rows = (
+        db.query(Screenshot)
+        .filter(Screenshot.user_id == user_id, Screenshot.date == target_date)
+        .order_by(Screenshot.timestamp.asc())
+        .all()
+    )
+    return [_to_out(r) for r in rows]
+
+
 @router.get("/{screenshot_id}", response_model=ScreenshotOut)
 def get_screenshot(
     screenshot_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)

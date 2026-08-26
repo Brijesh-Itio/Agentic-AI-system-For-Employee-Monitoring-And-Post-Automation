@@ -262,6 +262,12 @@ class _TitleWatcher:
             self._stop_event.wait(self.poll_interval_seconds)
 
     def poll(self) -> None:
+        # Same admin-controlled kill switch as AppTracker.poll() — see its
+        # comment for why this is a cheap local check, not a network call.
+        if not database.is_feature_enabled("activity_tracking", self.session_manager.user_id):
+            self.session_manager.close_if_open()
+            return
+
         info = get_active_window_info()
         if info is None:
             return

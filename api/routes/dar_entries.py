@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from api.auth import get_current_user
-from api.database import DarEntry, DarReport, DarTemplate, Department, User, get_db
+from api.database import DarEntry, DarReport, DarTemplate, Department, Task, User, get_db
 from api.schemas import DarEntryCreate, DarEntryDraftRequest, DarEntryOut, DarEntryUpdate
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,10 @@ def _entry_out(row: DarEntry) -> DarEntryOut:
         link=row.link,
         custom_fields=json.loads(row.custom_fields_json or "{}"),
         source=row.source,
+        project=row.project,
+        status=row.status,
+        progress=row.progress,
+        task_id=row.task_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -89,6 +93,9 @@ def create_entry(
     if payload.department_id is not None:
         if db.query(Department).filter(Department.id == payload.department_id).first() is None:
             raise HTTPException(status_code=404, detail=f"No department {payload.department_id}")
+    if payload.task_id is not None:
+        if db.query(Task).filter(Task.id == payload.task_id).first() is None:
+            raise HTTPException(status_code=404, detail=f"No task {payload.task_id}")
     _validate_custom_fields(db, payload.department_id, payload.custom_fields)
 
     row = DarEntry(
@@ -104,6 +111,10 @@ def create_entry(
         link=payload.link,
         custom_fields_json=json.dumps(payload.custom_fields),
         source="manual",
+        project=payload.project,
+        status=payload.status,
+        progress=payload.progress,
+        task_id=payload.task_id,
         created_at=datetime.now(),
         updated_at=datetime.now(),
     )
@@ -176,7 +187,11 @@ def draft_entries(
         f"{department.name}. Based on the raw activity log below, produce a JSON array of task "
         "entries. Each entry must be an object with exactly these base keys: "
         '"task" (short title), "task_description", "start_time" (HH:MM 24h), "end_time" (HH:MM 24h), '
-        '"comment", "remarks", "link" (empty string if none), and a "custom_fields" object containing '
+        '"comment", "remarks", "link" (empty string if none), '
+        '"project" (a short project/initiative name inferred from the activity, or empty string if unclear), '
+        '"status" (exactly one of: "not_started", "in_progress", "blocked", "completed" — infer from whether '
+        'the activity looks finished or ongoing), "progress" (integer 0-100 estimating how complete this task '
+        'looks), and a "custom_fields" object containing '
         f"these department-specific keys: {field_spec}.\n"
         "Base every entry strictly on the activity below — do not invent work that isn't reflected in "
         "it. Respond with ONLY the JSON array, no other text.\n\n"
@@ -216,6 +231,12 @@ def draft_entries(
             except (ValueError, AttributeError):
                 return None
 
+        status = item.get("status") if item.get("status") in _VALID_STATUSES else "in_progress"
+        try:
+            progress = max(0, min(100, int(item.get("progress", 0))))
+        except (TypeError, ValueError):
+            progress = 0
+
         row = DarEntry(
             user_id=current_user.id,
             date=payload.date,
@@ -229,6 +250,9 @@ def draft_entries(
             link=item.get("link") or None,
             custom_fields_json=json.dumps(custom_fields),
             source="ai_draft",
+            project=item.get("project") or None,
+            status=status,
+            progress=progress,
             created_at=datetime.now(),
             updated_at=datetime.now(),
         )
@@ -270,7 +294,7 @@ def _export_csv(db: Session, target_date: date_type, entries: list[DarEntry]) ->
     writer = csv.writer(buffer)
     writer.writerow(
         ["task", "task_description", "start_time", "end_time", "comment", "remarks", "link",
-         "department", "source"] + custom_keys
+         "department", "source", "project", "status", "progress"] + custom_keys
     )
     for e in entries:
         custom = json.loads(e.custom_fields_json or "{}")
@@ -279,6 +303,7 @@ def _export_csv(db: Session, target_date: date_type, entries: list[DarEntry]) ->
                 e.task, e.task_description or "", e.start_time or "", e.end_time or "",
                 e.comment or "", e.remarks or "", e.link or "",
                 _department_name(db, e.department_id), e.source,
+                e.project or "", e.status, e.progress,
             ]
             + [custom.get(k, "") for k in custom_keys]
         )
@@ -308,7 +333,7 @@ def _export_docx(db: Session, target_date: date_type, entries: list[DarEntry], n
     else:
         custom_keys = _custom_field_keys(db, entries)
         columns = ["Task", "Description", "Start", "End", "Comment", "Remarks", "Link",
-                   "Department", "Source"] + custom_keys
+                   "Department", "Source", "Project", "Status", "Progress"] + custom_keys
         table = doc.add_table(rows=1, cols=len(columns))
         table.style = "Light Grid Accent 1"
         for cell, header in zip(table.rows[0].cells, columns):
@@ -319,6 +344,7 @@ def _export_docx(db: Session, target_date: date_type, entries: list[DarEntry], n
                 e.task, e.task_description or "", str(e.start_time or ""), str(e.end_time or ""),
                 e.comment or "", e.remarks or "", e.link or "",
                 _department_name(db, e.department_id), e.source,
+                e.project or "", e.status, f"{e.progress}%",
             ] + [str(custom.get(k, "")) for k in custom_keys]
             cells = table.add_row().cells
             for cell, value in zip(cells, values):
@@ -359,7 +385,7 @@ def _export_pdf(db: Session, target_date: date_type, entries: list[DarEntry], na
     else:
         custom_keys = _custom_field_keys(db, entries)
         columns = ["Task", "Description", "Start", "End", "Comment", "Remarks", "Link",
-                   "Department", "Source"] + custom_keys
+                   "Department", "Source", "Project", "Status", "Progress"] + custom_keys
         data = [columns]
         for e in entries:
             custom = json.loads(e.custom_fields_json or "{}")
@@ -368,6 +394,7 @@ def _export_pdf(db: Session, target_date: date_type, entries: list[DarEntry], na
                     e.task, e.task_description or "", str(e.start_time or ""), str(e.end_time or ""),
                     e.comment or "", e.remarks or "", e.link or "",
                     _department_name(db, e.department_id), e.source,
+                    e.project or "", e.status, f"{e.progress}%",
                 ]
                 + [str(custom.get(k, "")) for k in custom_keys]
             )
@@ -431,8 +458,12 @@ def export_dar(
 # department by name instead of dumping it into custom_fields, and "source"
 # is dropped rather than re-imported as a fake custom field (source is
 # always "manual" for anything coming through this endpoint).
-_BASE_COLUMNS = {"task", "task_description", "start_time", "end_time", "comment", "remarks", "link"}
+_BASE_COLUMNS = {
+    "task", "task_description", "start_time", "end_time", "comment", "remarks", "link",
+    "project", "status", "progress",
+}
 _META_COLUMNS = {"department", "source"}
+_VALID_STATUSES = {"not_started", "in_progress", "blocked", "completed"}
 
 
 @router.post("/date/{target_date}/import", response_model=list[DarEntryOut])
@@ -471,6 +502,8 @@ async def import_dar_csv(
             k: v for k, v in row.items()
             if k not in _BASE_COLUMNS and k not in _META_COLUMNS and v not in (None, "")
         }
+        raw_status = (row.get("status") or "").strip()
+        raw_progress = (row.get("progress") or "0").rstrip("%").strip()
         entry = DarEntry(
             user_id=current_user.id,
             date=target_date,
@@ -484,6 +517,9 @@ async def import_dar_csv(
             link=row.get("link") or None,
             custom_fields_json=json.dumps(custom_fields),
             source="manual",
+            project=row.get("project") or None,
+            status=raw_status if raw_status in _VALID_STATUSES else "in_progress",
+            progress=int(raw_progress) if raw_progress.isdigit() else 0,
             created_at=datetime.now(),
             updated_at=datetime.now(),
         )

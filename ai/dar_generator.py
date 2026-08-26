@@ -19,7 +19,7 @@ import threading
 from datetime import date as date_cls, datetime
 from typing import Optional
 
-import schedule
+import schedule 
 
 from agent import database
 from agent.browser_tracker import BROWSER_PROCESSES
@@ -198,6 +198,10 @@ class DarScheduler:
         self._scheduler.every().day.at(run_time).do(self._safe_generate)
 
     def _safe_generate(self) -> None:
+        # Admin-controlled kill switch — only gates the automatic nightly
+        # run, not a manually-triggered one (POST /api/reports/dar/generate).
+        if not database.is_feature_enabled("dar_generation", self.user_id):
+            return
         try:
             generate_and_save_dar(user_id=self.user_id)
         except Exception:

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import { EyeOff, Loader2, UserPlus, Users } from "lucide-react";
 
@@ -7,15 +8,14 @@ import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
 import MemberCard from "@/components/Team/MemberCard";
 import AddMemberModal from "@/components/Team/AddMemberModal";
-import MemberDetailModal from "@/components/Team/MemberDetailModal";
 import TeamAnalysisPanel from "@/components/Team/TeamAnalysisPanel";
-import { getTeamOverview, type TeamMemberStatus } from "@/api";
+import { getTeamOverview } from "@/api";
 import { useAuth } from "@/context/AuthContext";
 
 export default function TeamPage() {
   const [anonymised, setAnonymised] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [selectedMember, setSelectedMember] = useState<TeamMemberStatus | null>(null);
+  const navigate = useNavigate();
   const { isAdmin } = useAuth();
 
   const overviewQuery = useQuery({
@@ -76,7 +76,7 @@ export default function TeamPage() {
                 key={m.user.id}
                 member={m}
                 anonymised={anonymised}
-                onClick={() => setSelectedMember(m)}
+                onClick={() => navigate(`/team/${m.user.id}`)}
               />
             ))}
           </div>
@@ -90,7 +90,6 @@ export default function TeamPage() {
       </div>
 
       {isAdmin && <AddMemberModal isOpen={addOpen} onClose={() => setAddOpen(false)} />}
-      <MemberDetailModal member={selectedMember} onClose={() => setSelectedMember(null)} />
     </>
   );
 }

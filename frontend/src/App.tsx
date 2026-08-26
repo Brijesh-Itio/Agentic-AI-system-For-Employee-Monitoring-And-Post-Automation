@@ -5,6 +5,7 @@ import AppLayout from "./layout/AppLayout";
 import { ScrollToTop } from "./components/common/ScrollToTop";
 import { ProtectedRoute, OversightRoute } from "./components/auth/ProtectedRoute";
 import LoginPage from "./pages/AuthPages/LoginPage";
+import SsoCallbackPage from "./pages/AuthPages/SsoCallbackPage";
 import DashboardHome from "./pages/Dashboard/Home";
 import TimelinePage from "./pages/Timeline/TimelinePage";
 import AnalyticsPage from "./pages/Analytics/AnalyticsPage";
@@ -15,6 +16,7 @@ import CommandModePage from "./pages/CommandMode/CommandModePage";
 import LinkedInPage from "./pages/LinkedIn/LinkedInPage";
 import EmailPage from "./pages/Email/EmailPage";
 import TeamPage from "./pages/Team/TeamPage";
+import TeamMemberProfilePage from "./pages/Team/TeamMemberProfilePage";
 import AttendancePage from "./pages/Attendance/AttendancePage";
 
 export default function App() {
@@ -23,6 +25,7 @@ export default function App() {
       <ScrollToTop />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/sso-callback" element={<SsoCallbackPage />} />
 
         <Route element={<ProtectedRoute />}>
           <Route element={<AppLayout />}>
@@ -38,6 +41,7 @@ export default function App() {
             <Route path="/email" element={<EmailPage />} />
             <Route element={<OversightRoute />}>
               <Route path="/team" element={<TeamPage />} />
+              <Route path="/team/:userId" element={<TeamMemberProfilePage />} />
             </Route>
             <Route path="/settings" element={<SettingsPage />} />
           </Route>

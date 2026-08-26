@@ -24,16 +24,19 @@ from sqlalchemy.orm import Session
 
 from typing import Optional
 
+from agent import database as agent_db
 from ai.team_analysis import analyse_team
 from api.auth import get_current_user, get_optional_current_user, hash_password, require_admin, require_oversight
 from api.config import settings
 from api.database import ActivityLog, AgentHeartbeat, DailyStats, User, get_db
 from api.schemas import (
+    FeatureFlagUpdate,
     SetPasswordRequest,
     TeamAnalysisOut,
     TeamMemberStatusOut,
     UserCreate,
     UserOut,
+    UserProfileUpdate,
     UserRoleUpdate,
 )
 
@@ -98,6 +101,36 @@ def delete_user(user_id: str, current_user: User = Depends(require_admin), db: S
         raise HTTPException(status_code=404, detail=f"No user {user_id}")
     db.delete(row)
     db.commit()
+
+
+@router.patch("/users/{user_id}/profile", response_model=UserOut)
+def update_user_profile(
+    user_id: str, payload: UserProfileUpdate, db: Session = Depends(get_db), _: User = Depends(require_admin)
+):
+    """Admin-only edit of name/email — e.g. correcting a typo'd email so
+    Google SSO can match it, or fixing a name. Never touches tracked data:
+    every table (activity_logs, screenshots, dar_reports, attendance, ...)
+    keys off the account's immutable `id`, not name or email, so the
+    member's full history stays exactly where it is regardless."""
+    row = db.query(User).filter(User.id == user_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No user {user_id}")
+
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Name can't be blank")
+        row.name = name
+
+    if payload.email is not None:
+        email = payload.email.strip() or None
+        if email and db.query(User).filter(User.email == email, User.id != user_id).first() is not None:
+            raise HTTPException(status_code=409, detail="That email is already in use by another account")
+        row.email = email
+
+    db.commit()
+    db.refresh(row)
+    return _to_user_out(row)
 
 
 @router.patch("/users/{user_id}/role", response_model=UserOut)
@@ -196,6 +229,37 @@ def member_activity(
         }
         for r in rows
     ]
+
+
+@router.get("/member/{user_id}/features", response_model=dict[str, bool])
+def get_member_features(user_id: str, db: Session = Depends(get_db), _: User = Depends(require_oversight)):
+    """Module 21 extension — which automatic monitoring features an admin
+    has enabled for this employee. Any feature never explicitly toggled
+    reads back as enabled (see agent_db.get_feature_flags's default)."""
+    if db.query(User).filter(User.id == user_id).first() is None:
+        raise HTTPException(status_code=404, detail=f"No user {user_id}")
+    return agent_db.get_feature_flags(user_id)
+
+
+@router.put("/member/{user_id}/features/{feature}", response_model=dict[str, bool])
+def set_member_feature(
+    user_id: str,
+    feature: str,
+    payload: FeatureFlagUpdate,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Admin-only, same as role changes and password resets — a manager
+    gets oversight of what's already tracked, not control over whether
+    tracking happens at all."""
+    if feature not in agent_db.DEFAULT_FEATURE_TYPES:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown feature. Must be one of {agent_db.DEFAULT_FEATURE_TYPES}"
+        )
+    if db.query(User).filter(User.id == user_id).first() is None:
+        raise HTTPException(status_code=404, detail=f"No user {user_id}")
+    agent_db.set_feature_flag(feature, payload.enabled, user_id)
+    return agent_db.get_feature_flags(user_id)
 
 
 @router.get("/analysis", response_model=TeamAnalysisOut)

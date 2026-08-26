@@ -55,6 +55,11 @@ def _send_desktop_notification(title: str, message: str) -> None:
 
 
 def trigger_alert(alert_type: str, message: str, user_id: str = USER_ID, also_email: bool = True) -> Optional[int]:
+    # Admin-controlled master switch (independent of the employee's own
+    # per-type alert_preferences checked right below).
+    if not database.is_feature_enabled("alerts_enabled", user_id):
+        logger.debug("Alerts disabled by admin for %s; skipping", user_id)
+        return None
     if not database.is_alert_enabled(alert_type, user_id):
         logger.debug("Alert type %s disabled for %s; skipping", alert_type, user_id)
         return None

@@ -206,6 +206,10 @@ class ScreenshotScheduler:
         self._scheduler.every(interval_minutes).minutes.do(self._safe_capture)
 
     def _safe_capture(self) -> None:
+        # Admin-controlled kill switch — only gates the automatic scheduled
+        # capture, not a manually-triggered one (POST /api/screenshots/capture).
+        if not database.is_feature_enabled("screenshot_capture", self.user_id):
+            return
         try:
             capture_now(self.user_id)
         except Exception:

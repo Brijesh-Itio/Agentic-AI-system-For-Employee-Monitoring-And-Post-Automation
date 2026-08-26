@@ -128,6 +128,14 @@ class AppTracker:
     def poll(self) -> None:
         self._maybe_touch_heartbeat()
 
+        # Admin-controlled kill switch (module 21 extension) — checked every
+        # poll since it's a cheap indexed local SQLite read, not a network
+        # call. Heartbeat above still runs regardless, so the agent doesn't
+        # falsely show "offline" just because tracking itself was disabled.
+        if not database.is_feature_enabled("activity_tracking", self.user_id):
+            self._close_current_session()
+            return
+
         info = get_active_window_info()
         if info is None:
             return

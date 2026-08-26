@@ -16,6 +16,7 @@ Sub-modules implemented (in order):
 """
 import logging
 import threading
+import time
 from datetime import date as date_cls, datetime, timedelta
 from typing import Optional
 
@@ -142,6 +143,7 @@ class TimeIntelligenceEngine:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_processed_hour: Optional[datetime] = None  # (date, hour) tuple key
+        self._last_work_end_touch_at: Optional[float] = None  # monotonic, for _maybe_touch_work_end
 
         # A private Scheduler(), not the bare `schedule` module: every
         # scheduler class in this codebase runs its own polling thread, and
@@ -178,6 +180,8 @@ class TimeIntelligenceEngine:
                 logger.exception("TimeIntelligenceEngine tick failed; continuing")
             self._stop_event.wait(self.poll_interval_seconds)
 
+    _WORK_END_TOUCH_INTERVAL_SECONDS = 30
+
     def _tick(self) -> None:
         idle_seconds = self.idle_detector.poll()
         now = datetime.now()
@@ -185,9 +189,36 @@ class TimeIntelligenceEngine:
         # 2.2 work day detector — fresh input means the user is active right now.
         if idle_seconds < self.poll_interval_seconds:
             database.set_work_start_if_unset(now.date(), now, self.user_id)
+            self._maybe_touch_work_end(now)
 
         self._maybe_roll_hourly_score(now)
         self._scheduler.run_pending()
+
+    def _maybe_touch_work_end(self, now: datetime) -> None:
+        """Keeps work_end advancing as a live "last seen active" watermark
+        while the user is active, throttled to once per 30s (matching the
+        heartbeat pattern in app_tracker.py) rather than writing every poll.
+
+        Without this, work_end was only ever set from _on_idle_end when a
+        break >=15min ended (LONG_BREAK_THRESHOLD_SECONDS), stamped at
+        idle_start — the moment the break began. That value then stayed
+        frozen until the *next* qualifying break, so a lunch break (e.g.
+        1:45-2:15) made the dashboard show "work ended 1:45 PM" for the
+        entire rest of the afternoon even while actively working, wrongly
+        reading as a checkout. Advancing work_end continuously while active
+        means it naturally resumes climbing the moment work picks back up.
+        """
+        monotonic_now = time.monotonic()
+        if (
+            self._last_work_end_touch_at is not None
+            and monotonic_now - self._last_work_end_touch_at < self._WORK_END_TOUCH_INTERVAL_SECONDS
+        ):
+            return
+        self._last_work_end_touch_at = monotonic_now
+        try:
+            database.set_work_end(now.date(), now, self.user_id)
+        except Exception:
+            logger.exception("Failed to persist live work_end")
 
     # ── 2.2 work day detector + 2.3 break classifier (idle callbacks) ──
 

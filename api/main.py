@@ -28,6 +28,7 @@ from api.routes import (
     productivity,
     reports,
     screenshots,
+    sso,
     status,
     team,
     websites,
@@ -56,6 +57,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(sso.router)
 app.include_router(attendance.router)
 app.include_router(activity.router)
 app.include_router(screenshots.router)

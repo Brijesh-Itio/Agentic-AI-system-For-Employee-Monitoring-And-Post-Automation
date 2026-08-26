@@ -57,6 +57,23 @@ def get_all_dars(db: Session = Depends(get_db), current_user: User = Depends(get
     )
 
 
+@router.get("/dar/member/{user_id}/all", response_model=list[DarReportOut])
+def get_member_dars(user_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Module 21 extension — same oversight rule as team.py's per-member
+    activity endpoint: anyone can see their own reports, viewing someone
+    else's requires manager/admin."""
+    if user_id != current_user.id and current_user.role not in ("manager", "admin"):
+        raise HTTPException(status_code=403, detail="Not authorised to view this user's reports")
+    if db.query(User).filter(User.id == user_id).first() is None:
+        raise HTTPException(status_code=404, detail=f"No user {user_id}")
+    return (
+        db.query(DarReport)
+        .filter(DarReport.user_id == user_id)
+        .order_by(DarReport.date.desc())
+        .all()
+    )
+
+
 @router.post("/dar/generate", response_model=DarReportOut)
 def generate_dar_now(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from ai.dar_generator import generate_and_save_dar

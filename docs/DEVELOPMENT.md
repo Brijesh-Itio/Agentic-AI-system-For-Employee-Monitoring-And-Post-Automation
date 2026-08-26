@@ -92,7 +92,8 @@ workpulse-ai/
 │   ├── linkedin/
 │   │   ├── poster.py           ← Playwright LinkedIn browser automation
 │   │   ├── content_writer.py   ← AI post writing with Ollama
-│   │   └── image_finder.py     ← Playwright image search and download
+│   │   ├── image_generator.py  ← Agentic: Ollama reasons image prompt, FastSD CPU generates it
+│   │   └── image_finder.py     ← Pexels API fallback if FastSD CPU is unavailable
 │   ├── email/
 │   │   ├── sender.py           ← Gmail SMTP via smtplib
 │   │   ├── writer.py           ← RAG-powered personalised email writing
@@ -917,8 +918,17 @@ Write LinkedIn post using Ollama with structured prompt. Format with proper line
 **18.2 — Topic rotation** (`automation/linkedin/content_writer.py`)
 Maintain `last_topic.txt` to track which topic was last used. Rotate through `POST_TOPICS` list in `config.py` so no topic repeats until all have been used.
 
-**18.3 — Image finder** (`automation/linkedin/image_finder.py`)
-Originally specced as Playwright opening `pexels.com` directly, matching this doc's "no image API" rule. Verified empirically that Pexels and Pixabay both sit behind Cloudflare bot-detection that blocks headless Playwright with a "Verify you are human" challenge before any content loads — not a fixable selector issue, and not something to try to bypass. User-approved exception: use Pexels' free official API (`PEXELS_API_KEY` in `.env`, no cost) instead, for this one component only. Downloads the first result to a temp file and returns the path; returns `None` (post goes out text-only) if no key is configured or nothing matches.
+**18.3 — Image sourcing, agentic** (`automation/linkedin/image_generator.py`, primary; `automation/linkedin/image_finder.py`, fallback)
+Primary path is genuinely agentic, not a fixed template: an Ollama call reads the *actual generated post text* and reasons out a concrete visual scene for it (`_build_image_prompt`), then that description is handed to a tool call — a local FastSD CPU server (`rupeshs/fastsdcpu`, https://github.com/rupeshs/fastsdcpu) running its own `/api/generate` endpoint on port 8100, same zero-API-cost / same-machine pattern as Ollama, kept out of the Railway cloud deployment for the same reason Ollama is. Runs in LCM-LoRA mode (`Lykon/dreamshaper-8` + `latent-consistency/lcm-lora-sdv1-5`, ~2GB, CPU-only, ~30-60s/image) — the fast/dev-testing tier; SDXL-Turbo (higher quality, ~6GB, ~2-3min/image) is the planned upgrade once the pipeline is verified working end-to-end. `is_available()` health-checks the server first so a not-running FastSD CPU fails fast into the fallback rather than timing out.
+Originally specced as Playwright opening `pexels.com` directly, matching this doc's "no image API" rule. Verified empirically that Pexels and Pixabay both sit behind Cloudflare bot-detection that blocks headless Playwright with a "Verify you are human" challenge before any content loads — not a fixable selector issue, and not something to try to bypass. `image_finder.py`'s Pexels REST API call (`PEXELS_API_KEY` in `.env`, no cost) is now only the fallback for when FastSD CPU is unavailable, not the primary path.
+
+Neither `generate_image()` nor `find_image()` itself ever raises — each independently returns `None` on any failure. But `ai/sub_agents/linkedin_agent.py` (module 16.3), which calls `generate_image(...) or find_image(...)`, treats a `None` from *both* as a hard failure of the whole run, not a silent downgrade to a text-only post — a deliberate later decision (every real post must carry a real, content-matched image) that supersedes this sub-module's original "post goes out text-only" framing. See module 16.3 below for the actual behaviour.
+
+Operational note: `fastsdcpu` is a separate clone (not part of this repo, not a pip package) with its own venv; its `--api` mode defaults to port **8000**, which collides with this project's own FastAPI backend, so it must always be started with `--port 8100` explicitly to match `api/config.py`'s `FASTSD_API_URL` default (see section 9's Window 5 for the exact command).
+
+**Verified live end-to-end** (2026-08-25): started the real `fastsdcpu` server on port 8100, confirmed `/api/info` health-checks correctly, then called `generate_image()` directly with real post content across 3 separate runs. The Ollama reasoning step (`qwen3:1.7b`, a thinking-capable model — see the note below on what that means for latency) produced a genuinely grounded, non-generic prompt from each post's actual subject matter (e.g. "a server rack, a laptop with hands typing, a whiteboard, a phone screen displaying metrics" for a post about agentic AI tool-calling — not a stock "person at a desk" scene every time), confirming the reasoning step is doing real work, not just passing the topic through. First run downloaded the ~2GB LCM-LoRA weights from HuggingFace; all 3 runs' diffusion stage took ~1min40s-2min for the 6 inference steps (~15-20s/step on this CPU, consistent across runs — the server does not appear to keep the pipeline meaningfully "warmer" between separate requests). Every run produced a real, valid 512×512 image (confirmed via `file`, not just a non-null return). One real bug found and fixed in the process: `generate_image()` was writing the output to a `.png`-suffixed temp file, but FastSD CPU's `/api/generate` actually returns JPEG-encoded bytes (confirmed via `file`'s magic-byte detection on multiple outputs) — corrected to `.jpg`, then re-verified with a 3rd run producing a correctly-named, correctly-typed file.
+
+Operational gotcha hit live while testing this: `qwen3:1.7b`'s "thinking" mode (visible in its `/api/tags` capabilities) generates hundreds of tokens of internal reasoning before any answer, even for a trivial prompt — a 20-40s client timeout on a direct test call looked exactly like a hung/dead Ollama, but `ollama`'s own server.log showed real, steadily-climbing token generation the whole time (`n_gen` climbing at ~15 tok/s). Restarting Ollama to "fix" this was unnecessary and briefly made things worse (see api/config's `OLLAMA_MODELS` note — a stray env var pointed a fresh `ollama serve` at an empty model directory before the real desktop app, using the correct model path, was relaunched). No lasting harm, but the lesson: a slow-but-real thinking-model response needs a timeout budget in the minutes, not tens of seconds, before concluding it's actually stuck — this codebase's own `OLLAMA_GENERATE_TIMEOUT_SECONDS=600` already reflects that; ad-hoc manual test scripts should match it rather than using a short arbitrary timeout.
 
 **18.4 — LinkedIn browser poster** (`automation/linkedin/poster.py`)
 Use Playwright with a persistent browser context that saves LinkedIn session cookies so login is only required once. Navigate to LinkedIn, click the post creation area, type the content using `page.fill()`, attach the image if provided, click the Post button. Extract the post ID from the URL after posting.
@@ -1222,26 +1232,40 @@ DAILY_EMAIL_LIMIT = 500
 
 ## 9. Running the System Locally
 
-Open 4 CMD windows and run one command in each:
+Open 5 terminals and run one command in each, from the project root
+(`C:\Users\DELL\Downloads\workpulse-ai\workpulse-ai`) unless noted:
 
 ```bash
 # Window 1 — Ollama
 ollama serve
 
 # Window 2 — Desktop Agent
-cd C:\workpulse-ai\agent
-python main.py
+python -m agent.main
 
 # Window 3 — FastAPI Backend
-cd C:\workpulse-ai\api
-uvicorn main:app --reload --port 8000
+python -m uvicorn api.main:app --port 8000
 
 # Window 4 — React Dashboard
-cd C:\workpulse-ai\dashboard
+cd frontend
 npm run dev
+
+# Window 5 — FastSD CPU (optional — only needed for module 18.3's local
+# image generation; LinkedIn posting still works via the Pexels fallback
+# without it, as long as PEXELS_API_KEY is set). Must be a separate clone
+# (github.com/rupeshs/fastsdcpu), not part of this repo. Its own --api mode
+# defaults to port 8000, which collides with Window 3 above — always pass
+# --port 8100 explicitly to match api/config.py's FASTSD_API_URL default.
+cd C:\Users\DELL\fastsdcpu
+env\Scripts\python.exe src\app.py --api --port 8100
 ```
 
 Open browser at `http://localhost:5173`
+
+Note: window 3 is shown without `--reload` deliberately — it was found
+unreliable in this project (the file-watcher would detect a change, log
+"Reloading...", and then never actually finish restarting the worker,
+silently serving stale code while looking like it had picked up the edit).
+Restart the process manually after backend changes instead.
 
 ---
 
@@ -1268,7 +1292,7 @@ Update this section as each module is completed.
 | MODULE 15 — Master Agent | ✅ Done | Real LangGraph StateGraph, verified via full-cycle runs |
 | MODULE 16 — Sub-Agents | ✅ Done | |
 | MODULE 17 — Command Mode | ✅ Done | Frontend + backend both real |
-| MODULE 18 — LinkedIn Playwright | ✅ Done | Needs LINKEDIN_EMAIL/PASSWORD + PEXELS_API_KEY in .env to actually post/attach images; not yet verified against a real LinkedIn login |
+| MODULE 18 — LinkedIn Playwright | ✅ Done | Image sourcing (18.3, agentic FastSD CPU + Pexels fallback) verified live end-to-end, real image generated and posted-image-ready — see module 18.3 above. Still needs LINKEDIN_EMAIL/PASSWORD in .env and FastSD CPU running (port 8100) to actually post/attach images; posting itself not yet verified against a real LinkedIn login |
 | MODULE 19 — Email Campaigns | ✅ Done | |
 | MODULE 20 — Lead Research | ✅ Done | Google/LinkedIn scraping (20.1/20.2) verified blocked by their own anti-bot systems (reCAPTCHA/authwall) — real code, honestly returns 0 leads today; dedup/store (20.4/20.5) fully verified |
 | MODULE 21 — Team Intelligence | ✅ Done | Team overview, individual member view, AI team analysis (21.4), and comparison chart with anonymise toggle (21.5), frontend + backend |

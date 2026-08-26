@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import axios from "axios";
 import { Loader2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/shadcn/button";
-import { deleteTeamUser, setUserPassword, updateUserRole, type Role, type TeamUser } from "@/api";
+import { deleteTeamUser, setUserPassword, updateUserProfile, updateUserRole, type Role, type TeamUser } from "@/api";
 
 const inputClass =
   "w-full rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200";
@@ -20,8 +21,19 @@ interface AdminControlsProps {
 export default function AdminControls({ user, currentUserId, onDeleted }: AdminControlsProps) {
   const queryClient = useQueryClient();
   const [role, setRole] = useState<Role>(user.role);
+  const [name, setName] = useState(user.name);
+  const [email, setEmail] = useState(user.email ?? "");
   const [newPassword, setNewPassword] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const profileMutation = useMutation({
+    mutationFn: () => updateUserProfile(user.id, { name, email: email.trim() || null }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["team"] }),
+  });
+  const profileError = axios.isAxiosError(profileMutation.error)
+    ? (profileMutation.error.response?.data as { detail?: string } | undefined)?.detail
+    : null;
+  const profileDirty = name.trim() !== user.name || email.trim() !== (user.email ?? "");
 
   const roleMutation = useMutation({
     mutationFn: (r: Role) => updateUserRole(user.id, r),
@@ -49,6 +61,43 @@ export default function AdminControls({ user, currentUserId, onDeleted }: AdminC
   return (
     <div className="mt-4 space-y-4 rounded-lg border border-gray-100 p-4 dark:border-gray-800">
       <p className="text-theme-xs font-medium uppercase tracking-wide text-gray-400">Admin Controls</p>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className="mb-1 block text-theme-xs text-gray-500 dark:text-gray-400">Name</label>
+          <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" />
+        </div>
+        <div>
+          <label className="mb-1 block text-theme-xs text-gray-500 dark:text-gray-400">
+            Email <span className="normal-case text-gray-400">(used to match Google SSO logins)</span>
+          </label>
+          <input
+            type="email"
+            className={inputClass}
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="name@company.com"
+          />
+        </div>
+      </div>
+      <div className="-mt-2 flex items-center gap-2">
+        <Button
+          variant="outline"
+          disabled={!profileDirty || !name.trim() || profileMutation.isPending}
+          onClick={() => profileMutation.mutate()}
+        >
+          {profileMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+          Save Name / Email
+        </Button>
+        {profileMutation.isSuccess && !profileDirty && (
+          <span className="text-theme-xs text-success-600 dark:text-success-400">Saved.</span>
+        )}
+        {profileError && <span className="text-theme-xs text-error-600 dark:text-error-400">{profileError}</span>}
+      </div>
+      <p className="-mt-2 text-theme-xs text-gray-400">
+        Changing either never affects this member's tracked history — activity, screenshots, attendance, and DAR
+        reports all stay keyed to their account, not their name or email.
+      </p>
 
       <div className="flex items-end gap-2">
         <div className="flex-1">

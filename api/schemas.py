@@ -87,6 +87,10 @@ class ProductivityScoreOut(BaseModel):
     productive_seconds: int = 0
     total_active_seconds: int = 0
     productive_hours_formatted: str = "0h 0m"
+    active_seconds_live: int = 0
+    active_hours_formatted: str = "0h 0m"
+    idle_seconds: int = 0
+    idle_formatted: str = "0h 0m"
     work_start: Optional[datetime] = None
     work_end: Optional[datetime] = None
     longest_focus_seconds: int = 0
@@ -196,6 +200,10 @@ class AlertPreferenceUpdate(BaseModel):
     threshold_value: Optional[float] = None
 
 
+class FeatureFlagUpdate(BaseModel):
+    enabled: bool
+
+
 class LeadOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -255,6 +263,11 @@ class UserCreate(BaseModel):
 
 class UserRoleUpdate(BaseModel):
     role: Literal["employee", "manager", "admin"]
+
+
+class UserProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
 
 
 class SetPasswordRequest(BaseModel):
@@ -426,6 +439,12 @@ class DarTemplateUpdate(BaseModel):
     fields: list[FieldDef]
 
 
+# Shared by DarEntry and Task — a DAR entry's status defaults to
+# "in_progress" (it already represents work that happened), while a fresh
+# Task defaults to "not_started" (nothing's been done on an assignment yet).
+DarStatus = Literal["not_started", "in_progress", "blocked", "completed"]
+
+
 class DarEntryOut(BaseModel):
     id: int
     date: date_type
@@ -439,6 +458,10 @@ class DarEntryOut(BaseModel):
     link: Optional[str] = None
     custom_fields: dict
     source: str
+    project: Optional[str] = None
+    status: DarStatus = "in_progress"
+    progress: int = 0
+    task_id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -454,6 +477,10 @@ class DarEntryCreate(BaseModel):
     remarks: Optional[str] = None
     link: Optional[str] = None
     custom_fields: dict = {}
+    project: Optional[str] = None
+    status: DarStatus = "in_progress"
+    progress: int = 0
+    task_id: Optional[int] = None
 
 
 class DarEntryUpdate(BaseModel):
@@ -465,8 +492,87 @@ class DarEntryUpdate(BaseModel):
     remarks: Optional[str] = None
     link: Optional[str] = None
     custom_fields: Optional[dict] = None
+    project: Optional[str] = None
+    status: Optional[DarStatus] = None
+    progress: Optional[int] = None
+    task_id: Optional[int] = None
 
 
 class DarEntryDraftRequest(BaseModel):
     date: date_type
     department_id: int
+
+
+# ── Task assignment system (distinct from DAR entries' daily log) ──
+
+
+class TaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: str
+    assigned_by: Optional[str] = None
+    department_id: Optional[int] = None
+    project: Optional[str] = None
+    title: str
+    description: Optional[str] = None
+    status: DarStatus = "not_started"
+    progress: int = 0
+    priority: Literal["low", "medium", "high"] = "medium"
+    due_date: Optional[date_type] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class TaskCreate(BaseModel):
+    user_id: str
+    department_id: Optional[int] = None
+    project: Optional[str] = None
+    title: str
+    description: Optional[str] = None
+    priority: Literal["low", "medium", "high"] = "medium"
+    due_date: Optional[date_type] = None
+
+
+class TaskUpdate(BaseModel):
+    project: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[DarStatus] = None
+    progress: Optional[int] = None
+    priority: Optional[Literal["low", "medium", "high"]] = None
+    due_date: Optional[date_type] = None
+
+
+# ── Calendar (.ics) tracker ──
+
+
+class CalendarEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    uid: Optional[str] = None
+    subject: str
+    organizer: Optional[str] = None
+    attendees: list[str] = []
+    meeting_type: Optional[str] = None
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    duration_seconds: Optional[int] = None
+    location: Optional[str] = None
+    date: date_type
+
+
+# ── File-activity watcher ──
+
+
+class FileActivityOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    file_path: str
+    event_type: str
+    timestamp: datetime
+    date: date_type
+    watched_root: Optional[str] = None

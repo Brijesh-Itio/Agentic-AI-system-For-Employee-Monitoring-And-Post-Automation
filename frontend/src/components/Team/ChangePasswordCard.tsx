@@ -1,17 +1,20 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { Loader2, ShieldCheck } from "lucide-react";
+import axios from "axios";
+import { Loader2 } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/shadcn/card";
 import { Button } from "@/components/shadcn/button";
 import { changePassword } from "@/api";
 import { useAuth } from "@/context/AuthContext";
+import { useToast } from "@/context/ToastContext";
 
 const inputClass =
   "w-full rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200";
 
 export default function ChangePasswordCard() {
   const { user } = useAuth();
+  const toast = useToast();
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
 
@@ -20,6 +23,11 @@ export default function ChangePasswordCard() {
     onSuccess: () => {
       setPassword("");
       setConfirm("");
+      toast.success("Password updated.");
+    },
+    onError: (error) => {
+      const detail = axios.isAxiosError(error) ? (error.response?.data as { detail?: string } | undefined)?.detail : null;
+      toast.error(detail ?? "Failed to update password.");
     },
   });
 
@@ -57,11 +65,6 @@ export default function ChangePasswordCard() {
           />
         </div>
         {mismatch && <p className="text-theme-xs text-error-600 dark:text-error-400">Passwords don't match.</p>}
-        {mutation.isSuccess && (
-          <p className="flex items-center gap-1.5 text-theme-xs text-success-600 dark:text-success-400">
-            <ShieldCheck className="h-3.5 w-3.5" /> Password updated.
-          </p>
-        )}
         <Button
           disabled={password.length < 6 || mismatch || mutation.isPending}
           onClick={() => mutation.mutate()}

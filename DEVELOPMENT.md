@@ -332,7 +332,7 @@ CREATE TABLE screenshots (
     date DATE NOT NULL,
     is_blurred INTEGER DEFAULT 0,
     cloud_url TEXT
-);
+);  
 ```
 
 **3.6 — Thumbnail generator**

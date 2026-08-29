@@ -111,6 +111,19 @@ class DailyScoreOut(BaseModel):
     focus_score: Optional[float] = None
 
 
+class PeriodSummaryOut(BaseModel):
+    """Analytics page's period-average stat row — averages only over days
+    that actually have data, so a short history or a day the agent wasn't
+    running doesn't drag the average toward zero."""
+    days_requested: int
+    days_tracked: int
+    avg_focus_score: Optional[float] = None
+    avg_active_seconds: int = 0
+    avg_productive_seconds: int = 0
+    avg_active_hours_formatted: str = "0h 0m"
+    avg_productive_hours_formatted: str = "0h 0m"
+
+
 class FocusSessionOut(BaseModel):
     start: datetime
     end: datetime
@@ -256,13 +269,13 @@ class UserCreate(BaseModel):
     id: str
     name: str
     email: Optional[str] = None
-    role: Literal["employee", "manager", "admin"] = "employee"
+    role: Literal["employee", "manager", "admin", "hr"] = "employee"
     organisation_id: Optional[str] = None
     password: Optional[str] = None
 
 
 class UserRoleUpdate(BaseModel):
-    role: Literal["employee", "manager", "admin"]
+    role: Literal["employee", "manager", "admin", "hr"]
 
 
 class UserProfileUpdate(BaseModel):
@@ -342,6 +355,8 @@ class AttendanceDayOut(BaseModel):
     active_seconds: int = 0
     active_hours_formatted: str = "0h 0m"
     focus_score: Optional[float] = None
+    is_late: bool = False
+    is_half_day_checkout: bool = False
 
 
 class AttendanceSummaryOut(BaseModel):
@@ -350,7 +365,48 @@ class AttendanceSummaryOut(BaseModel):
     half_days: int
     absents: int
     week_offs: int
+    late_count: int = 0
     days: list[AttendanceDayOut]
+
+
+class CompanyHolidayOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    date: date_type
+    title: str
+    holiday_type: Literal["holiday", "paid_holiday"]
+    description: Optional[str] = None
+    created_by: str
+    created_at: Optional[datetime] = None
+
+
+class CompanyHolidayCreate(BaseModel):
+    date: date_type
+    title: str
+    holiday_type: Literal["holiday", "paid_holiday"] = "holiday"
+    description: Optional[str] = None
+
+
+class EmailTemplateOut(BaseModel):
+    template_key: str
+    label: str
+    subject: str
+    body: str
+    variables: str
+    is_custom: bool
+    updated_by: Optional[str] = None
+    updated_at: Optional[datetime] = None
+
+
+class EmailTemplateUpdate(BaseModel):
+    subject: str
+    body: str
+
+
+class EmailTemplatePreview(BaseModel):
+    subject: str
+    body: str
 
 
 class LinkedInStatusOut(BaseModel):

@@ -26,6 +26,7 @@ import StatCard from "@/components/dashboard/StatCard";
 import StatusChip from "@/components/dashboard/StatusChip";
 import WeeklyTrendSparkline from "@/components/dashboard/WeeklyTrendSparkline";
 import { getStatus, getTodayScore, getTodayAppsSummary, getDailyScores, generateDarNow } from "@/api";
+import { useToast } from "@/context/ToastContext";
 
 const REFRESH_INTERVAL_MS = 30_000;
 
@@ -77,6 +78,7 @@ function QuickActionTile({ label, description, icon: Icon, onClick, isPending, i
 export default function DashboardHome() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [darMessage, setDarMessage] = useState<string | null>(null);
 
   const statusQuery = useQuery({
@@ -109,9 +111,12 @@ export default function DashboardHome() {
     onSuccess: () => {
       setDarMessage("DAR generated successfully.");
       queryClient.invalidateQueries({ queryKey: ["dar"] });
+      toast.success("DAR generated successfully.");
     },
-    onError: () =>
-      setDarMessage("DAR generation failed — Ollama may be unreachable or timed out. Check that it's running."),
+    onError: () => {
+      setDarMessage("DAR generation failed — Ollama may be unreachable or timed out. Check that it's running.");
+      toast.error("DAR generation failed — check that Ollama is running.");
+    },
   });
 
   const focusScore = scoreQuery.data?.focus_score;

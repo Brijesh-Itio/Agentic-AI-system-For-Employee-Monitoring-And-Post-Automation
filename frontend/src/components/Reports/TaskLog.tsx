@@ -1,24 +1,35 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Ban,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Circle,
   Download,
   FileSpreadsheet,
+  ListTodo,
   Loader2,
+  PencilLine,
+  Percent,
   Plus,
   Search,
   Settings2,
   Sparkles,
+  TrendingUp,
   Trash2,
   Upload,
+  UploadCloud,
+  User,
   X,
 } from "lucide-react";
 import DOMPurify from "dompurify";
 
 import { Button } from "@/components/shadcn/button";
 import { Badge } from "@/components/shadcn/badge";
+import StatStrip from "@/components/common/StatStrip";
 import { useModal } from "@/hooks/useModal";
+import { useToast } from "@/context/ToastContext";
 import DepartmentManagerModal from "./DepartmentManagerModal";
 import EntryFormModal from "./EntryFormModal";
 import {
@@ -28,14 +39,28 @@ import {
   getDepartments,
   getEntriesByDate,
   importDarCsv,
+  type DarEntry,
   type DarStatus,
 } from "@/api";
 
-const STATUS_META: Record<DarStatus, { label: string; variant: "success" | "warning" | "destructive" | "outline" }> = {
-  not_started: { label: "Not Started", variant: "outline" },
-  in_progress: { label: "In Progress", variant: "warning" },
-  blocked: { label: "Blocked", variant: "destructive" },
-  completed: { label: "Completed", variant: "success" },
+const STATUS_META: Record<
+  DarStatus,
+  { label: string; variant: "success" | "warning" | "destructive" | "outline"; icon: typeof CheckCircle2 }
+> = {
+  not_started: { label: "Not Started", variant: "outline", icon: Circle },
+  in_progress: { label: "In Progress", variant: "warning", icon: TrendingUp },
+  blocked: { label: "Blocked", variant: "destructive", icon: Ban },
+  completed: { label: "Completed", variant: "success", icon: CheckCircle2 },
+};
+
+// "manual" covers both hand-typed entries and CSV imports — the backend
+// tags CSV rows as manual too, since a human still supplied the data.
+// "ai_pipeline" isn't produced anywhere in the backend yet; kept for
+// forward-compatibility with the DarEntry type, not currently reachable.
+const SOURCE_META: Record<DarEntry["source"], { label: string; icon: typeof User }> = {
+  manual: { label: "Manual", icon: User },
+  ai_draft: { label: "AI Draft", icon: Sparkles },
+  ai_pipeline: { label: "AI Pipeline", icon: UploadCloud },
 };
 
 interface TaskLogProps {
@@ -76,8 +101,10 @@ const PAGE_SIZE = 10;
 
 export default function TaskLog({ date }: TaskLogProps) {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const deptModal = useModal();
   const entryModal = useModal();
+  const [editingEntry, setEditingEntry] = useState<DarEntry | null>(null);
   const [draftDeptId, setDraftDeptId] = useState<string>("");
   const [importDeptId, setImportDeptId] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -93,6 +120,15 @@ export default function TaskLog({ date }: TaskLogProps) {
   const allEntries = entriesQuery.data ?? [];
 
   const deptName = (id: number | null) => departments.find((d) => d.id === id)?.name ?? "—";
+
+  const taskStats = useMemo(() => {
+    const byStatus = { not_started: 0, in_progress: 0, blocked: 0, completed: 0 };
+    for (const e of allEntries) byStatus[e.status] += 1;
+    const avgProgress = allEntries.length
+      ? Math.round(allEntries.reduce((sum, e) => sum + e.progress, 0) / allEntries.length)
+      : 0;
+    return { total: allEntries.length, ...byStatus, avgProgress };
+  }, [allEntries]);
 
   const filteredEntries = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -129,17 +165,33 @@ export default function TaskLog({ date }: TaskLogProps) {
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => deleteEntry(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["dar-entries", date] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dar-entries", date] });
+      toast.success("Entry deleted.");
+    },
+    onError: () => toast.error("Failed to delete entry."),
   });
 
   const draftMutation = useMutation({
     mutationFn: (departmentId: number) => draftEntries(date, departmentId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["dar-entries", date] }),
+    onSuccess: (entries) => {
+      queryClient.invalidateQueries({ queryKey: ["dar-entries", date] });
+      toast.success(`AI drafted ${entries.length} ${entries.length === 1 ? "entry" : "entries"}.`);
+    },
+    onError: (error) =>
+      toast.error((error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Draft failed"),
   });
 
   const importMutation = useMutation({
     mutationFn: (file: File) => importDarCsv(date, file, importDeptId ? Number(importDeptId) : null),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["dar-entries", date] }),
+    onSuccess: (entries) => {
+      queryClient.invalidateQueries({ queryKey: ["dar-entries", date] });
+      toast.success(`Imported ${entries.length} ${entries.length === 1 ? "entry" : "entries"} from CSV.`);
+    },
+    onError: (error) =>
+      toast.error(
+        (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "CSV import failed."
+      ),
   });
 
   return (
@@ -156,12 +208,47 @@ export default function TaskLog({ date }: TaskLogProps) {
             <Settings2 className="h-3.5 w-3.5" />
             Departments
           </Button>
-          <Button size="sm" onClick={entryModal.openModal}>
+          <Button
+            size="sm"
+            onClick={() => {
+              setEditingEntry(null);
+              entryModal.openModal();
+            }}
+          >
             <Plus className="h-3.5 w-3.5" />
             Add Entry
           </Button>
         </div>
       </div>
+
+      <StatStrip
+        stats={[
+          { label: "Total Tasks", value: String(taskStats.total), icon: ListTodo, loading: entriesQuery.isLoading },
+          {
+            label: "Completed",
+            value: String(taskStats.completed),
+            icon: CheckCircle2,
+            valueClassName: "text-success-600 dark:text-success-400",
+            loading: entriesQuery.isLoading,
+          },
+          {
+            label: "In Progress",
+            value: String(taskStats.in_progress),
+            icon: TrendingUp,
+            valueClassName: "text-warning-600 dark:text-warning-400",
+            loading: entriesQuery.isLoading,
+          },
+          {
+            label: "Blocked",
+            value: String(taskStats.blocked),
+            icon: Ban,
+            valueClassName: taskStats.blocked > 0 ? "text-error-600 dark:text-error-400" : undefined,
+            loading: entriesQuery.isLoading,
+          },
+          { label: "Not Started", value: String(taskStats.not_started), icon: Circle, loading: entriesQuery.isLoading },
+          { label: "Avg Progress", value: `${taskStats.avgProgress}%`, icon: Percent, loading: entriesQuery.isLoading },
+        ]}
+      />
 
       <div className="flex flex-wrap items-center gap-2 rounded-lg bg-gray-50 p-3 dark:bg-white/5">
         <select
@@ -185,13 +272,6 @@ export default function TaskLog({ date }: TaskLogProps) {
           {draftMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
           AI Draft
         </Button>
-        {draftMutation.isError && (
-          <span className="text-xs text-error-500">
-            {(draftMutation.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-              "Draft failed"}
-          </span>
-        )}
-
         <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
 
         <a href={exportDarUrl(date, "csv")} target="_blank" rel="noreferrer">
@@ -334,7 +414,10 @@ export default function TaskLog({ date }: TaskLogProps) {
                 </td>
               </tr>
             ) : (
-              entries.map((entry) => (
+              entries.map((entry) => {
+                const StatusIcon = STATUS_META[entry.status].icon;
+                const SourceIcon = SOURCE_META[entry.source].icon;
+                return (
                 <tr
                   key={entry.id}
                   className="border-t border-gray-100 transition-colors hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-white/5"
@@ -361,7 +444,10 @@ export default function TaskLog({ date }: TaskLogProps) {
                     )}
                   </td>
                   <td className="px-3 py-2">
-                    <Badge variant={STATUS_META[entry.status].variant}>{STATUS_META[entry.status].label}</Badge>
+                    <Badge variant={STATUS_META[entry.status].variant}>
+                      <StatusIcon className="h-3 w-3" />
+                      {STATUS_META[entry.status].label}
+                    </Badge>
                   </td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
@@ -376,26 +462,50 @@ export default function TaskLog({ date }: TaskLogProps) {
                   </td>
                   <td className="px-3 py-2">
                     <div className="flex flex-wrap gap-1">
-                      {Object.entries(entry.custom_fields).map(([k, v]) => (
-                        <Badge key={k} variant="outline">
-                          {k}: {String(v)}
-                        </Badge>
-                      ))}
+                      {Object.entries(entry.custom_fields).length === 0 ? (
+                        <span className="text-xs text-gray-300 dark:text-gray-600">—</span>
+                      ) : (
+                        Object.entries(entry.custom_fields).map(([k, v]) => (
+                          <span
+                            key={k}
+                            className="rounded-md bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600 dark:bg-white/10 dark:text-gray-300"
+                          >
+                            <span className="text-gray-400 dark:text-gray-500">{k}:</span> {String(v)}
+                          </span>
+                        ))
+                      )}
                     </div>
                   </td>
                   <td className="px-3 py-2">
-                    <Badge variant={entry.source === "manual" ? "outline" : "default"}>{entry.source}</Badge>
+                    <span className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
+                      <SourceIcon className="h-3 w-3" />
+                      {SOURCE_META[entry.source].label}
+                    </span>
                   </td>
                   <td className="px-3 py-2">
-                    <button
-                      onClick={() => deleteMutation.mutate(entry.id)}
-                      className="text-gray-400 hover:text-error-500"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    <div className="flex items-center gap-2.5">
+                      <button
+                        onClick={() => {
+                          setEditingEntry(entry);
+                          entryModal.openModal();
+                        }}
+                        className="text-gray-400 hover:text-brand-500"
+                        aria-label="Edit entry"
+                      >
+                        <PencilLine className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        onClick={() => deleteMutation.mutate(entry.id)}
+                        className="text-gray-400 hover:text-error-500"
+                        aria-label="Delete entry"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
-              ))
+                );
+              })
             )}
           </tbody>
         </table>
@@ -446,7 +556,15 @@ export default function TaskLog({ date }: TaskLogProps) {
       )}
 
       <DepartmentManagerModal isOpen={deptModal.isOpen} onClose={deptModal.closeModal} />
-      <EntryFormModal isOpen={entryModal.isOpen} onClose={entryModal.closeModal} date={date} />
+      <EntryFormModal
+        isOpen={entryModal.isOpen}
+        onClose={() => {
+          entryModal.closeModal();
+          setEditingEntry(null);
+        }}
+        date={date}
+        entry={editingEntry}
+      />
     </div>
   );
 }

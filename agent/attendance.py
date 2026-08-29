@@ -11,9 +11,16 @@ Two independent questions per calendar day:
    show), never a separate manual entry, so attendance is automatically
    derived rather than something anyone has to fill in.
 """
-from datetime import date as date_cls
+from datetime import date as date_cls, datetime, time as time_cls
+from typing import Optional
 
-from agent.config import WORK_HOURS_END, WORK_HOURS_START
+from agent.config import (
+    AFTERNOON_PUNCH_IN_WINDOW,
+    HALF_DAY_PUNCH_OUT_WINDOW,
+    MORNING_PUNCH_IN_WINDOW,
+    WORK_HOURS_END,
+    WORK_HOURS_START,
+)
 
 # A full working day is WORK_HOURS_START-WORK_HOURS_END (10h by default);
 # thresholds are fractions of that shift rather than fixed hour counts, so
@@ -48,3 +55,40 @@ def classify_attendance(day: date_cls, total_active_seconds: int, today: date_cl
     if total_active_seconds >= HALF_DAY_THRESHOLD_SECONDS:
         return "half_day"
     return "absent"
+
+
+def _parse_hhmm(value: str) -> time_cls:
+    hour, minute = value.split(":")
+    return time_cls(int(hour), int(minute))
+
+
+def _within_window(t: time_cls, window: tuple[str, str]) -> bool:
+    start, end = window
+    return _parse_hhmm(start) <= t <= _parse_hhmm(end)
+
+
+def is_late_arrival(check_in: Optional[datetime]) -> bool:
+    """A late arrival is orthogonal to the full/half/absent classification
+    above — someone who checks in late can still put in a full day, so this
+    is reported alongside `classify_attendance`, never instead of it.
+
+    On-time means the check-in falls inside one of two sanctioned punch-in
+    windows: the normal morning shift, or an afternoon shift for someone
+    starting their day after lunch. Anything outside both windows — too
+    early, in the gap between them, or after the afternoon window — is
+    late, regardless of how much was worked afterwards."""
+    if check_in is None:
+        return False
+    t = check_in.time()
+    return not (_within_window(t, MORNING_PUNCH_IN_WINDOW) or _within_window(t, AFTERNOON_PUNCH_IN_WINDOW))
+
+
+def is_sanctioned_half_day_checkout(check_out: Optional[datetime]) -> bool:
+    """True when a check-out falls inside the sanctioned half-day early
+    departure window — paired with a morning check-in, this marks a
+    legitimate "worked the morning, left at lunch" day. Purely
+    informational for attendance display; classify_attendance()'s
+    hours-based full/half/absent split is unaffected."""
+    if check_out is None:
+        return False
+    return _within_window(check_out.time(), HALF_DAY_PUNCH_OUT_WINDOW)

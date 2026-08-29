@@ -134,6 +134,9 @@ export const getScoreByDate = (date: string) =>
 export const getTodayAppsSummary = () =>
   api.get<AppSummary[]>("/api/activity/apps/summary").then((r) => r.data);
 
+export const getAppsSummaryByDate = (date: string) =>
+  api.get<AppSummary[]>("/api/activity/apps/summary", { params: { target_date: date } }).then((r) => r.data);
+
 export const captureScreenshotNow = () =>
   api.post("/api/screenshots/capture").then((r) => r.data);
 
@@ -199,6 +202,19 @@ export const getFocusSessionsToday = () =>
 export const getPeakHoursHeatmap = (days = 7) =>
   api.get<HeatmapCell[]>("/api/productivity/heatmap", { params: { days } }).then((r) => r.data);
 
+export interface PeriodSummary {
+  days_requested: number;
+  days_tracked: number;
+  avg_focus_score: number | null;
+  avg_active_seconds: number;
+  avg_productive_seconds: number;
+  avg_active_hours_formatted: string;
+  avg_productive_hours_formatted: string;
+}
+
+export const getPeriodSummary = (days = 7) =>
+  api.get<PeriodSummary>("/api/productivity/summary", { params: { days } }).then((r) => r.data);
+
 export interface WeeklyReport {
   id: number;
   week_start: string;
@@ -223,7 +239,7 @@ export const sendDarByDate = (date: string) =>
 export const getLatestWeeklyReport = () =>
   api.get<WeeklyReport>("/api/reports/weekly/latest").then((r) => r.data);
 
-export type AlertType = "focus" | "distraction" | "wellbeing" | "manager";
+export type AlertType = "focus" | "distraction" | "wellbeing" | "manager" | "late_arrival" | "holiday_announcement";
 
 export interface Alert {
   id: number;
@@ -478,6 +494,33 @@ export const runFollowUps = () =>
 export const testGmailConnection = () =>
   api.post<{ connected: boolean }>("/api/email/test-connection").then((r) => r.data);
 
+// ── HR-customisable email templates (not one of the original modules) ──
+
+export interface EmailTemplate {
+  template_key: string;
+  label: string;
+  subject: string;
+  body: string;
+  variables: string;
+  is_custom: boolean;
+  updated_by: string | null;
+  updated_at: string | null;
+}
+
+export const getEmailTemplates = () => api.get<EmailTemplate[]>("/api/email-templates").then((r) => r.data);
+
+export const updateEmailTemplate = (key: string, subject: string, body: string) =>
+  api.put<EmailTemplate>(`/api/email-templates/${key}`, { subject, body }).then((r) => r.data);
+
+export const resetEmailTemplate = (key: string) =>
+  api.post<EmailTemplate>(`/api/email-templates/${key}/reset`).then((r) => r.data);
+
+export const previewEmailTemplate = (key: string, subject: string, body: string) =>
+  api.post<{ subject: string; body: string }>(`/api/email-templates/${key}/preview`, { subject, body }).then((r) => r.data);
+
+export const sendTestEmailTemplate = (key: string) =>
+  api.post<{ sent: boolean; to: string }>(`/api/email-templates/${key}/send-test`).then((r) => r.data);
+
 // ── Module 5 / 20: Leads ──
 
 export interface LeadEntry {
@@ -528,8 +571,9 @@ export const runLeadResearch = (targetProfile: string) =>
 // ── Login & Role-Based Access (not one of the original 24 modules — added
 // afterward so managers/admins can see what employees are doing) ──
 
-export type Role = "employee" | "manager" | "admin";
+export type Role = "employee" | "manager" | "admin" | "hr";
 export const OVERSIGHT_ROLES: Role[] = ["manager", "admin"];
+export const HR_ROLES: Role[] = ["hr", "admin"];
 
 export interface TeamUser {
   id: string;
@@ -651,6 +695,10 @@ export const getTeamAnalysis = (windowDays = 7) =>
 
 export type AttendanceStatus = "week_off" | "full_day" | "half_day" | "absent" | "upcoming";
 
+// Mirrors agent/config.py's MONTHLY_LATE_WARNING_THRESHOLD — the count at
+// which the backend fires the late-arrival warning alert + email.
+export const MONTHLY_LATE_WARNING_THRESHOLD = 3;
+
 export interface AttendanceDay {
   date: string;
   status: AttendanceStatus;
@@ -660,6 +708,8 @@ export interface AttendanceDay {
   active_seconds: number;
   active_hours_formatted: string;
   focus_score: number | null;
+  is_late: boolean;
+  is_half_day_checkout: boolean;
 }
 
 export interface AttendanceSummary {
@@ -668,6 +718,7 @@ export interface AttendanceSummary {
   half_days: number;
   absents: number;
   week_offs: number;
+  late_count: number;
   days: AttendanceDay[];
 }
 
@@ -676,6 +727,35 @@ export const getMyAttendance = (month: string) =>
 
 export const getMemberAttendance = (userId: string, month: string) =>
   api.get<AttendanceSummary>(`/api/attendance/${userId}`, { params: { month } }).then((r) => r.data);
+
+// ── Org-wide holiday calendar — HR/admin can declare, everyone can read ──
+
+export type HolidayType = "holiday" | "paid_holiday";
+
+export interface CompanyHoliday {
+  id: number;
+  date: string;
+  title: string;
+  holiday_type: HolidayType;
+  description: string | null;
+  created_by: string;
+  created_at: string | null;
+}
+
+export interface CompanyHolidayCreate {
+  date: string;
+  title: string;
+  holiday_type: HolidayType;
+  description?: string | null;
+}
+
+export const getHolidays = (start?: string, end?: string) =>
+  api.get<CompanyHoliday[]>("/api/holidays", { params: { start, end } }).then((r) => r.data);
+
+export const createHoliday = (payload: CompanyHolidayCreate) =>
+  api.post<CompanyHoliday>("/api/holidays", payload).then((r) => r.data);
+
+export const deleteHoliday = (id: number) => api.delete(`/api/holidays/${id}`).then((r) => r.data);
 
 // ── Feature flags — admin-controlled per-employee monitoring toggles ──
 // Independent of AlertPreference above, which the employee sets for

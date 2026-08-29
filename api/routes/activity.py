@@ -40,8 +40,15 @@ def get_activity_by_date(
 
 
 @router.get("/apps/summary", response_model=list[AppSummaryOut])
-def get_apps_summary(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    today = date_type.today()
+def get_apps_summary(
+    target_date: date_type | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """`target_date` added for module 11's Analytics page, which needs this
+    breakdown for whatever day is selected, not just today (defaults to
+    today so every existing caller is unaffected)."""
+    day = target_date or date_type.today()
     rows = (
         db.query(
             ActivityLog.app_name,
@@ -49,7 +56,7 @@ def get_apps_summary(db: Session = Depends(get_db), current_user: User = Depends
             func.sum(ActivityLog.duration_seconds).label("total_seconds"),
             func.count(ActivityLog.id).label("sessions"),
         )
-        .filter(ActivityLog.user_id == current_user.id, ActivityLog.date == today)
+        .filter(ActivityLog.user_id == current_user.id, ActivityLog.date == day)
         .group_by(ActivityLog.app_name)
         .order_by(func.sum(ActivityLog.duration_seconds).desc())
         .all()
@@ -67,9 +74,12 @@ def get_apps_summary(db: Session = Depends(get_db), current_user: User = Depends
 
 @router.get("/apps/top", response_model=list[AppSummaryOut])
 def get_top_apps(
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user), limit: int = 10
+    target_date: date_type | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    limit: int = 10,
 ):
-    return get_apps_summary(db, current_user)[:limit]
+    return get_apps_summary(target_date, db, current_user)[:limit]
 
 
 @router.get("/context-switching", response_model=list[ContextSwitchingHourOut])

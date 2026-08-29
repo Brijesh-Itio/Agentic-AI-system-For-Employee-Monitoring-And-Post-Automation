@@ -1,21 +1,24 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, FileText, Loader2, Mail, Sparkles } from "lucide-react";
+import { Clock, Download, FileText, Loader2, Mail, Sparkles, Zap } from "lucide-react";
 
 import PageMeta from "../../components/common/PageMeta";
 import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
 import { Badge } from "@/components/shadcn/badge";
+import ScoreGauge from "@/components/Analytics/ScoreGauge";
 import ReportsList from "@/components/Reports/ReportsList";
 import DarContent from "@/components/Reports/DarContent";
 import TaskLog from "@/components/Reports/TaskLog";
 import DateSelector from "@/components/Timeline/DateSelector";
+import { formatDuration } from "@/components/Timeline/timeScale";
 import {
   getAllDars,
   generateDarNow,
   sendDarByDate,
   getLatestWeeklyReport,
 } from "@/api";
+import { useToast } from "@/context/ToastContext";
 
 type Tab = "daily" | "weekly" | "tasklog";
 
@@ -25,6 +28,7 @@ export default function ReportsPage() {
   const [taskLogDate, setTaskLogDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
+  const toast = useToast();
 
   const darsQuery = useQuery({ queryKey: ["dar", "all"], queryFn: getAllDars });
   const weeklyQuery = useQuery({
@@ -39,7 +43,11 @@ export default function ReportsPage() {
     if (!selectedDate && reports.length > 0) setSelectedDate(reports[0].date);
   }, [reports, selectedDate]);
 
-  const selectedReport = reports.find((r) => r.date === selectedDate) ?? null;
+  const selectedIndex = reports.findIndex((r) => r.date === selectedDate);
+  const selectedReport = selectedIndex >= 0 ? reports[selectedIndex] : null;
+  // `reports` is newest-first, so the next entry is the closest earlier
+  // report — not necessarily literally "yesterday" if a day was skipped.
+  const previousReport = selectedIndex >= 0 ? reports[selectedIndex + 1] ?? null : null;
 
   const generateMutation = useMutation({
     mutationFn: generateDarNow,
@@ -48,8 +56,12 @@ export default function ReportsPage() {
       setStatusMessage("Report generated.");
       queryClient.invalidateQueries({ queryKey: ["dar", "all"] });
       setSelectedDate(report.date);
+      toast.success("DAR generated.");
     },
-    onError: () => setStatusMessage("Generation failed — check that Ollama is running."),
+    onError: () => {
+      setStatusMessage("Generation failed — check that Ollama is running.");
+      toast.error("Generation failed — check that Ollama is running.");
+    },
   });
 
   const sendMutation = useMutation({
@@ -57,8 +69,12 @@ export default function ReportsPage() {
     onSuccess: () => {
       setStatusMessage("Email sent.");
       queryClient.invalidateQueries({ queryKey: ["dar", "all"] });
+      toast.success("Email sent.");
     },
-    onError: () => setStatusMessage("Send failed — check Gmail is configured (Module 8)."),
+    onError: () => {
+      setStatusMessage("Send failed — check Gmail is configured (Module 8).");
+      toast.error("Send failed — check Gmail is configured (Module 8).");
+    },
   });
 
   const handleExport = () => {
@@ -138,18 +154,35 @@ export default function ReportsPage() {
                   </div>
                 ) : (
                   <>
-                    <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 pb-4 dark:border-gray-800">
-                      <div>
-                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-                          {new Date(`${selectedReport.date}T00:00:00`).toLocaleDateString(undefined, {
-                            weekday: "long", month: "long", day: "numeric", year: "numeric",
-                          })}
-                        </h2>
-                        <div className="mt-1 flex items-center gap-2">
-                          <Badge variant={selectedReport.productivity_score != null && selectedReport.productivity_score >= 70 ? "success" : selectedReport.productivity_score != null && selectedReport.productivity_score >= 40 ? "warning" : "destructive"}>
-                            Score: {selectedReport.productivity_score != null ? `${Math.round(selectedReport.productivity_score)}%` : "N/A"}
-                          </Badge>
-                          {selectedReport.emailed_at && <Badge variant="outline">Sent</Badge>}
+                    <div className="mb-5 flex flex-wrap items-center justify-between gap-5 rounded-xl border border-gray-100 bg-gray-50/60 p-4 dark:border-gray-800 dark:bg-white/[0.02]">
+                      <div className="flex items-center gap-4">
+                        <ScoreGauge
+                          score={selectedReport.productivity_score}
+                          yesterdayScore={previousReport?.productivity_score ?? null}
+                          compareLabel="previous report"
+                          size={96}
+                        />
+                        <div>
+                          <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
+                            {new Date(`${selectedReport.date}T00:00:00`).toLocaleDateString(undefined, {
+                              weekday: "long", month: "long", day: "numeric", year: "numeric",
+                            })}
+                          </h2>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-theme-xs text-gray-500 dark:text-gray-400">
+                            <span className="flex items-center gap-1">
+                              <Zap className="h-3.5 w-3.5 text-success-500" />
+                              Productive: {formatDuration(selectedReport.productive_seconds)}
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <Clock className="h-3.5 w-3.5 text-gray-400" />
+                              Active: {formatDuration(selectedReport.total_active_seconds)}
+                            </span>
+                          </div>
+                          {selectedReport.emailed_at && (
+                            <Badge variant="outline" className="mt-2">
+                              Sent
+                            </Badge>
+                          )}
                         </div>
                       </div>
                       <div className="flex gap-2">

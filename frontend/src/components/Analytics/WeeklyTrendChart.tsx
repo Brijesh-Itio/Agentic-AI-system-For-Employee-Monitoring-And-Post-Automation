@@ -7,8 +7,13 @@ interface WeeklyTrendChartProps {
 }
 
 export default function WeeklyTrendChart({ scores }: WeeklyTrendChartProps) {
+  // A short weekday name ("Mon") only stays unambiguous across a single
+  // week — once the caller feeds a longer window (14d/30d), the same label
+  // would repeat several times, so fall back to a dated label instead.
+  const dateFormat: Intl.DateTimeFormatOptions =
+    scores.length > 7 ? { month: "short", day: "numeric" } : { weekday: "short" };
   const data = scores.map((s) => ({
-    day: new Date(`${s.date}T00:00:00`).toLocaleDateString(undefined, { weekday: "short" }),
+    day: new Date(`${s.date}T00:00:00`).toLocaleDateString(undefined, dateFormat),
     score: s.focus_score,
   }));
 

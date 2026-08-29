@@ -4,11 +4,14 @@ import { Loader2, X } from "lucide-react";
 
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/shadcn/button";
+import { useToast } from "@/context/ToastContext";
 import RichTextEditor from "./RichTextEditor";
 import {
   createEntry,
+  updateEntry,
   getDepartmentTemplate,
   getDepartments,
+  type DarEntry,
   type DarEntryInput,
   type DarStatus,
 } from "@/api";
@@ -17,6 +20,17 @@ interface EntryFormModalProps {
   isOpen: boolean;
   onClose: () => void;
   date: string;
+  /** Present => editing that entry (PATCH); absent => creating a new one (POST). */
+  entry?: DarEntry | null;
+}
+
+// DarEntry stores full ISO timestamps; <input type="datetime-local"> wants
+// "YYYY-MM-DDTHH:MM" in local time with no timezone suffix.
+function toLocalInput(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 const inputClass =
@@ -29,8 +43,10 @@ const STATUS_OPTIONS: { value: DarStatus; label: string }[] = [
   { value: "completed", label: "Completed" },
 ];
 
-export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModalProps) {
+export default function EntryFormModal({ isOpen, onClose, date, entry = null }: EntryFormModalProps) {
+  const isEditing = entry != null;
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [departmentId, setDepartmentId] = useState<number | null>(null);
   const [task, setTask] = useState("");
   const [taskDescription, setTaskDescription] = useState("");
@@ -69,23 +85,36 @@ export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModal
   };
 
   useEffect(() => {
-    if (isOpen) {
+    if (!isOpen) {
+      reset();
+      return;
+    }
+    if (entry) {
+      setDepartmentId(entry.department_id);
+      setTask(entry.task);
+      setTaskDescription(entry.task_description ?? "");
+      setStartTime(toLocalInput(entry.start_time));
+      setEndTime(toLocalInput(entry.end_time));
+      setComment(entry.comment ?? "");
+      setRemarks(entry.remarks ?? "");
+      setLink(entry.link ?? "");
+      setProject(entry.project ?? "");
+      setStatus(entry.status);
+      setProgress(entry.progress);
+      setCustomFields(Object.fromEntries(Object.entries(entry.custom_fields).map(([k, v]) => [k, String(v)])));
+      setError(null);
+    } else {
       setStartTime(`${date}T09:00`);
       setEndTime(`${date}T18:00`);
-    } else {
-      reset();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, date]);
-
-  useEffect(() => {
-    setCustomFields({});
-  }, [departmentId]);
+  }, [isOpen, entry, date]);
 
   const createMutation = useMutation({
     mutationFn: (payload: DarEntryInput) => createEntry(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["dar-entries", date] });
+      toast.success("Entry added.");
       onClose();
     },
     onError: (err: unknown) => {
@@ -95,11 +124,25 @@ export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModal
     },
   });
 
+  const updateMutation = useMutation({
+    mutationFn: (payload: DarEntryInput) => updateEntry(entry!.id, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dar-entries", date] });
+      toast.success("Entry updated.");
+      onClose();
+    },
+    onError: (err: unknown) => {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to save changes";
+      setError(detail);
+    },
+  });
+
   const fields = templateQuery.data?.fields ?? [];
 
   const handleSubmit = () => {
     setError(null);
-    createMutation.mutate({
+    const payload: DarEntryInput = {
       date,
       department_id: departmentId,
       task,
@@ -113,14 +156,20 @@ export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModal
       status,
       progress,
       custom_fields: customFields,
-    });
+    };
+    if (isEditing) updateMutation.mutate(payload);
+    else createMutation.mutate(payload);
   };
+
+  const saving = createMutation.isPending || updateMutation.isPending;
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} className="max-w-2xl">
       <div className="max-h-[85vh] overflow-y-auto p-6">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Add Task Log Entry — {date}</h2>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
+            {isEditing ? "Edit" : "Add"} Task Log Entry — {date}
+          </h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
             <X className="h-5 w-5" />
           </button>
@@ -132,7 +181,10 @@ export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModal
             <select
               className={inputClass}
               value={departmentId ?? ""}
-              onChange={(e) => setDepartmentId(e.target.value ? Number(e.target.value) : null)}
+              onChange={(e) => {
+                setDepartmentId(e.target.value ? Number(e.target.value) : null);
+                setCustomFields({});
+              }}
             >
               <option value="">No department (base fields only)</option>
               {(deptsQuery.data ?? []).map((d) => (
@@ -284,9 +336,9 @@ export default function EntryFormModal({ isOpen, onClose, date }: EntryFormModal
             <Button variant="outline" onClick={onClose}>
               Cancel
             </Button>
-            <Button disabled={!task.trim() || createMutation.isPending} onClick={handleSubmit}>
-              {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-              Save Entry
+            <Button disabled={!task.trim() || saving} onClick={handleSubmit}>
+              {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+              {isEditing ? "Save Changes" : "Save Entry"}
             </Button>
           </div>
         </div>

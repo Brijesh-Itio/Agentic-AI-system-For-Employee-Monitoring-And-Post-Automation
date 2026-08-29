@@ -3,11 +3,12 @@ Login/logout + role-based access control (RBAC).
 
 Not one of the original 24 modules — added afterward so managers/admins can
 log in and see what every employee is doing, and so an employee's own
-dashboard is separated from everyone else's data. Three roles, ascending
-authority: `employee` (own data only), `manager` (read access to every
-employee's tracked data + AI team analysis), `admin` — "the boss" — (same
-as manager, plus full control over accounts: create/deactivate users,
-change anyone's role, reset passwords).
+dashboard is separated from everyone else's data. Four roles: `employee`
+(own data only), `manager` (read access to every employee's tracked data +
+AI team analysis), `admin` — "the boss" — (same as manager, plus full
+control over accounts: create/deactivate users, change anyone's role,
+reset passwords), and `hr` (no oversight of tracked activity data, but
+sole authority — alongside admin — over the org-wide holiday calendar).
 
 JWT access tokens (python-jose, already a project dependency for module 5's
 planned auth) carry `sub` (user id) and `role`. Logout is stateless — the
@@ -31,9 +32,11 @@ from api.database import User, get_db
 logger = logging.getLogger(__name__)
 
 ALGORITHM = "HS256"
-ROLES = ("employee", "manager", "admin")
+ROLES = ("employee", "manager", "admin", "hr")
 # Roles with oversight of everyone's data, not just their own.
 OVERSIGHT_ROLES = ("manager", "admin")
+# Roles with authority over the org-wide holiday calendar.
+HR_ROLES = ("hr", "admin")
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -100,8 +103,9 @@ def require_role(*allowed_roles: str):
             )
         return current_user
 
-    return _check
+    return _check 
 
 
 require_oversight = require_role(*OVERSIGHT_ROLES)
 require_admin = require_role("admin")
+require_hr = require_role(*HR_ROLES)

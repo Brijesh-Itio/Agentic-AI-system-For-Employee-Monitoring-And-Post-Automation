@@ -9,6 +9,7 @@ interface AuthContextValue {
   isLoading: boolean;
   isOversight: boolean; // manager or admin
   isAdmin: boolean;
+  isHr: boolean; // hr or admin — authority over the holiday calendar
   login: (userId: string, password: string) => Promise<void>;
   loginWithToken: (accessToken: string) => Promise<void>;
   logout: () => void;
@@ -73,9 +74,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const isOversight = user?.role === "manager" || user?.role === "admin";
   const isAdmin = user?.role === "admin";
+  const isHr = user?.role === "hr" || user?.role === "admin";
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, isOversight, isAdmin, login, loginWithToken, logout }}>
+    <AuthContext.Provider value={{ user, token, isLoading, isOversight, isAdmin, isHr, login, loginWithToken, logout }}>
       {children}
     </AuthContext.Provider>
   );

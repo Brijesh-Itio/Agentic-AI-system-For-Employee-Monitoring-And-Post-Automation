@@ -14,8 +14,12 @@ logger = logging.getLogger(__name__)
 
  
 def already_contacted(email: str) -> bool:
+    """A failed attempt never reached the lead's inbox, so it doesn't count
+    as contacted — only a successful send should block a retry."""
     conn = database.get_connection()
-    row = conn.execute("SELECT 1 FROM campaign_log WHERE email = ? LIMIT 1", (email,)).fetchone()
+    row = conn.execute(
+        "SELECT 1 FROM campaign_log WHERE email = ? AND status = 'sent' LIMIT 1", (email,)
+    ).fetchone()
     return row is not None
 
 

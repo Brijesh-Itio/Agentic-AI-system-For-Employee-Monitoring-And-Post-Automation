@@ -5,12 +5,14 @@ import { AlertCircle, Loader2, Plus, Search, Trash2, Users } from "lucide-react"
 import { Button } from "@/components/shadcn/button";
 import { Badge } from "@/components/shadcn/badge";
 import { createLead, deleteLead, getLeads, runLeadResearch, type LeadInput } from "@/api";
+import { useToast } from "@/context/ToastContext";
 
 const inputClass =
   "rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200";
 
 export default function LeadsPanel() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [showAddForm, setShowAddForm] = useState(false);
   const [newLead, setNewLead] = useState<LeadInput>({ name: "", company: "", email: "" });
   const [researchQuery, setResearchQuery] = useState("");
@@ -19,16 +21,22 @@ export default function LeadsPanel() {
 
   const createMutation = useMutation({
     mutationFn: (payload: LeadInput) => createLead(payload),
-    onSuccess: () => {
+    onSuccess: (lead) => {
       queryClient.invalidateQueries({ queryKey: ["leads"] });
       setNewLead({ name: "", company: "", email: "" });
       setShowAddForm(false);
+      toast.success(`${lead.name} added.`);
     },
+    onError: () => toast.error("Failed to add lead."),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => deleteLead(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["leads"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      toast.success("Lead deleted.");
+    },
+    onError: () => toast.error("Failed to delete lead."),
   });
 
   const researchMutation = useMutation({

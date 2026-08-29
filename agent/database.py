@@ -462,6 +462,37 @@ CREATE TABLE IF NOT EXISTS file_activity_logs (
     watched_root TEXT
 );
 
+-- Org-wide calendar entries HR/admin declare for everyone — distinct from
+-- calendar_events above (that one is per-user, imported meetings). One
+-- entry per date: holiday/paid_holiday override that date's attendance
+-- status to week_off (see api/routes/attendance.py); event/announcement
+-- is purely informational and doesn't affect attendance.
+CREATE TABLE IF NOT EXISTS company_holidays (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date DATE NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    holiday_type TEXT NOT NULL DEFAULT 'holiday',
+    description TEXT,
+    created_by TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_company_holidays_date ON company_holidays(date);
+
+-- HR-customisable outbound email formats. One row per template_key
+-- (dar_report, alert_focus, alert_distraction, ...) — absent means "use
+-- the built-in default" (see automation/email/sender.py's DEFAULT_TEMPLATES),
+-- present means HR has overridden it. subject/body use $variable
+-- (string.Template) placeholders, substituted at send time.
+CREATE TABLE IF NOT EXISTS email_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_key TEXT NOT NULL UNIQUE,
+    subject_template TEXT NOT NULL,
+    body_template TEXT NOT NULL,
+    updated_by TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_file_activity_logs_user_date ON file_activity_logs(user_id, date);
 CREATE INDEX IF NOT EXISTS idx_file_activity_logs_path ON file_activity_logs(file_path);
 """
@@ -1181,7 +1212,7 @@ def get_last_alert_of_type(alert_type: str, user_id: str = "local"):
 
 # ── alert_preferences ──
 
-DEFAULT_ALERT_TYPES = ("focus", "distraction", "wellbeing", "manager")
+DEFAULT_ALERT_TYPES = ("focus", "distraction", "wellbeing", "manager", "late_arrival", "holiday_announcement")
 
 
 def get_alert_preferences(user_id: str = "local"):
@@ -1221,6 +1252,76 @@ def set_alert_preference(alert_type: str, enabled: bool, threshold_value: Option
             """,
             (user_id, alert_type, 1 if enabled else 0, threshold_value),
         )
+
+
+# ── company_holidays — HR/admin-declared org-wide calendar entries ──
+
+def insert_company_holiday(
+    day: date_cls, title: str, holiday_type: str, description: Optional[str], created_by: str
+) -> int:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO company_holidays (date, title, holiday_type, description, created_by)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                title = excluded.title,
+                holiday_type = excluded.holiday_type,
+                description = excluded.description,
+                created_by = excluded.created_by
+            """,
+            (day.isoformat(), title, holiday_type, description, created_by),
+        )
+        row = cur.execute("SELECT id FROM company_holidays WHERE date = ?", (day.isoformat(),)).fetchone()
+        return row["id"]
+
+
+def list_company_holidays(start: date_cls, end: date_cls):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM company_holidays WHERE date >= ? AND date <= ? ORDER BY date ASC",
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+
+
+def delete_company_holiday(holiday_id: int) -> None:
+    with write_cursor() as cur:
+        cur.execute("DELETE FROM company_holidays WHERE id = ?", (holiday_id,))
+
+
+# ── email_templates — HR-customisable outbound email formats ──
+
+def get_email_template(template_key: str):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM email_templates WHERE template_key = ?", (template_key,)
+    ).fetchone()
+
+
+def list_email_templates():
+    conn = get_connection()
+    return conn.execute("SELECT * FROM email_templates").fetchall()
+
+
+def set_email_template(template_key: str, subject_template: str, body_template: str, updated_by: str) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO email_templates (template_key, subject_template, body_template, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(template_key) DO UPDATE SET
+                subject_template = excluded.subject_template,
+                body_template = excluded.body_template,
+                updated_by = excluded.updated_by,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (template_key, subject_template, body_template, updated_by),
+        )
+
+
+def reset_email_template(template_key: str) -> None:
+    with write_cursor() as cur:
+        cur.execute("DELETE FROM email_templates WHERE template_key = ?", (template_key,))
 
 
 # ── feature_flags — admin-controlled per-employee monitoring toggles ──

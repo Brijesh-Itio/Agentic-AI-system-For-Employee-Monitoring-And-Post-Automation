@@ -1,6 +1,7 @@
 """MODULE 5.7 — Status routes."""
 import importlib.util
 import logging
+import time
 from datetime import datetime
 
 import requests
@@ -15,6 +16,12 @@ from api.schemas import StatusComponentOut, SystemStatusOut
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/status", tags=["status"])
+
+# A live SMTP login takes seconds and the dashboard polls this endpoint every
+# 30s — checking Gmail on every poll made /api/status slow enough that it
+# never kept up with its own polling interval. Cache the result instead.
+GMAIL_CHECK_TTL_SECONDS = 300
+_gmail_cache: dict = {"result": None, "checked_at": 0.0}
 
 
 def _check_ollama() -> StatusComponentOut:
@@ -61,11 +68,19 @@ def _check_gmail() -> StatusComponentOut:
         return StatusComponentOut(
             connected=False, detail="Not configured — set GMAIL_ADDRESS/GMAIL_APP_PASSWORD in .env"
         )
+
+    now = time.monotonic()
+    if _gmail_cache["result"] is not None and now - _gmail_cache["checked_at"] < GMAIL_CHECK_TTL_SECONDS:
+        return _gmail_cache["result"]
+
     from automation.email.sender import test_gmail_connection
 
-    return StatusComponentOut(
+    result = StatusComponentOut(
         connected=test_gmail_connection(), detail="Gmail SMTP check via automation.email.sender"
     )
+    _gmail_cache["result"] = result
+    _gmail_cache["checked_at"] = now
+    return result
 
 
 def _check_playwright() -> StatusComponentOut:

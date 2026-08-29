@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, BellRing, Focus, Frown, HeartPulse, Users, X } from "lucide-react";
+import { AlarmClock, Bell, BellRing, Focus, Frown, HeartPulse, PartyPopper, Users, X } from "lucide-react";
 import { Dropdown } from "../ui/dropdown/Dropdown";
 import { getAlerts, getUnreadAlertCount, dismissAlert, type Alert, type AlertType } from "@/api";
 
@@ -11,6 +11,8 @@ const ALERT_ICON: Record<AlertType, typeof Focus> = {
   distraction: Frown,
   wellbeing: HeartPulse,
   manager: Users,
+  late_arrival: AlarmClock,
+  holiday_announcement: PartyPopper,
 };
 
 function relativeTime(iso: string): string {

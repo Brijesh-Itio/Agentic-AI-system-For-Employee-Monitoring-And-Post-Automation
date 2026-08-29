@@ -5,6 +5,11 @@ import { Loader2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/shadcn/button";
 import { deleteTeamUser, setUserPassword, updateUserProfile, updateUserRole, type Role, type TeamUser } from "@/api";
+import { useToast } from "@/context/ToastContext";
+
+function errorDetail(error: unknown, fallback: string): string {
+  return axios.isAxiosError(error) ? (error.response?.data as { detail?: string } | undefined)?.detail ?? fallback : fallback;
+}
 
 const inputClass =
   "w-full rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200";
@@ -20,6 +25,7 @@ interface AdminControlsProps {
  * get oversight of activity data, not control over accounts. */
 export default function AdminControls({ user, currentUserId, onDeleted }: AdminControlsProps) {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [role, setRole] = useState<Role>(user.role);
   const [name, setName] = useState(user.name);
   const [email, setEmail] = useState(user.email ?? "");
@@ -28,16 +34,21 @@ export default function AdminControls({ user, currentUserId, onDeleted }: AdminC
 
   const profileMutation = useMutation({
     mutationFn: () => updateUserProfile(user.id, { name, email: email.trim() || null }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["team"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["team"] });
+      toast.success("Name/email saved.");
+    },
+    onError: (error) => toast.error(errorDetail(error, "Failed to save name/email.")),
   });
-  const profileError = axios.isAxiosError(profileMutation.error)
-    ? (profileMutation.error.response?.data as { detail?: string } | undefined)?.detail
-    : null;
   const profileDirty = name.trim() !== user.name || email.trim() !== (user.email ?? "");
 
   const roleMutation = useMutation({
     mutationFn: (r: Role) => updateUserRole(user.id, r),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["team"] }),
+    onSuccess: (_, r) => {
+      queryClient.invalidateQueries({ queryKey: ["team"] });
+      toast.success(`${user.name}'s role changed to ${r}.`);
+    },
+    onError: (error) => toast.error(errorDetail(error, "Failed to change role.")),
   });
 
   const passwordMutation = useMutation({
@@ -45,15 +56,19 @@ export default function AdminControls({ user, currentUserId, onDeleted }: AdminC
     onSuccess: () => {
       setNewPassword("");
       queryClient.invalidateQueries({ queryKey: ["team"] });
+      toast.success("Password updated.");
     },
+    onError: (error) => toast.error(errorDetail(error, "Failed to update password.")),
   });
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteTeamUser(user.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team"] });
+      toast.success(`${user.name}'s account deleted.`);
       onDeleted();
     },
+    onError: (error) => toast.error(errorDetail(error, "Failed to delete account.")),
   });
 
   const isSelf = user.id === currentUserId;
@@ -89,10 +104,6 @@ export default function AdminControls({ user, currentUserId, onDeleted }: AdminC
           {profileMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
           Save Name / Email
         </Button>
-        {profileMutation.isSuccess && !profileDirty && (
-          <span className="text-theme-xs text-success-600 dark:text-success-400">Saved.</span>
-        )}
-        {profileError && <span className="text-theme-xs text-error-600 dark:text-error-400">{profileError}</span>}
       </div>
       <p className="-mt-2 text-theme-xs text-gray-400">
         Changing either never affects this member's tracked history — activity, screenshots, attendance, and DAR
@@ -105,6 +116,7 @@ export default function AdminControls({ user, currentUserId, onDeleted }: AdminC
           <select className={inputClass} value={role} onChange={(e) => setRole(e.target.value as Role)}>
             <option value="employee">Employee</option>
             <option value="manager">Manager</option>
+            <option value="hr">HR</option>
             <option value="admin">Admin</option>
           </select>
         </div>
@@ -140,9 +152,6 @@ export default function AdminControls({ user, currentUserId, onDeleted }: AdminC
           Save
         </Button>
       </div>
-      {passwordMutation.isSuccess && (
-        <p className="text-theme-xs text-success-600 dark:text-success-400">Password updated.</p>
-      )}
 
       <div className="border-t border-gray-100 pt-3 dark:border-gray-800">
         {isSelf ? (

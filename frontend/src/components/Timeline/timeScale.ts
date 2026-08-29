@@ -1,4 +1,4 @@
-import type { ActivityLogEntry, Category, IdlePeriod } from "@/api";
+import type { ActivityLogEntry, Category, IdlePeriod, ScreenshotEntry } from "@/api";
 
 // Default visible window when there's no data to derive bounds from.
 const DEFAULT_START_HOUR = 6;
@@ -77,4 +77,62 @@ export function formatDuration(seconds: number | null): string {
 
 export function formatClock(iso: string): string {
   return new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+export interface HourMark {
+  position: number;
+  hour: number;
+  label: string;
+}
+
+/** One gridline per whole hour inside the visible window — the track has
+ * no reference points otherwise, so reading off a time meant hovering
+ * every single segment. */
+export function hourMarks(bounds: DayBounds): HourMark[] {
+  if (bounds.totalMs <= 0) return [];
+  const marks: HourMark[] = [];
+  const cursor = new Date(bounds.start);
+  cursor.setMinutes(0, 0, 0);
+  if (cursor < bounds.start) cursor.setHours(cursor.getHours() + 1);
+
+  while (cursor <= bounds.end) {
+    marks.push({
+      position: percentPosition(bounds, cursor),
+      hour: cursor.getHours(),
+      label: cursor.toLocaleTimeString(undefined, { hour: "numeric" }),
+    });
+    cursor.setHours(cursor.getHours() + 1);
+  }
+  return marks;
+}
+
+export interface ScreenshotCluster {
+  position: number;
+  shots: ScreenshotEntry[];
+}
+
+/** Screenshots taken minutes apart render at nearly the same x position and
+ * their circular markers overlap into an unreadable solid strip once a day
+ * has more than a handful — group anything within `thresholdPercent` of the
+ * previous marker into one cluster instead. */
+export function clusterScreenshots(
+  bounds: DayBounds,
+  screenshots: ScreenshotEntry[],
+  thresholdPercent = 1.4
+): ScreenshotCluster[] {
+  const sorted = [...screenshots].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+
+  const clusters: ScreenshotCluster[] = [];
+  for (const shot of sorted) {
+    const position = percentPosition(bounds, new Date(shot.timestamp));
+    const current = clusters[clusters.length - 1];
+    if (current && position - current.position <= thresholdPercent) {
+      current.shots.push(shot);
+    } else {
+      clusters.push({ position, shots: [shot] });
+    }
+  }
+  return clusters;
 }

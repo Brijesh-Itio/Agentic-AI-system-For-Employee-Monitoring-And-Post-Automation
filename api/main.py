@@ -23,6 +23,8 @@ from api.routes import (
     dar_entries,
     departments,
     email,
+    email_templates,
+    holidays,
     leads,
     linkedin,
     productivity,
@@ -72,6 +74,8 @@ app.include_router(linkedin.router)
 app.include_router(email.router)
 app.include_router(command.router)
 app.include_router(departments.router)
+app.include_router(holidays.router)
+app.include_router(email_templates.router)
 app.include_router(dar_entries.router)
 
 

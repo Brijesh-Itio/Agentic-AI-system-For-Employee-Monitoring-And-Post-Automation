@@ -1,17 +1,20 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Loader2, Mail, RefreshCw, Send, Users } from "lucide-react";
+import { AlertCircle, FileEdit, Loader2, Mail, RefreshCw, Send, Users } from "lucide-react";
 
 import PageMeta from "../../components/common/PageMeta";
 import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
 import { Badge } from "@/components/shadcn/badge";
 import LeadsPanel from "@/components/Email/LeadsPanel";
+import EmailTemplatesPanel from "@/components/Email/EmailTemplatesPanel";
+import { useAuth } from "@/context/AuthContext";
 import { getCampaignLog, getCampaignStats, runEmailCampaign, runFollowUps } from "@/api";
 
-type Tab = "campaigns" | "leads";
+type Tab = "campaigns" | "leads" | "templates";
 
 export default function EmailPage() {
+  const { isHr } = useAuth();
   const [tab, setTab] = useState<Tab>("campaigns");
   const queryClient = useQueryClient();
 
@@ -111,6 +114,17 @@ export default function EmailPage() {
             <Users className="h-3.5 w-3.5" />
             Leads
           </button>
+          {isHr && (
+            <button
+              onClick={() => setTab("templates")}
+              className={`flex items-center gap-1.5 rounded-md px-4 py-1.5 text-theme-sm font-medium transition-colors ${
+                tab === "templates" ? "bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-white" : "text-gray-500"
+              }`}
+            >
+              <FileEdit className="h-3.5 w-3.5" />
+              Mail Templates
+            </button>
+          )}
         </div>
 
         {tab === "campaigns" ? (
@@ -157,10 +171,16 @@ export default function EmailPage() {
               )}
             </CardContent>
           </Card>
-        ) : (
+        ) : tab === "leads" ? (
           <Card>
             <CardContent className="p-6">
               <LeadsPanel />
+            </CardContent>
+          </Card>
+        ) : (
+          <Card>
+            <CardContent className="p-6">
+              <EmailTemplatesPanel />
             </CardContent>
           </Card>
         )}

@@ -82,6 +82,12 @@ export default function AttendanceCalendar({ month, days, statusFilter, onSelect
                   <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT_CLASSES[day.status]}`} />
                 )}
               </button>
+              {day?.is_late && inMonth && (
+                <span
+                  title="Late arrival"
+                  className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-orange-500 ring-1 ring-white dark:ring-gray-900"
+                />
+              )}
 
               {hovered === dateStr && day && day.status !== "upcoming" && (
                 <div className="absolute left-1/2 top-full z-20 mt-1.5 w-44 -translate-x-1/2 rounded-lg border border-gray-200 bg-white p-2.5 text-theme-xs shadow-xl dark:border-gray-700 dark:bg-gray-900">
@@ -94,6 +100,8 @@ export default function AttendanceCalendar({ month, days, statusFilter, onSelect
                     <div className="space-y-0.5 text-gray-500 dark:text-gray-400">
                       <p>
                         In / Out: {formatClock(day.check_in)} – {formatClock(day.check_out)}
+                        {day.is_late && <span className="ml-1 font-medium text-orange-500">(Late)</span>}
+                        {day.is_half_day_checkout && <span className="ml-1 font-medium text-blue-500">(Half-day)</span>}
                       </p>
                       <p>Active: {day.active_hours_formatted}</p>
                       <p>Focus: {day.focus_score != null ? `${Math.round(day.focus_score)}%` : "—"}</p>

@@ -14,7 +14,7 @@ What this deliberately does **not** include, and why:
   schema owner every module reads and writes through, including the AI
   modules — is hand-written SQLite (`AUTOINCREMENT`, `?` placeholders, a
   raw `sqlite3` connection), not an ORM abstraction over a swappable
-  database. Moving to Postgres means rewriting that whole persistence layer
+  database. Moving to Postgres means rewriting that whole persistence layer 
   across every file that touches it, which is a large, invasive change I
   can't safely verify without a live Postgres instance to test the rewrite
   against. Deferred by explicit decision — see the conversation this was
@@ -111,6 +111,6 @@ same `local` user_id / tracking identity). It is **not** the multi-employee
 "each person has their own synced identity" setup — see the note at the
 top of this document for what that actually requires.
 
----
+---   
 
 *Last updated: August 21, 2026*

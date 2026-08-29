@@ -5,6 +5,14 @@ Sends every kind of outbound email (DAR, alerts, campaign outreach) through
 Gmail SMTP + smtplib — zero external email API, works from any network with
 no IP whitelisting, per DEVELOPMENT.md's non-negotiable stack.
 
+Every non-campaign email (campaign emails are already dynamically RAG-
+written per lead, see 8.4) is now HR-customisable: DEFAULT_TEMPLATES below
+is the built-in subject/body for each template_key, and HR can override
+either via the email_templates table (api/routes/email_templates.py).
+Templates use $variable placeholders (string.Template, not str.format) so a
+non-technical editor never has to escape a literal `{` or `}`, and an
+unrecognised $variable is left as-is rather than raising.
+
 Sub-modules implemented (in order):
     8.1 Gmail SMTP connector
     8.2 DAR email sender
@@ -18,6 +26,7 @@ import smtplib
 from datetime import date as date_cls, datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from string import Template
 from typing import Optional
 
 from agent import database
@@ -29,7 +38,36 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 SEND_TIMEOUT_SECONDS = 30
 
-ALERT_TYPES = {"focus", "distraction", "wellbeing", "manager"}
+# Every alert_type module 14 (+ the holiday calendar) can raise — each gets
+# its own independently-editable template, not one generic "alert" format,
+# so HR can give a late-arrival warning a different tone than a holiday
+# announcement.
+ALERT_TYPES = ("focus", "distraction", "wellbeing", "manager", "late_arrival", "holiday_announcement")
+
+_ALERT_BODY_DEFAULT = (
+    "Alert type: $alert_type\n"
+    "Reason: $message\n"
+    "Time: $time\n\n"
+    "View dashboard: $dashboard_url"
+)
+
+DEFAULT_TEMPLATES: dict[str, dict[str, str]] = {
+    "dar_report": {
+        "label": "Daily Activity Report",
+        "subject": "Daily Activity Report — $date (Score: $score)",
+        "body": "$content",
+        "variables": "date, score, content",
+    },
+    **{
+        f"alert_{alert_type}": {
+            "label": f"{alert_type.replace('_', ' ').title()} Alert",
+            "subject": f"WorkPulse Alert: {alert_type.replace('_', ' ').title()}",
+            "body": _ALERT_BODY_DEFAULT,
+            "variables": "alert_type, message, time, dashboard_url",
+        }
+        for alert_type in ALERT_TYPES
+    },
+}
 
 
 def _default_recipient() -> str:
@@ -38,6 +76,27 @@ def _default_recipient() -> str:
 
 def _credentials_configured() -> bool:
     return bool(settings.GMAIL_ADDRESS and settings.GMAIL_APP_PASSWORD)
+
+
+def render_template(template_key: str, **variables: str) -> tuple[str, str]:
+    """Renders a template_key's subject+body with the given variables —
+    HR's custom override (email_templates table) if one exists, otherwise
+    DEFAULT_TEMPLATES. Shared by every sender below and by the API route
+    that previews a template before saving it."""
+    default = DEFAULT_TEMPLATES[template_key]
+    custom = database.get_email_template(template_key)
+    subject_src = custom["subject_template"] if custom else default["subject"]
+    body_src = custom["body_template"] if custom else default["body"]
+    subject = Template(subject_src).safe_substitute(**variables)
+    body = Template(body_src).safe_substitute(**variables)
+    return subject, body
+
+
+def send_raw_email(to_address: str, subject: str, body: str) -> bool:
+    """Public entry point for sending an already-rendered subject/body —
+    used by the email-templates "send test" endpoint, which needs to send
+    real mail without going through a DAR/alert/campaign-specific sender."""
+    return _send_plain_email(to_address, subject, body)
 
 
 # ── 8.1 Gmail SMTP connector ──
@@ -90,9 +149,9 @@ def send_dar_email(day: date_cls, user_id: str = "local", recipient: Optional[st
 
     score = row["productivity_score"]
     score_str = f"{score:.0f}%" if score is not None else "N/A"
-    subject = f"Daily Activity Report — {day.isoformat()} (Score: {score_str})"
+    subject, body = render_template("dar_report", date=day.isoformat(), score=score_str, content=row["content"])
 
-    sent = _send_plain_email(recipient or _default_recipient(), subject, row["content"])
+    sent = _send_plain_email(recipient or _default_recipient(), subject, body)
     if sent:
         try:
             with database.write_cursor() as cur:
@@ -113,17 +172,22 @@ def send_alert_email(
     recipient: Optional[str] = None,
     dashboard_url: str = "http://localhost:5173",
 ) -> bool:
-    if alert_type not in ALERT_TYPES:
-        logger.warning("Unrecognised alert_type %r — sending anyway", alert_type)
-
     now = datetime.now()
-    subject = f"WorkPulse Alert: {alert_type.replace('_', ' ').title()}"
-    body = (
-        f"Alert type: {alert_type}\n"
-        f"Reason: {reason}\n"
-        f"Time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        f"View dashboard: {dashboard_url}"
-    )
+    template_key = f"alert_{alert_type}"
+    if template_key not in DEFAULT_TEMPLATES:
+        logger.warning("Unrecognised alert_type %r — using the generic alert format, uncustomisable", alert_type)
+        subject = f"WorkPulse Alert: {alert_type.replace('_', ' ').title()}"
+        body = Template(_ALERT_BODY_DEFAULT).safe_substitute(
+            alert_type=alert_type, message=reason, time=now.strftime("%Y-%m-%d %H:%M:%S"), dashboard_url=dashboard_url
+        )
+    else:
+        subject, body = render_template(
+            template_key,
+            alert_type=alert_type,
+            message=reason,
+            time=now.strftime("%Y-%m-%d %H:%M:%S"),
+            dashboard_url=dashboard_url,
+        )
     return _send_plain_email(recipient or _default_recipient(), subject, body)
 
 

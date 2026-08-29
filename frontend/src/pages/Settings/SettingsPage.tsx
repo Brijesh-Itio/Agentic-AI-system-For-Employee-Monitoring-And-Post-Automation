@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Focus, Frown, HeartPulse, Loader2, Users } from "lucide-react";
+import { AlarmClock, Focus, Frown, HeartPulse, Loader2, PartyPopper, Users } from "lucide-react";
 
 import PageMeta from "../../components/common/PageMeta";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/shadcn/card";
 import { getAlertPreferences, updateAlertPreference, type AlertType, type AlertPreference } from "@/api";
 import ChangePasswordCard from "@/components/Team/ChangePasswordCard";
+import { useToast } from "@/context/ToastContext";
 
 const ALERT_META: Record<AlertType, { label: string; description: string; icon: typeof Focus; disabled?: boolean }> = {
   focus: {
@@ -28,6 +29,17 @@ const ALERT_META: Record<AlertType, { label: string; description: string; icon: 
     description: "Notify managers when a team member is inactive for 2+ hours. Requires Module 21 (Team Intelligence), not built yet.",
     icon: Users,
     disabled: true,
+  },
+  late_arrival: {
+    label: "Late Arrival Warning",
+    description:
+      "Notify (and email) when your check-in falls outside the allowed punch-in windows (9:15–9:31 AM, or 1:45–2:00 PM for an afternoon start) on 3+ days in a month.",
+    icon: AlarmClock,
+  },
+  holiday_announcement: {
+    label: "Holiday Announcements",
+    description: "Notify (and email) whenever HR adds a holiday or paid holiday to the company calendar.",
+    icon: PartyPopper,
   },
 };
 
@@ -53,6 +65,7 @@ function ToggleSwitch({ checked, onChange, disabled }: { checked: boolean; onCha
 
 export default function SettingsPage() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [pendingType, setPendingType] = useState<AlertType | null>(null);
 
   const prefsQuery = useQuery({ queryKey: ["alerts", "preferences"], queryFn: getAlertPreferences });
@@ -62,6 +75,7 @@ export default function SettingsPage() {
     onMutate: ({ type }) => setPendingType(type),
     onSettled: () => setPendingType(null),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["alerts", "preferences"] }),
+    onError: () => toast.error("Failed to update alert preference."),
   });
 
   const prefs = prefsQuery.data;

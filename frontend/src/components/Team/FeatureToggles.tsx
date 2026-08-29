@@ -4,6 +4,7 @@ import { Bell, Camera, FileText, type LucideIcon, Loader2, MonitorSmartphone, Sh
 import { getMemberFeatures, setMemberFeature, type FeatureFlag } from "@/api";
 import { Switch } from "@/components/shadcn/switch";
 import { cn } from "@/lib/utils";
+import { useToast } from "@/context/ToastContext";
 
 const FEATURES: { id: FeatureFlag; label: string; description: string; icon: LucideIcon }[] = [
   {
@@ -42,6 +43,7 @@ interface FeatureTogglesProps {
  * dashboard-side display toggle. */
 export default function FeatureToggles({ userId }: FeatureTogglesProps) {
   const queryClient = useQueryClient();
+  const toast = useToast();
 
   const flagsQuery = useQuery({
     queryKey: ["team", "member-features", userId],
@@ -52,6 +54,7 @@ export default function FeatureToggles({ userId }: FeatureTogglesProps) {
     mutationFn: ({ feature, enabled }: { feature: FeatureFlag; enabled: boolean }) =>
       setMemberFeature(userId, feature, enabled),
     onSuccess: (data) => queryClient.setQueryData(["team", "member-features", userId], data),
+    onError: () => toast.error("Failed to update feature access."),
   });
 
   const enabledCount = FEATURES.filter((f) => flagsQuery.data?.[f.id] ?? true).length;

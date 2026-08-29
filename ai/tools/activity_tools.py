@@ -17,8 +17,16 @@ from datetime import date as date_cls, datetime, time as time_cls, timedelta
 from typing import Optional
 
 from agent import database
+from agent.attendance import is_late_arrival, week_off_reason
 from agent.browser_tracker import BROWSER_PROCESSES
-from agent.config import USER_ID, WORK_HOURS_END, WORK_HOURS_START
+from agent.config import (
+    AFTERNOON_PUNCH_IN_WINDOW,
+    MONTHLY_LATE_WARNING_THRESHOLD,
+    MORNING_PUNCH_IN_WINDOW,
+    USER_ID,
+    WORK_HOURS_END,
+    WORK_HOURS_START,
+)
 from agent.idle_detector import get_idle_seconds
 
 logger = logging.getLogger(__name__)
@@ -54,7 +62,13 @@ def _send_desktop_notification(title: str, message: str) -> None:
         logger.exception("Desktop notification failed")
 
 
-def trigger_alert(alert_type: str, message: str, user_id: str = USER_ID, also_email: bool = True) -> Optional[int]:
+def trigger_alert(
+    alert_type: str,
+    message: str,
+    user_id: str = USER_ID,
+    also_email: bool = True,
+    recipient: Optional[str] = None,
+) -> Optional[int]:
     # Admin-controlled master switch (independent of the employee's own
     # per-type alert_preferences checked right below).
     if not database.is_feature_enabled("alerts_enabled", user_id):
@@ -78,7 +92,7 @@ def trigger_alert(alert_type: str, message: str, user_id: str = USER_ID, also_em
         try:
             from automation.email.sender import send_alert_email
 
-            if send_alert_email(alert_type, message, dashboard_url=DASHBOARD_URL):
+            if send_alert_email(alert_type, message, recipient=recipient, dashboard_url=DASHBOARD_URL):
                 database.mark_alert_emailed(alert_id)
         except Exception:
             logger.exception("Failed to send alert email")
@@ -218,6 +232,50 @@ def check_manager_alert(user_id: str = USER_ID) -> None:
     return None
 
 
+# ── 14.5 Late arrival warning ──
+
+def check_late_arrival_alert(user_id: str = USER_ID) -> Optional[int]:
+    """Counts this month's late check-ins (daily_stats.work_start later
+    than LATE_ARRIVAL_TIME, on working days only) and fires a warning once
+    the count reaches MONTHLY_LATE_WARNING_THRESHOLD. Debounced against the
+    alert's own history rather than a separate flag, same as every other
+    alert type here — fires once for the month, not again on every
+    additional late day after the threshold."""
+    today = date_cls.today()
+    month_start = today.replace(day=1)
+
+    conn = database.get_connection()
+    rows = conn.execute(
+        "SELECT date, work_start FROM daily_stats WHERE user_id = ? AND date >= ? AND date <= ?",
+        (user_id, month_start.isoformat(), today.isoformat()),
+    ).fetchall()
+    holiday_dates = {h["date"] for h in database.list_company_holidays(month_start, today)}
+
+    late_count = sum(
+        1
+        for r in rows
+        if week_off_reason(date_cls.fromisoformat(r["date"])) is None
+        and r["date"] not in holiday_dates
+        and is_late_arrival(datetime.fromisoformat(r["work_start"]) if r["work_start"] else None)
+    )
+    if late_count < MONTHLY_LATE_WARNING_THRESHOLD:
+        return None
+
+    last = database.get_last_alert_of_type("late_arrival", user_id)
+    if last is not None:
+        last_triggered = datetime.fromisoformat(last["triggered_at"])
+        if last_triggered.date() >= month_start:
+            return None  # already warned this month
+
+    message = (
+        f"You've checked in outside the allowed punch-in windows "
+        f"({MORNING_PUNCH_IN_WINDOW[0]}–{MORNING_PUNCH_IN_WINDOW[1]} or "
+        f"{AFTERNOON_PUNCH_IN_WINDOW[0]}–{AFTERNOON_PUNCH_IN_WINDOW[1]}) on {late_count} days "
+        f"this month ({month_start.strftime('%B %Y')}) — please plan to check in on time."
+    )
+    return trigger_alert("late_arrival", message, user_id)
+
+
 # ── scheduler ──
 
 class AlertMonitor:
@@ -268,4 +326,5 @@ class AlertMonitor:
             or (now - self._last_wellbeing_check).total_seconds() >= self.WELLBEING_CHECK_INTERVAL_SECONDS
         ):
             check_wellbeing_alert(self.user_id)
+            check_late_arrival_alert(self.user_id)
             self._last_wellbeing_check = now

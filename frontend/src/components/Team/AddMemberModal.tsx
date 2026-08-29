@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/shadcn/button";
 import { createTeamUser, type Role } from "@/api";
+import { useToast } from "@/context/ToastContext";
 
 interface AddMemberModalProps {
   isOpen: boolean;
@@ -16,12 +17,12 @@ const inputClass =
 
 export default function AddMemberModal({ isOpen, onClose }: AddMemberModalProps) {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<Role>("employee");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
 
   const reset = () => {
     setId("");
@@ -29,17 +30,17 @@ export default function AddMemberModal({ isOpen, onClose }: AddMemberModalProps)
     setEmail("");
     setRole("employee");
     setPassword("");
-    setError(null);
   };
 
   const mutation = useMutation({
     mutationFn: () => createTeamUser({ id, name, email: email || null, role, password: password || null }),
-    onSuccess: () => {
+    onSuccess: (user) => {
       queryClient.invalidateQueries({ queryKey: ["team"] });
+      toast.success(`${user.name} added to the team.`);
       reset();
       onClose();
     },
-    onError: () => setError("Could not add member — check the ID isn't already taken."),
+    onError: () => toast.error("Could not add member — check the ID isn't already taken."),
   });
 
   return (
@@ -72,6 +73,7 @@ export default function AddMemberModal({ isOpen, onClose }: AddMemberModalProps)
           <select className={inputClass} value={role} onChange={(e) => setRole(e.target.value as Role)}>
             <option value="employee">Employee</option>
             <option value="manager">Manager</option>
+            <option value="hr">HR</option>
             <option value="admin">Admin</option>
           </select>
         </div>
@@ -87,7 +89,6 @@ export default function AddMemberModal({ isOpen, onClose }: AddMemberModalProps)
             placeholder="At least 6 characters"
           />
         </div>
-        {error && <p className="text-theme-xs text-error-600 dark:text-error-400">{error}</p>}
       </div>
       <div className="mt-5 flex justify-end gap-2">
         <Button variant="outline" onClick={onClose}>

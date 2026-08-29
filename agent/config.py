@@ -64,6 +64,23 @@ CONTEXT_SWITCH_HIGH_THRESHOLD = 10    # switches per window to flag "high"
 WORK_HOURS_START = "09:00"
 WORK_HOURS_END = "19:00"
 
+# ── Attendance policy ──
+# A check-in (daily_stats.work_start) counts as on-time only inside one of
+# these two sanctioned punch-in windows — the normal morning shift, or a
+# half-day-start afternoon shift for someone working the second half of the
+# day. Outside both windows counts as a late arrival, independent of how
+# much of the day was worked afterwards.
+MORNING_PUNCH_IN_WINDOW = ("09:15", "09:31")
+AFTERNOON_PUNCH_IN_WINDOW = ("13:45", "14:00")
+# A check-out (daily_stats.work_end) inside this window is a sanctioned
+# early departure after a half day (paired with a MORNING_PUNCH_IN_WINDOW
+# check-in) — informational for attendance display, doesn't affect the
+# hours-based full/half/absent classification in classify_attendance().
+HALF_DAY_PUNCH_OUT_WINDOW = ("13:44", "14:00")
+# Fires the late-arrival warning (in-app alert + email) once a user's late
+# check-ins for the current calendar month reach this count.
+MONTHLY_LATE_WARNING_THRESHOLD = 3
+
 # ── Screenshot behaviour ──
 # Overridable so module 23's packaged .exe can apply workpulse-config.json
 # settings (via env vars it sets before this module is first imported).

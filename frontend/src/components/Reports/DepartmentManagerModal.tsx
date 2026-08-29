@@ -4,6 +4,7 @@ import { Loader2, Plus, Trash2, X } from "lucide-react";
 
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/shadcn/button";
+import { useToast } from "@/context/ToastContext";
 import {
   createDepartment,
   deleteDepartment,
@@ -23,6 +24,7 @@ interface DepartmentManagerModalProps {
 
 export default function DepartmentManagerModal({ isOpen, onClose }: DepartmentManagerModalProps) {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [newDeptName, setNewDeptName] = useState("");
   const [selectedDeptId, setSelectedDeptId] = useState<number | null>(null);
   const [fields, setFields] = useState<FieldDef[]>([]);
@@ -53,7 +55,9 @@ export default function DepartmentManagerModal({ isOpen, onClose }: DepartmentMa
       queryClient.invalidateQueries({ queryKey: ["departments"] });
       setNewDeptName("");
       setSelectedDeptId(dept.id);
+      toast.success(`Department "${dept.name}" created.`);
     },
+    onError: () => toast.error("Failed to create department."),
   });
 
   const deleteDeptMutation = useMutation({
@@ -61,14 +65,18 @@ export default function DepartmentManagerModal({ isOpen, onClose }: DepartmentMa
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["departments"] });
       setSelectedDeptId(null);
+      toast.success("Department deleted.");
     },
+    onError: () => toast.error("Failed to delete department."),
   });
 
   const saveTemplateMutation = useMutation({
     mutationFn: () => setDepartmentTemplate(selectedDeptId!, fields),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["dar-template", selectedDeptId] });
+      toast.success("Fields saved.");
     },
+    onError: () => toast.error("Failed to save fields."),
   });
 
   const addField = () => {
@@ -222,9 +230,6 @@ export default function DepartmentManagerModal({ isOpen, onClose }: DepartmentMa
                     Save Fields
                   </Button>
                 </div>
-                {saveTemplateMutation.isSuccess && (
-                  <p className="text-xs text-success-600 dark:text-success-400">Saved.</p>
-                )}
               </div>
             )}
           </div>

@@ -13,6 +13,11 @@ function toneFor(count: number): string {
   return "bg-success-400";
 }
 
+function hourLabel(hour: number): string {
+  const h = hour % 12 === 0 ? 12 : hour % 12;
+  return `${h}${hour < 12 ? "am" : "pm"}`;
+}
+
 export default function ContextSwitchingStrip({ hours, startHour, endHour }: ContextSwitchingStripProps) {
   const byHour = new Map(hours.map((h) => [h.hour, h.switch_count]));
   const range = Array.from({ length: endHour - startHour + 1 }, (_, i) => startHour + i);
@@ -28,11 +33,18 @@ export default function ContextSwitchingStrip({ hours, startHour, endHour }: Con
           return (
             <div
               key={hour}
-              className={`h-3 flex-1 rounded-sm ${count > 0 ? toneFor(count) : "bg-gray-100 dark:bg-white/5"}`}
-              title={`${hour}:00 — ${count} switches`}
+              className={`h-3 flex-1 rounded-sm transition-colors ${count > 0 ? toneFor(count) : "bg-gray-100 dark:bg-white/5"}`}
+              title={`${hourLabel(hour)} — ${count} switch${count === 1 ? "" : "es"}`}
             />
           );
         })}
+      </div>
+      <div className="mt-1 flex gap-1">
+        {range.map((hour) => (
+          <div key={hour} className="flex-1 text-center text-[10px] text-gray-400 dark:text-gray-500">
+            {hour % 2 === 0 ? hourLabel(hour) : ""}
+          </div>
+        ))}
       </div>
     </div>
   );

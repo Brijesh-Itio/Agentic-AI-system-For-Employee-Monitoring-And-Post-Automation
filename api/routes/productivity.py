@@ -22,6 +22,7 @@ from api.schemas import (
     FocusSessionsSummaryOut,
     HeatmapCellOut,
     PeakHourOut,
+    PeriodSummaryOut,
     ProductivityPatternsOut,
     ProductivityScoreOut,
     WeeklyTrendOut,
@@ -151,6 +152,42 @@ def get_daily_scores(days: int = 7, db: Session = Depends(get_db), current_user:
         DailyScoreOut(date=since + timedelta(days=i), focus_score=by_date.get(since + timedelta(days=i)))
         for i in range(days)
     ]
+
+
+@router.get("/summary", response_model=PeriodSummaryOut)
+def get_period_summary(days: int = 7, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Analytics page's 'Last N Days Average' stat row — same DailyStats
+    rows daily-scores already reads, aggregated instead of listed day by
+    day. Days with no row at all (agent wasn't running) are excluded from
+    the average rather than counted as zero."""
+    since = date_type.today() - timedelta(days=days - 1)
+    rows = (
+        db.query(DailyStats.focus_score, DailyStats.total_active_seconds, DailyStats.productive_seconds)
+        .filter(
+            DailyStats.user_id == current_user.id,
+            DailyStats.date >= since,
+            DailyStats.date <= date_type.today(),
+        )
+        .all()
+    )
+
+    if not rows:
+        return PeriodSummaryOut(days_requested=days, days_tracked=0)
+
+    scored = [r.focus_score for r in rows if r.focus_score is not None]
+    avg_focus = round(sum(scored) / len(scored), 1) if scored else None
+    avg_active = round(sum(r.total_active_seconds or 0 for r in rows) / len(rows))
+    avg_productive = round(sum(r.productive_seconds or 0 for r in rows) / len(rows))
+
+    return PeriodSummaryOut(
+        days_requested=days,
+        days_tracked=len(rows),
+        avg_focus_score=avg_focus,
+        avg_active_seconds=avg_active,
+        avg_productive_seconds=avg_productive,
+        avg_active_hours_formatted=TimeIntelligenceEngine.format_hours_minutes(avg_active),
+        avg_productive_hours_formatted=TimeIntelligenceEngine.format_hours_minutes(avg_productive),
+    )
 
 
 @router.get("/focus-sessions/today", response_model=FocusSessionsSummaryOut)

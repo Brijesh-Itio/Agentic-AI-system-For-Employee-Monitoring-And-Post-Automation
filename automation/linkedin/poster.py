@@ -15,7 +15,9 @@ The selectors below follow LinkedIn's current (2026) share-box structure
 as closely as documentation/inspection allows, but LinkedIn's DOM changes
 without notice and a first real run may need selector adjustments.
 """
+import asyncio
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, TypedDict
@@ -184,6 +186,18 @@ def post_to_linkedin(content: str, topic: str, image_path: Optional[Path] = None
 
     browser = None
     page = None
+    # Windows-only: uvicorn forces WindowsSelectorEventLoopPolicy process-wide
+    # for its own HTTP server (see uvicorn/loops/asyncio.py) — but a Selector
+    # loop can't launch subprocesses, and Playwright's sync API needs a real
+    # subprocess to start Chromium, so every call here failed with a bare
+    # NotImplementedError (str(exc) == "", hence the empty "Unexpected
+    # error:" the UI showed). The policy is process-global, not thread-local,
+    # so this is scoped as tightly as possible: swapped in only for this
+    # call, restored in `finally` below so uvicorn's own loop is unaffected.
+    previous_policy = None
+    if sys.platform == "win32":
+        previous_policy = asyncio.get_event_loop_policy()
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -191,57 +205,73 @@ def post_to_linkedin(content: str, topic: str, image_path: Optional[Path] = None
             context = browser.new_context(storage_state=storage_state)
             page = context.new_page()
 
-            _goto(page, LINKEDIN_FEED_URL)
-            if _is_login_page(page):
-                if not _login(page):
-                    browser.close()
-                    detail = "Login failed (bad credentials or a challenge requiring a human)"
-                    _log_post(topic, content, "failed", None, detail)
-                    return {"status": "failure", "detail": detail, "post_id": None}
+            # Everything below is wrapped in its own try/except *inside* the
+            # `with sync_playwright()` block, not around it — a with-block
+            # exits (tearing down Playwright's driver connection) before an
+            # exception raised inside it reaches an outer `except`, which is
+            # why _save_failure_screenshot() used to always fail with
+            # "Event loop is closed! Is Playwright already stopped?" instead
+            # of ever actually saving a screenshot. Catching it here means
+            # the page/browser are still alive when the screenshot is taken.
+            try:
                 _goto(page, LINKEDIN_FEED_URL)
+                if _is_login_page(page):
+                    if not _login(page):
+                        detail = "Login failed (bad credentials or a challenge requiring a human)"
+                        _log_post(topic, content, "failed", None, detail)
+                        return {"status": "failure", "detail": detail, "post_id": None}
+                    _goto(page, LINKEDIN_FEED_URL)
 
-            # LinkedIn's "Start a post" trigger uses randomised CSS-module
-            # class hashes that change on every deploy (verified live via
-            # DOM inspection — the old share-box-feed-entry__trigger class
-            # no longer exists) — its visible text is the stable target.
-            page.get_by_text("Start a post", exact=False).first.click(timeout=NAV_TIMEOUT_MS)
+                # LinkedIn's "Start a post" trigger uses randomised CSS-module
+                # class hashes that change on every deploy (verified live via
+                # DOM inspection — the old share-box-feed-entry__trigger class
+                # no longer exists) — its visible text is the stable target.
+                page.get_by_text("Start a post", exact=False).first.click(timeout=NAV_TIMEOUT_MS)
 
-            # Image attach MUST happen before typing, not after: verified
-            # live that clicking "Add media" swaps the whole composer for a
-            # media-upload screen and the original text editor is removed
-            # from the DOM entirely (0 contenteditable elements) — any text
-            # typed beforehand is silently discarded, not merged back in.
-            if image_path is not None and image_path.exists():
-                # The file input doesn't exist in the DOM at all until "Add
-                # media" is clicked (verified live) — LinkedIn renders it
-                # lazily rather than keeping a hidden input around.
-                page.get_by_label("Add media", exact=False).click(timeout=NAV_TIMEOUT_MS)
-                page.set_input_files('input[type="file"]', str(image_path), timeout=NAV_TIMEOUT_MS)
-                page.wait_for_timeout(2_000)  # let the image preview upload/render
-                # get_by_role("button", name="Next") is ambiguous — it also
-                # matches an unrelated "Go to next page of document" button
-                # elsewhere on the page (verified live via the resulting
-                # Playwright strict-mode-violation error) — this class is
-                # specific to the composer's own Next button.
-                page.locator("button.share-box-footer__primary-btn").click(timeout=NAV_TIMEOUT_MS)
+                # Image attach MUST happen before typing, not after: verified
+                # live that clicking "Add media" swaps the whole composer for a
+                # media-upload screen and the original text editor is removed
+                # from the DOM entirely (0 contenteditable elements) — any text
+                # typed beforehand is silently discarded, not merged back in.
+                if image_path is not None and image_path.exists():
+                    # The file input doesn't exist in the DOM at all until "Add
+                    # media" is clicked (verified live) — LinkedIn renders it
+                    # lazily rather than keeping a hidden input around.
+                    page.get_by_label("Add media", exact=False).click(timeout=NAV_TIMEOUT_MS)
+                    page.set_input_files('input[type="file"]', str(image_path), timeout=NAV_TIMEOUT_MS)
+                    page.wait_for_timeout(2_000)  # let the image preview upload/render
+                    # get_by_role("button", name="Next") is ambiguous — it also
+                    # matches an unrelated "Go to next page of document" button
+                    # elsewhere on the page (verified live via the resulting
+                    # Playwright strict-mode-violation error) — this class is
+                    # specific to the composer's own Next button.
+                    page.locator("button.share-box-footer__primary-btn").click(timeout=NAV_TIMEOUT_MS)
 
-            editor = page.locator('div.ql-editor[contenteditable="true"]')
-            editor.wait_for(timeout=NAV_TIMEOUT_MS)
-            editor.click()
-            editor.type(content)
+                editor = page.locator('div.ql-editor[contenteditable="true"]')
+                editor.wait_for(timeout=NAV_TIMEOUT_MS)
+                editor.click()
+                editor.type(content)
 
-            page.click('button.share-actions__primary-action', timeout=NAV_TIMEOUT_MS)
-            page.wait_for_timeout(3_000)  # let the post publish before reading the feed back
+                page.click('button.share-actions__primary-action', timeout=NAV_TIMEOUT_MS)
+                page.wait_for_timeout(3_000)  # let the post publish before reading the feed back
 
-            post_id = _extract_post_id(page)
+                post_id = _extract_post_id(page)
 
-            _log_post(topic, content, "success", post_id, None)
-            logger.info("Posted to LinkedIn successfully (post_id=%s)", post_id)
-            return {"status": "success", "detail": "Posted successfully", "post_id": post_id}
+                _log_post(topic, content, "success", post_id, None)
+                logger.info("Posted to LinkedIn successfully (post_id=%s)", post_id)
+                return {"status": "success", "detail": "Posted successfully", "post_id": post_id}
+
+            except Exception as exc:
+                logger.exception("LinkedIn poster failed")
+                _save_failure_screenshot(page)
+                _log_post(topic, content, "failed", None, str(exc))
+                return {"status": "failure", "detail": f"Unexpected error: {exc}", "post_id": None}
 
     except Exception as exc:
-        logger.exception("LinkedIn poster failed")
-        _save_failure_screenshot(page)
+        # Only reachable for failures outside the inner try (e.g. the
+        # browser itself never launched) — page doesn't exist yet here, so
+        # there's nothing to screenshot.
+        logger.exception("LinkedIn poster failed before a page was available")
         _log_post(topic, content, "failed", None, str(exc))
         return {"status": "failure", "detail": f"Unexpected error: {exc}", "post_id": None}
     finally:
@@ -250,6 +280,8 @@ def post_to_linkedin(content: str, topic: str, image_path: Optional[Path] = None
                 browser.close()
             except Exception:
                 pass  # already closed, or the playwright driver itself already tore down
+        if previous_policy is not None:
+            asyncio.set_event_loop_policy(previous_policy)
 
 
 if __name__ == "__main__":

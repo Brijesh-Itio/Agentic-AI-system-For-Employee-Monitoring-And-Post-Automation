@@ -164,6 +164,27 @@ class AlertPreference(Base):
     threshold_value = Column(Float)
 
 
+class CompanyHoliday(Base):
+    __tablename__ = "company_holidays"
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, nullable=False, unique=True)
+    title = Column(String, nullable=False)
+    holiday_type = Column(String, nullable=False, default="holiday")
+    description = Column(String)
+    created_by = Column(String, nullable=False)
+    created_at = Column(DateTime)
+
+
+class EmailTemplate(Base):
+    __tablename__ = "email_templates"
+    id = Column(Integer, primary_key=True)
+    template_key = Column(String, nullable=False, unique=True)
+    subject_template = Column(String, nullable=False)
+    body_template = Column(String, nullable=False)
+    updated_by = Column(String)
+    updated_at = Column(DateTime)
+
+
 class DarReport(Base):
     __tablename__ = "dar_reports"
     id = Column(Integer, primary_key=True)

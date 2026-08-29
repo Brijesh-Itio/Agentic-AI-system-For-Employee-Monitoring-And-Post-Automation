@@ -7,6 +7,7 @@ import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
 import { Badge } from "@/components/shadcn/badge";
 import { cancelJob, getJobHistory, getJobStatus, runCommand, type Job } from "@/api";
+import { useToast } from "@/context/ToastContext";
 
 const EXAMPLE_COMMANDS = [
   "generate today's report",
@@ -25,6 +26,7 @@ export default function CommandModePage() {
   const [command, setCommand] = useState("");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const queryClient = useQueryClient();
+  const toast = useToast();
 
   const activeJobQuery = useQuery({
     queryKey: ["job", activeJobId],
@@ -45,11 +47,16 @@ export default function CommandModePage() {
       setCommand("");
       queryClient.invalidateQueries({ queryKey: ["job-history"] });
     },
+    onError: () => toast.error("Failed to start command."),
   });
 
   const cancelMutation = useMutation({
     mutationFn: (jobId: string) => cancelJob(jobId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["job", activeJobId] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["job", activeJobId] });
+      toast.success("Job cancelled.");
+    },
+    onError: () => toast.error("Failed to cancel job."),
   });
 
   const activeJob = activeJobQuery.data;

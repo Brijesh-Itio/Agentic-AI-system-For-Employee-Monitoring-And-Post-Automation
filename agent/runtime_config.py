@@ -20,7 +20,7 @@ use would be a real security smell, not spec fidelity, so it's left out.
 import json
 import logging
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Optional
 
@@ -34,8 +34,6 @@ class RuntimeConfig:
     api_url: str = "http://localhost:8000"
     user_id: str = "local"
     user_name: str = ""
-    blur_screenshots: bool = False
-    screenshot_interval_minutes: int = 5
 
 
 def config_dir() -> Path:
@@ -55,6 +53,12 @@ def load_runtime_config() -> Optional[RuntimeConfig]:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        # Filter to known fields only — an older config file (or one from a
+        # future downgrade) may carry keys a removed feature used to write
+        # (e.g. blur_screenshots); silently drop them rather than treating
+        # a perfectly good, already-configured install as a first run.
+        known = {f.name for f in fields(RuntimeConfig)}
+        data = {k: v for k, v in data.items() if k in known}
         return RuntimeConfig(**{**asdict(RuntimeConfig()), **data})
     except (json.JSONDecodeError, TypeError, OSError):
         logger.exception("Failed to read %s — treating as first run", path)
@@ -74,5 +78,3 @@ def apply_to_environment(config: RuntimeConfig) -> None:
 
     os.environ["WORKPULSE_API_URL"] = config.api_url
     os.environ["WORKPULSE_USER_ID"] = config.user_id
-    os.environ["WORKPULSE_BLUR_SCREENSHOTS"] = "true" if config.blur_screenshots else "false"
-    os.environ["WORKPULSE_SCREENSHOT_INTERVAL_MINUTES"] = str(config.screenshot_interval_minutes)

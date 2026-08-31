@@ -1,4 +1,4 @@
-import type { ActivityLogEntry, Category, IdlePeriod, ScreenshotEntry } from "@/api";
+import type { ActivityLogEntry, Category, IdlePeriod } from "@/api";
 
 // Default visible window when there's no data to derive bounds from.
 const DEFAULT_START_HOUR = 6;
@@ -104,35 +104,4 @@ export function hourMarks(bounds: DayBounds): HourMark[] {
     cursor.setHours(cursor.getHours() + 1);
   }
   return marks;
-}
-
-export interface ScreenshotCluster {
-  position: number;
-  shots: ScreenshotEntry[];
-}
-
-/** Screenshots taken minutes apart render at nearly the same x position and
- * their circular markers overlap into an unreadable solid strip once a day
- * has more than a handful — group anything within `thresholdPercent` of the
- * previous marker into one cluster instead. */
-export function clusterScreenshots(
-  bounds: DayBounds,
-  screenshots: ScreenshotEntry[],
-  thresholdPercent = 1.4
-): ScreenshotCluster[] {
-  const sorted = [...screenshots].sort(
-    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-  );
-
-  const clusters: ScreenshotCluster[] = [];
-  for (const shot of sorted) {
-    const position = percentPosition(bounds, new Date(shot.timestamp));
-    const current = clusters[clusters.length - 1];
-    if (current && position - current.position <= thresholdPercent) {
-      current.shots.push(shot);
-    } else {
-      clusters.push({ position, shots: [shot] });
-    }
-  }
-  return clusters;
 }

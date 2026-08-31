@@ -110,17 +110,6 @@ export interface ContextSwitchingHour {
   switch_count: number;
 }
 
-export interface ScreenshotEntry {
-  id: number;
-  file_path: string;
-  thumbnail_path: string | null;
-  original_path: string | null;
-  timestamp: string;
-  date: string;
-  is_blurred: boolean;
-  cloud_url: string | null;
-}
-
 // ── Calls ──
 
 export const getStatus = () => api.get<SystemStatus>("/api/status").then((r) => r.data);
@@ -136,9 +125,6 @@ export const getTodayAppsSummary = () =>
 
 export const getAppsSummaryByDate = (date: string) =>
   api.get<AppSummary[]>("/api/activity/apps/summary", { params: { target_date: date } }).then((r) => r.data);
-
-export const captureScreenshotNow = () =>
-  api.post("/api/screenshots/capture").then((r) => r.data);
 
 // DAR generation runs a full Ollama narrative pass (classification of any
 // pending activity, then a multi-section report) — observed to take up to
@@ -157,15 +143,6 @@ export const getContextSwitchingByDate = (date: string) =>
   api.get<ContextSwitchingHour[]>("/api/activity/context-switching", { params: { target_date: date } }).then(
     (r) => r.data
   );
-
-export const getScreenshotsByDate = (date: string) =>
-  api.get<ScreenshotEntry[]>(`/api/screenshots/date/${date}`).then((r) => r.data);
-
-export const getMemberScreenshotsToday = (userId: string) =>
-  api.get<ScreenshotEntry[]>(`/api/screenshots/member/${userId}/today`).then((r) => r.data);
-
-export const getMemberScreenshotsByDate = (userId: string, date: string) =>
-  api.get<ScreenshotEntry[]>(`/api/screenshots/member/${userId}/date/${date}`).then((r) => r.data);
 
 export interface DailyScore {
   date: string;
@@ -366,8 +343,25 @@ export const draftEntries = (date: string, departmentId: number) =>
     .post<DarEntry[]>("/api/reports/dar/entries/draft", { date, department_id: departmentId }, { timeout: 600_000 })
     .then((r) => r.data);
 
-export const exportDarUrl = (date: string, format: "csv" | "docx" | "pdf") =>
-  `${API_BASE_URL}/api/reports/dar/date/${date}/export?format=${format}`;
+// A plain `<a href>` to this endpoint won't carry the Authorization header
+// api's axios interceptor attaches (browsers don't send it on a bare
+// navigation), so the export always 401s that way — this fetches the file
+// through the authenticated `api` instance instead and triggers the save
+// client-side, the same technique the plain-text DAR export already used.
+export type DarExportFormat = "csv" | "docx" | "pdf" | "xlsx";
+
+export const downloadDarExport = async (date: string, format: DarExportFormat) => {
+  const response = await api.get(`/api/reports/dar/date/${date}/export`, {
+    params: { format },
+    responseType: "blob",
+  });
+  const url = URL.createObjectURL(new Blob([response.data]));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `dar_${date}.${format}`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
 export const importDarCsv = (date: string, file: File, departmentId: number | null) => {
   const form = new FormData();
@@ -763,10 +757,9 @@ export const deleteHoliday = (id: number) => api.delete(`/api/holidays/${id}`).t
 // desktop agent itself (see agent/app_tracker.py etc.), not just hidden
 // on the dashboard.
 
-export type FeatureFlag = "screenshot_capture" | "activity_tracking" | "dar_generation" | "alerts_enabled";
+export type FeatureFlag = "activity_tracking" | "dar_generation" | "alerts_enabled";
 
 export const FEATURE_FLAG_LABELS: Record<FeatureFlag, string> = {
-  screenshot_capture: "Screenshot Capture",
   activity_tracking: "App & Website Tracking",
   dar_generation: "Automatic DAR Generation",
   alerts_enabled: "Alert Notifications",

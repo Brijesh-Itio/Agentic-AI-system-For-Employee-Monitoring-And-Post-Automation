@@ -11,12 +11,13 @@ Sub-modules implemented (in order):
     1.3 SQLite writer
     1.4 App switch counter
     1.5 Context switching detector
+    1.6 Check-in trigger (opening a CHECK_IN_APP_KEYWORDS app/site)
 """
 import logging
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import date as date_cls, datetime
 from typing import Optional, Tuple
 
 import psutil
@@ -26,6 +27,7 @@ import win32process
 from agent import database
 from agent.config import (
     ACTIVE_WINDOW_POLL_SECONDS,
+    CHECK_IN_APP_KEYWORDS,
     CONTEXT_SWITCH_HIGH_THRESHOLD,
     CONTEXT_SWITCH_WINDOW_SECONDS,
     USER_ID,
@@ -86,6 +88,11 @@ class AppTracker:
         # agent_heartbeat's schema comment in agent/database.py.
         self._last_heartbeat_at: Optional[float] = None
 
+        # 1.6 check-in state — the calendar date we've already confirmed a
+        # check-in for, so the keyword match only ever runs the (cheap but
+        # non-free) DB write once per day instead of on every poll.
+        self._checked_in_date: Optional[date_cls] = None
+
     # ── lifecycle ──
 
     def start(self) -> None:
@@ -141,6 +148,7 @@ class AppTracker:
             return
 
         app_name, window_title = info
+        self._maybe_check_in(app_name, window_title)
 
         if self._current_app is None:
             self._open_session(app_name, window_title)
@@ -152,6 +160,37 @@ class AppTracker:
         else:
             # Same app: keep the most recent window title for this session.
             self._current_title = window_title
+
+    # ── 1.6 check-in trigger ──
+
+    def _maybe_check_in(self, app_name: str, window_title: str) -> None:
+        """Records check-in (daily_stats.work_start) the first time today
+        the active window looks like one of CHECK_IN_APP_KEYWORDS — a
+        native process name (desktop app) or a window title (browser tab)
+        containing the keyword, whichever comes first. Replaces the old
+        "any keyboard/mouse input" trigger: opening the check-in app is now
+        the only thing that counts as check-in. Everything else that used
+        to read daily_stats.work_start (late-arrival detection, the
+        Attendance page, etc.) is unaffected — it's the same column, just
+        set by a different, more specific event now."""
+        today = date_cls.today()
+        if self._checked_in_date == today:
+            return
+
+        haystack = f"{app_name} {window_title or ''}".lower()
+        if not any(keyword.lower() in haystack for keyword in CHECK_IN_APP_KEYWORDS):
+            return
+
+        try:
+            database.set_work_start_if_unset(today, datetime.now(), self.user_id)
+            logger.info("Check-in recorded via %s", app_name)
+        except Exception:
+            logger.exception("Failed to persist check-in")
+        # Marked regardless of write success — a transient DB error here
+        # shouldn't turn into a check-in write attempt on every poll for
+        # the rest of the day; the next Zoho-window sighting will retry
+        # naturally once _checked_in_date rolls to a new day anyway.
+        self._checked_in_date = today
 
     def _open_session(self, app_name: str, window_title: str) -> None:
         self._current_app = app_name

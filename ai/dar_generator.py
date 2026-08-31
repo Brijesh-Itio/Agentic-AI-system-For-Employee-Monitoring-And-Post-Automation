@@ -108,8 +108,6 @@ def build_day_log(day: date_cls, user_id: str = USER_ID) -> str:
             f"{_format_clock(stats['longest_focus_end']).lower()})"
         )
 
-    screenshot_count = database.get_screenshot_count_for_date(day, user_id)
-
     return (
         f"DATE: {day.isoformat()}\n"
         f"WORK START: {work_start}\n"
@@ -121,8 +119,7 @@ def build_day_log(day: date_cls, user_id: str = USER_ID) -> str:
         f"TOP APPS:\n{top_apps_lines}\n\n"
         f"TOP WEBSITES:\n{top_sites_lines}\n\n"
         f"CONTEXT SWITCHING: {switch_count} switches ({_switch_band(switch_count)})\n"
-        f"LONGEST FOCUS: {longest_focus_line}\n"
-        f"SCREENSHOTS: {screenshot_count} captured"
+        f"LONGEST FOCUS: {longest_focus_line}"
     )
 
 

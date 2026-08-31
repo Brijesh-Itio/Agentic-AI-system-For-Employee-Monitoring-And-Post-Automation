@@ -10,7 +10,7 @@
 
 WorkPulse AI is a full-stack, production-ready, Agentic AI business operating system. It combines:
 
-- **Work Intelligence** — automatic activity tracking, screenshots, productivity scoring, DAR generation
+- **Work Intelligence** — automatic activity tracking, productivity scoring, DAR generation
 - **Business Automation** — LinkedIn posting, email campaigns, lead generation, all autonomous
 - **Agentic AI Brain** — LangGraph Master Agent that plans, delegates, monitors and reports every day
 
@@ -36,9 +36,8 @@ workpulse-ai/
 │   ├── tray_main.py            ← Packaged .exe entry point (module 23.5): first-run setup + tray icon
 │   ├── runtime_config.py       ← workpulse-config.json load/save (module 23.4)
 │   ├── autostart.py            ← Windows HKCU Run-key registration (module 23.3)
-│   ├── cloud_storage.py        ← Optional MinIO screenshot upload (module 24.4)
 │   ├── app_tracker.py          ← Active window tracking via pywin32
-│   ├── screenshot.py           ← Screenshot capture via Pillow
+│   ├── calendar_tracker.py     ← .ics meeting sync for meeting-aware idle detection (module 2.8)
 │   ├── idle_detector.py        ← Keyboard and mouse idle detection
 │   ├── browser_tracker.py      ← Window title reading for browser sites (sole source — no extension)
 │   ├── time_intelligence.py    ← Focus score, break tracking, work day detection
@@ -54,7 +53,6 @@ workpulse-ai/
 │   ├── routes/
 │   │   ├── activity.py         ← App tracking endpoints
 │   │   ├── auth.py             ← Login/logout/me/change-password endpoints
-│   │   ├── screenshots.py      ← Screenshot endpoints
 │   │   ├── websites.py         ← Browser tracking endpoints
 │   │   ├── reports.py          ← DAR and weekly report endpoints
 │   │   ├── productivity.py     ← Score and pattern endpoints
@@ -110,7 +108,6 @@ workpulse-ai/
 │   │   ├── pages/
 │   │   │   ├── Dashboard.jsx
 │   │   │   ├── Timeline.jsx
-│   │   │   ├── Screenshots.jsx
 │   │   │   ├── Reports.jsx
 │   │   │   ├── Analytics.jsx
 │   │   │   ├── CommandMode.jsx
@@ -121,7 +118,6 @@ workpulse-ai/
 │   │   ├── components/
 │   │   │   ├── Timeline/
 │   │   │   ├── Charts/
-│   │   │   ├── Screenshots/
 │   │   │   ├── DAR/
 │   │   │   ├── Alerts/
 │   │   │   └── shared/
@@ -161,7 +157,6 @@ workpulse-ai/
 | Backend API | FastAPI + uvicorn | High performance, auto docs, async support |
 | Local Database | SQLite via SQLAlchemy | Zero config, built into Python |
 | Cloud Database | Self-hosted PostgreSQL on Oracle Cloud Free | Always free, no subscription |
-| Screenshot Storage | Local disk Phase 1, MinIO Phase 2 | Self-hosted, zero cost |
 | Email Sending | Python smtplib + Gmail SMTP | 500/day free, any IP, no whitelisting |
 | Dashboard | React + Vite | Fast, modern, component-based |
 | Charts | Recharts | Timeline, bar, line, pie charts |
@@ -192,7 +187,7 @@ Build strictly in this order. Do not start a module until the previous module pa
 ```
 MODULE 1  — Desktop App Tracker
 MODULE 2  — Time Intelligence Engine
-MODULE 3  — Screenshot System
+MODULE 3  — Screenshot System (removed — see module 3's section)
 MODULE 4  — Browser and Website Tracker
 MODULE 5  — FastAPI Backend
 MODULE 6  — Productivity Scorer and Pattern Analyser
@@ -201,7 +196,7 @@ MODULE 8  — Gmail Email Delivery
 MODULE 9  — React Dashboard Core
 MODULE 10 — Timeline View
 MODULE 11 — App Usage Charts and Analytics
-MODULE 12 — Screenshot Gallery
+MODULE 12 — Screenshot Gallery (removed — see module 12's section)
 MODULE 13 — DAR Viewer and Reports Page
 MODULE 14 — Smart Alerts System
 MODULE 15 — LangGraph Master Agent
@@ -277,6 +272,8 @@ Monitor keyboard and mouse input using the `keyboard` library and `win32api.GetL
 **2.2 — Work day detector**
 Record the timestamp of the first keyboard or mouse input of the day as `work_start`. Record the timestamp of the last input before a 15-minute or longer idle as `work_end`. Store both in the `daily_stats` table.
 
+**2.2 update — Check-in now requires opening a specific app, not just any input.** `work_start`'s trigger changed from "the day's first keyboard/mouse input" to "the first time the active window matches `agent/config.py`'s `CHECK_IN_APP_KEYWORDS` (`["zoho"]` by default) — a desktop process name or a browser window title containing the keyword, so opening Zoho either as an installed app or a browser tab counts. Implemented as a new check-in trigger in `agent/app_tracker.py` (1.6), since that's the component already reading both the process name and window title every poll; `time_intelligence.py`'s `_tick()` no longer sets `work_start` itself, only `work_end` (unchanged — still driven by any input, not gated behind Zoho). `work_end`, breaks, idle detection, focus scoring, and the full/half/absent classification in `agent/attendance.py` (which reads `total_active_seconds`, not `work_start`) are all unaffected — only what counts as the check-in moment changed.
+
 **2.3 — Break classifier**
 Classify idle periods by duration:
 - Under 5 minutes: micro-break, do not count as break
@@ -298,50 +295,28 @@ Every day at 6pm query the past 7 days of `daily_stats` and calculate: average f
 
 **Module 2 test:** Run agent for 30 minutes including deliberate idle periods. Verify idle is detected correctly at exactly 5 minutes. Verify focus score matches manually calculated value. Verify work start time is accurate.
 
+**2.8 — Meeting-aware idle exclusion (added feature, not in the original 24 modules).** `agent/calendar_tracker.py`'s new `CalendarTracker` periodically parses a local `.ics` file (`CALENDAR_ICS_PATH`, `agent/config.py` — off by default until a real file exists there) and upserts its timed events into the already-scaffolded `calendar_events` table (`agent/database.py`'s `upsert_calendar_event`, previously written but never actually called from anywhere). No calendar API, no OAuth — an `.ics` export is the free, standard, zero-cost format every calendar app (Outlook, Google Calendar, Zoho Calendar, ...) can produce, matching this project's zero-external-API rule. `time_intelligence.py`'s `_on_idle_end` now checks the calendar first: `subtract_meeting_overlap` (pure interval subtraction, unit-tested for full/partial/split/adjacent-meeting cases) removes whatever portion of a detected idle window overlaps a scheduled meeting *before* any idle_seconds, break row, or `work_end` touch happens — a person holding their laptop through a call no longer counts as idle or "on a break." Only the genuinely idle leftover portion(s), if any, are recorded exactly as before. All-day calendar entries are skipped (no time-of-day window to check against); recurring meetings are only recognised on whichever date(s) actually appear as individual VEVENT blocks in the exported file, not expanded from an RRULE — a known, documented limitation, not a silent gap.
+
+**Module 2.8 test — actual result:** Verified live end-to-end. Unit-tested `subtract_meeting_overlap` against 6 cases (no meeting, full coverage, middle-of-window split, overlap-at-start, non-overlapping, two adjacent meetings merged) — all correct. Full-pipeline test: a real `.ics` file synced into `calendar_events`, then `_on_idle_end` called with an idle window entirely inside a scheduled meeting produced zero `idle_periods` rows, zero `breaks` rows, no `idle_seconds` added, and no `work_end` write — versus an idle window with no meeting overlap, which produced the normal idle_period/break/idle_seconds exactly as before this feature existed (regression-checked). A second test placed a 5-minute meeting in the middle of an 11-minute idle window and confirmed it split into exactly two 3-minute `idle_periods` (`idle_seconds` = 360, the 5-minute meeting correctly excluded). An all-day calendar entry in the same file was confirmed excluded from parsing. Rebuilt `WorkPulseAgent.exe` with the new `icalendar` dependency included — build succeeded, and the packaged app started cleanly with `CalendarTracker started (watching .../data/calendar.ics every 300s)` in its own log, correctly no-op'ing (module stays inert, no error) since no real `.ics` file exists yet — the actual state every install starts in until a user places one there.
+
 ---
 
-### MODULE 3 — Screenshot System
+### MODULE 3 — Screenshot System (removed)
 
-**File:** `agent/screenshot.py`
-
-**Purpose:** Capture screenshots every 5 minutes with timestamp overlay, save locally, support blur option, support manual capture via API call.
-
-**Sub-modules to build in order:**
-
-**3.1 — Screen capture**
-Use `PIL.ImageGrab.grab()` to capture the full screen. Save as JPEG with 85% quality to reduce file size. File naming convention: `screenshots/YYYY-MM-DD/HH-MM-SS.jpg`.
-
-**3.2 — Timestamp overlay**
-Use `PIL.ImageDraw` and `PIL.ImageFont` to draw the date and time string in the bottom-right corner of every screenshot. Background: semi-transparent black rectangle. Text: white, readable font size.
-
-**3.3 — Blur option**
-When `blur_screenshots = True` in config, apply `PIL.ImageFilter.GaussianBlur(radius=8)` to the saved image. Store both the blurred version for manager view and the original for audit purposes. Original is encrypted at rest in Phase 2.
-
-**3.4 — Scheduler**
-Use the `schedule` library to trigger capture every 5 minutes. This runs in its own thread alongside the app tracker so both operate simultaneously without blocking each other.
-
-**3.5 — Screenshot metadata logger**
-After every capture write a record to the `screenshots` table:
-```sql
-CREATE TABLE screenshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT DEFAULT 'local',
-    file_path TEXT NOT NULL,
-    thumbnail_path TEXT,
-    timestamp DATETIME NOT NULL,
-    date DATE NOT NULL,
-    is_blurred INTEGER DEFAULT 0,
-    cloud_url TEXT
-);
-```
-
-**3.6 — Thumbnail generator**
-Generate a 320x180 pixel thumbnail of each screenshot for dashboard gallery display. Save alongside original with `_thumb` suffix.
-
-**3.7 — Manual capture endpoint**
-Expose a function `capture_now()` that the FastAPI backend can call to trigger an immediate screenshot on demand from the dashboard.
-
-**Module 3 test:** Run for 15 minutes, verify 3 screenshots captured, verify timestamps are correct, verify files exist in correct folder structure, verify thumbnails generated.
+Originally: periodic full-screen capture (`agent/screenshot.py`) with a
+timestamp overlay, an optional blur, thumbnails, SQLite metadata logging,
+a dashboard gallery (module 12), a per-employee admin toggle
+(`screenshot_capture`), a "nearby screenshot" panel on the Timeline, and
+optional MinIO cloud mirroring (module 24.4). Removed entirely by user
+decision — the org no longer wants desktop screenshot capture as part of
+the product. `agent/screenshot.py` and `agent/cloud_storage.py` (its MinIO
+mirror) are deleted; the `Screenshots` route, page, and every Timeline/Team
+integration point that referenced screenshots are gone; the `screenshots`
+table is no longer created for new installs (existing installs keep
+whatever historical rows/files they already had — nothing was deleted out
+from under anyone, the feature just stops producing new ones and stops
+serving them). `icalendar`'s calendar tracker (module 2.8, above) reused
+this table's general pattern but is unrelated and unaffected.
 
 ---
 
@@ -399,12 +374,7 @@ Create FastAPI app with CORS enabled for localhost:5173. Configure SQLAlchemy wi
 - `GET /api/activity/apps/top` — top 10 apps by time today
 - `GET /api/activity/context-switching` — hourly context switching score
 
-**5.3 — Screenshots routes** (`api/routes/screenshots.py`)
-- `GET /api/screenshots/today` — all screenshots for today with metadata
-- `GET /api/screenshots/date/{date}` — screenshots for a specific date
-- `GET /api/screenshots/{id}` — single screenshot metadata
-- `POST /api/screenshots/capture` — trigger manual screenshot
-- `GET /api/screenshots/file/{filename}` — serve screenshot image file
+**5.3 — Screenshots routes (removed)** — `api/routes/screenshots.py` and every endpoint it defined no longer exist; see module 3's section.
 
 **5.4 — Website routes** (`api/routes/websites.py`)
 - `GET /api/websites/today` — all website sessions for today
@@ -471,7 +441,7 @@ Correlate break frequency and duration with the productivity score of the follow
 **Sub-modules to build in order:**
 
 **7.1 — Day log builder**
-Query SQLite for all activity logs, website logs, idle periods, break records, focus score, productive hours, top apps, and screenshot count for the requested date. Format this raw data into a clean structured text that can be passed to Ollama as context.
+Query SQLite for all activity logs, website logs, idle periods, break records, focus score, productive hours, and top apps for the requested date. Format this raw data into a clean structured text that can be passed to Ollama as context.
 
 Format:
 ```
@@ -495,7 +465,6 @@ TOP WEBSITES:
 
 CONTEXT SWITCHING: 47 switches (moderate)
 LONGEST FOCUS: 1h 15m (10:30am - 11:45am)
-SCREENSHOTS: 18 captured
 ```
 
 **7.2 — DAR prompt**
@@ -623,10 +592,10 @@ For bulk lead outreach — iterate through leads, write personalised email using
 Create Vite React project. Install: `recharts react-router-dom axios lucide-react date-fns @tanstack/react-query`. Configure TailwindCSS. Set up environment variable for API base URL defaulting to `http://localhost:8000`.
 
 **9.2 — App router**
-Configure React Router DOM with routes for all pages: `/`, `/timeline`, `/screenshots`, `/reports`, `/analytics`, `/command`, `/linkedin`, `/email`, `/team`, `/settings`.
+Configure React Router DOM with routes for all pages: `/`, `/timeline`, `/reports`, `/analytics`, `/command`, `/linkedin`, `/email`, `/team`, `/settings`.
 
 **9.3 — Sidebar navigation**
-Fixed left sidebar with logo, navigation links with icons, active state highlighting, collapse option. Navigation items: Dashboard, Timeline, Screenshots, Reports, Analytics, Command Mode, LinkedIn, Email, Team, Settings.
+Fixed left sidebar with logo, navigation links with icons, active state highlighting, collapse option. Navigation items: Dashboard, Timeline, Reports, Analytics, Command Mode, LinkedIn, Email, Team, Settings.
 
 **9.4 — Top navigation bar**
 Top bar with current date, system status indicator (green dot if all systems running), notification bell with unread count, user avatar.
@@ -661,8 +630,7 @@ On hover over any bar show: app name, window title, start time, end time, durati
 **10.4 — Date selector**
 Date picker above timeline to switch between days. Default to today. Navigate to any past date.
 
-**10.5 — Screenshot markers**
-Small camera icon markers on the timeline at each screenshot timestamp. Clicking opens the screenshot in a modal.
+**10.5 — Screenshot markers (removed)** — the timeline no longer shows camera-icon markers or a screenshot modal; see module 3's section.
 
 **10.6 — Idle period markers**
 Grey hatched sections on the timeline showing all idle periods with duration label.
@@ -671,7 +639,7 @@ Grey hatched sections on the timeline showing all idle periods with duration lab
 Colour-coded hour blocks below the timeline showing red for high context switching hours, yellow for moderate, green for focused hours.
 
 **10.8 — Session detail panel**
-Clicking any session bar opens a right-side detail panel showing full window title history during that session, screenshot if one was taken nearby, and category with confidence.
+Clicking any session bar opens a right-side detail panel showing full window title history during that session and category with confidence.
 
 **Module 10 test:** View today's real tracked data in the timeline. Verify every app session appears in the correct position with correct colour. Verify idle periods visible. Verify clicking opens correct details.
 
@@ -710,33 +678,11 @@ Hourly bar chart showing number of app switches per hour for today. Threshold li
 
 ---
 
-### MODULE 12 — Screenshot Gallery
+### MODULE 12 — Screenshot Gallery (removed)
 
-**File:** `dashboard/src/pages/Screenshots.jsx`
-
-**Purpose:** Browse all screenshots in a searchable, filterable gallery with full-size modal view.
-
-**Sub-modules to build in order:**
-
-**12.1 — Screenshot grid**
-Responsive grid of thumbnail images fetched from `/api/screenshots/today`. Each thumbnail shows the image, timestamp below, and the app that was active at that time.
-
-**12.2 — Date selector**
-View screenshots from any past date. Default to today.
-
-**12.3 — Full-size modal**
-Clicking any thumbnail opens a modal with the full-size screenshot. Navigation arrows to move to previous or next screenshot in the current day.
-
-**12.4 — Blur toggle**
-Toggle button per screenshot to switch between blurred and original view. Blurred is default for privacy.
-
-**12.5 — Timeline correlation**
-Clicking a screenshot in the gallery highlights the corresponding moment on a mini timeline strip below the gallery.
-
-**12.6 — Manual capture button**
-Button that calls `/api/screenshots/capture` to take an immediate screenshot. Shows a loading state then refreshes the gallery.
-
-**Module 12 test:** Verify all screenshots from today load correctly. Verify modal opens and closes. Verify blur toggle works. Verify manual capture takes and displays new screenshot.
+Originally a full gallery page (grid, date selector, full-size modal,
+blur toggle, timeline correlation, manual capture button). Removed
+entirely alongside module 3 — see that section.
 
 ---
 
@@ -1025,7 +971,7 @@ CREATE TABLE users (
 Grid of team member cards. Each card shows: name, avatar placeholder, current status (active/idle/offline), today's focus score, hours worked today, current active app. Auto-refresh every 60 seconds.
 
 **21.3 — Individual member view**
-Clicking a team member opens their full timeline, app usage breakdown and screenshots for the selected date. Same components as personal view but filtered to that user's data.
+Clicking a team member opens their full timeline and app usage breakdown for the selected date. Same components as personal view but filtered to that user's data.
 
 **21.4 — AI team analysis**
 Weekly Ollama-powered analysis that reads all team members' weekly data and produces: high performer identification, struggling member flags, workload imbalance detection, bottleneck identification, rebalancing suggestions, burnout risk scoring.
@@ -1102,8 +1048,7 @@ All three verified live end-to-end: heartbeat and activity rows appear in the re
 **24.3 — Vercel React deployment**
 `frontend/vercel.json` — build command `npm run build`, output directory `dist`, plus a catch-all rewrite to `index.html` so React Router's client-side routes (e.g. `/team`) don't 404 on direct navigation/refresh. `VITE_API_URL` set to the Railway URL from 24.2 in Vercel's project environment variables.
 
-**24.4 — MinIO screenshot storage**
-`agent/cloud_storage.py` — entirely opt-in via `MINIO_ENDPOINT`/`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`/`MINIO_BUCKET` env vars; `is_configured()` is False and nothing changes when they're unset (the default). When set, `agent/screenshot.py`'s `capture_now()` uploads the saved JPEG to MinIO after the local save (local file is never removed) and records the resulting URL via `agent.database.set_screenshot_cloud_url()`. Verified live at both ends: confirmed a true no-op with no env vars set, and confirmed the real upload path is reached and fails gracefully (logs, returns `None`, capture still succeeds) against a real `minio` client with no server running — a genuine successful upload wasn't verified since that needs an actual MinIO server.
+**24.4 — MinIO screenshot storage (removed)** — `agent/cloud_storage.py` was solely a MinIO mirror for the screenshot feature; deleted alongside it (see module 3's section). No cloud storage integration exists in its place.
 
 **24.5 — Agent cloud config (partial)**
 Module 23's `workpulse-config.json` first-run setup already asks for "API server URL" — pointing that at a Railway URL instead of `localhost:8000` is the entire cloud-pointing step for one agent. What this does *not* provide is true multi-agent sync ("all agents on all employee PCs sync to the central cloud server" as the original spec text puts it): the agent and API still share one SQLite file, so a second agent on a second PC has no path to reach that same file over the network without either 24.1's Postgres migration or a new HTTP ingestion API neither of which exist yet. One agent (or several sharing one `local` identity) pointed at one cloud API is what's actually delivered.
@@ -1138,7 +1083,6 @@ Module 23's `workpulse-config.json` first-run setup already asks for "API server
 -- Core tracking tables
 CREATE TABLE activity_logs (id, user_id, app_name, window_title, start_time, end_time, duration_seconds, category, date, created_at);
 CREATE TABLE websites (id, user_id, url, domain, page_title, start_time, end_time, duration_seconds, category, date);
-CREATE TABLE screenshots (id, user_id, file_path, thumbnail_path, timestamp, date, is_blurred, cloud_url);
 CREATE TABLE breaks (id, user_id, start_time, end_time, duration_seconds, break_type, date);
 CREATE TABLE idle_periods (id, user_id, start_time, end_time, duration_seconds, date);
 
@@ -1179,11 +1123,9 @@ All settings live in `config.py` files. Never hardcode credentials in any other 
 # agent/config.py
 API_URL = "http://localhost:8000"
 USER_ID = "local"
-SCREENSHOT_INTERVAL_MINUTES = 5
 IDLE_THRESHOLD_SECONDS = 300
 WORK_HOURS_START = "09:00"
 WORK_HOURS_END = "19:00"
-BLUR_SCREENSHOTS = False
 DAR_GENERATION_TIME = "18:00"
 
 # api/config.py
@@ -1277,7 +1219,7 @@ Update this section as each module is completed.
 |---|---|---|
 | MODULE 1 — App Tracker | ✅ Done | |
 | MODULE 2 — Time Intelligence | ✅ Done | |
-| MODULE 3 — Screenshot System | ✅ Done | |
+| MODULE 3 — Screenshot System | ⛔ Removed | Built, shipped, and used for a while, then removed entirely by explicit user decision (org no longer wants screenshot capture) — `agent/screenshot.py`, `agent/cloud_storage.py`, the API route, dashboard gallery, and every Timeline/Team integration point are all deleted; see module 3's section |
 | MODULE 4 — Browser Tracker | ✅ Done | Window-title tracking only, by permanent user decision (no browser extension); hardened with an expanded known-site table, bare-domain regex, and a never-drop fallback bucket |
 | MODULE 5 — FastAPI Backend | ✅ Done | |
 | MODULE 6 — Productivity Scorer | ✅ Done | |
@@ -1286,7 +1228,7 @@ Update this section as each module is completed.
 | MODULE 9 — Dashboard Core | ✅ Done | |
 | MODULE 10 — Timeline View | ✅ Done | |
 | MODULE 11 — Analytics Charts | ✅ Done | |
-| MODULE 12 — Screenshot Gallery | ✅ Done | |
+| MODULE 12 — Screenshot Gallery | ⛔ Removed | Removed alongside module 3 |
 | MODULE 13 — DAR Viewer | ✅ Done | |
 | MODULE 14 — Smart Alerts | ✅ Done | |
 | MODULE 15 — Master Agent | ✅ Done | Real LangGraph StateGraph, verified via full-cycle runs |
@@ -1298,7 +1240,7 @@ Update this section as each module is completed.
 | MODULE 21 — Team Intelligence | ✅ Done | Team overview, individual member view, AI team analysis (21.4), and comparison chart with anonymise toggle (21.5), frontend + backend |
 | MODULE 22 — Chrome Extension | ⛔ Removed | Built once, then deleted by explicit user decision — no browser extension; module 4 is the sole (and hardened) source of website data |
 | MODULE 23 — .exe Packaging | ✅ Done | Built and launch-verified: `pyinstaller workpulse-agent.spec` produces `dist/WorkPulseAgent.exe`, confirmed to start, stay resident, and reach the first-run dialog without crashing. Windowed (no console), tray icon, HKCU autostart, workpulse-config.json first-run setup |
-| MODULE 24 — Cloud Deployment | 🟡 Partial (by decision) | Railway (API) + Vercel (dashboard) deploy configs done, optional MinIO screenshot storage done and verified (graceful no-op when unconfigured, real upload path verified against a real MinIO client). Postgres migration and true multi-agent cloud sync deliberately deferred — see docs/DEPLOYMENT.md's top section for why. See docs/DEPLOYMENT.md for full deploy steps |
+| MODULE 24 — Cloud Deployment | 🟡 Partial (by decision) | Railway (API) + Vercel (dashboard) deploy configs done. Optional MinIO screenshot storage (24.4) removed alongside module 3. Postgres migration and true multi-agent cloud sync deliberately deferred — see docs/DEPLOYMENT.md's top section for why. See docs/DEPLOYMENT.md for full deploy steps |
 | Login & Role-Based Access (added feature) | ✅ Done | JWT login/logout, 3 roles (employee/manager/admin), full RBAC on Team routes, admin account controls, self-service password change, and per-user data scoping across every personal-data route (activity, screenshots, websites, productivity, reports, alerts, dar_entries, command, status) — the last of these was a real bug caught live (an employee login could see another identity's data) and fixed the same day. Verified live end-to-end (see section above) |
 
 ---

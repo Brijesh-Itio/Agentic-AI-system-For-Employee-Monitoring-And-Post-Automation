@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Camera, FileText, type LucideIcon, Loader2, MonitorSmartphone, ShieldCheck } from "lucide-react";
+import { Bell, FileText, type LucideIcon, Loader2, MonitorSmartphone, ShieldCheck } from "lucide-react";
 
 import { getMemberFeatures, setMemberFeature, type FeatureFlag } from "@/api";
 import { Switch } from "@/components/shadcn/switch";
@@ -7,12 +7,6 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/context/ToastContext";
 
 const FEATURES: { id: FeatureFlag; label: string; description: string; icon: LucideIcon }[] = [
-  {
-    id: "screenshot_capture",
-    label: "Screenshot Capture",
-    description: "Periodic screen captures from their device",
-    icon: Camera,
-  },
   {
     id: "activity_tracking",
     label: "App & Website Tracking",

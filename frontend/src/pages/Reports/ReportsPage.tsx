@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Clock, Download, FileText, Loader2, Mail, Sparkles, Zap } from "lucide-react";
+import { ChevronDown, Clock, Download, FileSpreadsheet, FileText, Loader2, Mail, Sparkles, Zap } from "lucide-react";
 
 import PageMeta from "../../components/common/PageMeta";
 import { Button } from "@/components/shadcn/button";
@@ -17,6 +17,8 @@ import {
   generateDarNow,
   sendDarByDate,
   getLatestWeeklyReport,
+  downloadDarExport,
+  type DarExportFormat,
 } from "@/api";
 import { useToast } from "@/context/ToastContext";
 
@@ -27,8 +29,21 @@ export default function ReportsPage() {
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [taskLogDate, setTaskLogDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
   const toast = useToast();
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [exportMenuOpen]);
 
   const darsQuery = useQuery({ queryKey: ["dar", "all"], queryFn: getAllDars });
   const weeklyQuery = useQuery({
@@ -77,7 +92,9 @@ export default function ReportsPage() {
     },
   });
 
-  const handleExport = () => {
+  const [exportingFormat, setExportingFormat] = useState<DarExportFormat | null>(null);
+
+  const handleExportText = () => {
     if (!selectedReport) return;
     const blob = new Blob([selectedReport.content], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -86,6 +103,18 @@ export default function ReportsPage() {
     a.download = `dar-${selectedReport.date}.txt`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleExportFile = async (format: DarExportFormat) => {
+    if (!selectedReport) return;
+    setExportingFormat(format);
+    try {
+      await downloadDarExport(selectedReport.date, format);
+    } catch {
+      toast.error(`Export failed — could not generate the ${format.toUpperCase()} file.`);
+    } finally {
+      setExportingFormat(null);
+    }
   };
 
   return (
@@ -186,10 +215,57 @@ export default function ReportsPage() {
                         </div>
                       </div>
                       <div className="flex gap-2">
-                        <Button variant="outline" size="sm" onClick={handleExport}>
-                          <Download className="h-3.5 w-3.5" />
-                          Export
-                        </Button>
+                        <div className="relative" ref={exportMenuRef}>
+                          <Button variant="outline" size="sm" onClick={() => setExportMenuOpen((o) => !o)}>
+                            <Download className="h-3.5 w-3.5" />
+                            Export
+                            <ChevronDown className="h-3 w-3" />
+                          </Button>
+                          {exportMenuOpen && (
+                            <div className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-800">
+                              <button
+                                onClick={() => {
+                                  handleExportText();
+                                  setExportMenuOpen(false);
+                                }}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-theme-sm text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5"
+                              >
+                                <FileText className="h-3.5 w-3.5" />
+                                Text (.txt)
+                              </button>
+                              <button
+                                onClick={() => {
+                                  handleExportFile("pdf");
+                                  setExportMenuOpen(false);
+                                }}
+                                disabled={exportingFormat === "pdf"}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-theme-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50 dark:text-gray-300 dark:hover:bg-white/5"
+                              >
+                                {exportingFormat === "pdf" ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <FileText className="h-3.5 w-3.5" />
+                                )}
+                                PDF
+                              </button>
+                              <button
+                                onClick={() => {
+                                  handleExportFile("xlsx");
+                                  setExportMenuOpen(false);
+                                }}
+                                disabled={exportingFormat === "xlsx"}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-theme-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50 dark:text-gray-300 dark:hover:bg-white/5"
+                              >
+                                {exportingFormat === "xlsx" ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <FileSpreadsheet className="h-3.5 w-3.5" />
+                                )}
+                                Excel (.xlsx)
+                              </button>
+                            </div>
+                          )}
+                        </div>
                         <Button
                           variant="outline"
                           size="sm"

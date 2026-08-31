@@ -34,12 +34,13 @@ import DepartmentManagerModal from "./DepartmentManagerModal";
 import EntryFormModal from "./EntryFormModal";
 import {
   deleteEntry,
+  downloadDarExport,
   draftEntries,
-  exportDarUrl,
   getDepartments,
   getEntriesByDate,
   importDarCsv,
   type DarEntry,
+  type DarExportFormat,
   type DarStatus,
 } from "@/api";
 
@@ -120,6 +121,18 @@ export default function TaskLog({ date }: TaskLogProps) {
   const allEntries = entriesQuery.data ?? [];
 
   const deptName = (id: number | null) => departments.find((d) => d.id === id)?.name ?? "—";
+
+  const [exportingFormat, setExportingFormat] = useState<DarExportFormat | null>(null);
+  const handleExport = async (format: DarExportFormat) => {
+    setExportingFormat(format);
+    try {
+      await downloadDarExport(date, format);
+    } catch {
+      toast.error(`Export failed — could not generate the ${format.toUpperCase()} file.`);
+    } finally {
+      setExportingFormat(null);
+    }
+  };
 
   const taskStats = useMemo(() => {
     const byStatus = { not_started: 0, in_progress: 0, blocked: 0, completed: 0 };
@@ -274,24 +287,22 @@ export default function TaskLog({ date }: TaskLogProps) {
         </Button>
         <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
 
-        <a href={exportDarUrl(date, "csv")} target="_blank" rel="noreferrer">
-          <Button variant="outline" size="sm">
-            <Download className="h-3.5 w-3.5" />
-            CSV
-          </Button>
-        </a>
-        <a href={exportDarUrl(date, "docx")} target="_blank" rel="noreferrer">
-          <Button variant="outline" size="sm">
-            <Download className="h-3.5 w-3.5" />
-            DOCX
-          </Button>
-        </a>
-        <a href={exportDarUrl(date, "pdf")} target="_blank" rel="noreferrer">
-          <Button variant="outline" size="sm">
-            <Download className="h-3.5 w-3.5" />
-            PDF
-          </Button>
-        </a>
+        <Button variant="outline" size="sm" disabled={exportingFormat === "csv"} onClick={() => handleExport("csv")}>
+          {exportingFormat === "csv" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          CSV
+        </Button>
+        <Button variant="outline" size="sm" disabled={exportingFormat === "docx"} onClick={() => handleExport("docx")}>
+          {exportingFormat === "docx" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          DOCX
+        </Button>
+        <Button variant="outline" size="sm" disabled={exportingFormat === "pdf"} onClick={() => handleExport("pdf")}>
+          {exportingFormat === "pdf" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          PDF
+        </Button>
+        <Button variant="outline" size="sm" disabled={exportingFormat === "xlsx"} onClick={() => handleExport("xlsx")}>
+          {exportingFormat === "xlsx" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          Excel
+        </Button>
 
         <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
 

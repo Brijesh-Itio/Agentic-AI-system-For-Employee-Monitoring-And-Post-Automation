@@ -9,7 +9,6 @@ import SsoCallbackPage from "./pages/AuthPages/SsoCallbackPage";
 import DashboardHome from "./pages/Dashboard/Home";
 import TimelinePage from "./pages/Timeline/TimelinePage";
 import AnalyticsPage from "./pages/Analytics/AnalyticsPage";
-import ScreenshotsPage from "./pages/Screenshots/ScreenshotsPage";
 import ReportsPage from "./pages/Reports/ReportsPage";
 import SettingsPage from "./pages/Settings/SettingsPage";
 import CommandModePage from "./pages/CommandMode/CommandModePage";
@@ -33,7 +32,6 @@ export default function App() {
 
             <Route path="/timeline" element={<TimelinePage />} />
             <Route path="/attendance" element={<AttendancePage />} />
-            <Route path="/screenshots" element={<ScreenshotsPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/analytics" element={<AnalyticsPage />} />
             <Route path="/command" element={<CommandModePage />} />

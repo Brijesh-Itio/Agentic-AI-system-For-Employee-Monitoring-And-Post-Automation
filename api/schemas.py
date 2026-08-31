@@ -60,27 +60,6 @@ class TopSiteOut(BaseModel):
     visits: int
 
 
-class ScreenshotOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    file_path: str
-    thumbnail_path: Optional[str] = None
-    original_path: Optional[str] = None
-    timestamp: datetime
-    date: date_type
-    is_blurred: bool
-    cloud_url: Optional[str] = None
-
-
-class CaptureScreenshotOut(BaseModel):
-    id: int
-    file_path: str
-    thumbnail_path: Optional[str] = None
-    timestamp: datetime
-    is_blurred: bool
-
-
 class ProductivityScoreOut(BaseModel):
     date: date_type
     focus_score: Optional[float] = None

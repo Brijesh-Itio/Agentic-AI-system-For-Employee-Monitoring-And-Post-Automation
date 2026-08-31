@@ -1,8 +1,9 @@
 """
 Desktop agent entry point — starts every Module 1-4 + 14-15 tracker
-together: app tracking, time intelligence (idle/breaks/focus scoring),
-screenshots, browser/website tracking, smart alert monitoring, and the
-LangGraph Master Agent's daily scheduler. Each runs on its own thread.
+together: app tracking, time intelligence (idle/breaks/focus scoring,
+meeting-aware via the calendar tracker), browser/website tracking, smart
+alert monitoring, and the LangGraph Master Agent's daily scheduler. Each
+runs on its own thread.
 
 Note: module 7 also defines a standalone DarScheduler (18:00 trigger), but
 it's intentionally NOT started here — module 15's MasterAgentScheduler
@@ -21,9 +22,9 @@ import time
 
 from agent.app_tracker import AppTracker
 from agent.browser_tracker import BrowserTracker
+from agent.calendar_tracker import CalendarTracker
 from agent.database import init_db
 from agent.logging_config import setup_logging
-from agent.screenshot import ScreenshotScheduler
 from agent.time_intelligence import TimeIntelligenceEngine
 from ai.master_agent import MasterAgentScheduler
 from ai.productivity_scorer import LiveScoringScheduler
@@ -38,8 +39,8 @@ def start_components() -> list:
 
     components = [
         AppTracker(),
+        CalendarTracker(),
         TimeIntelligenceEngine(),
-        ScreenshotScheduler(),
         BrowserTracker(),
         AlertMonitor(),
         MasterAgentScheduler(),
@@ -49,9 +50,9 @@ def start_components() -> list:
         component.start()
 
     logger.info(
-        "WorkPulse desktop agent running (app tracker, time intelligence, "
-        "screenshots every 5min, browser tracker (window-title based), alert monitor, "
-        "master agent scheduler, live scoring every 60s)."
+        "WorkPulse desktop agent running (app tracker, calendar tracker (meeting-aware "
+        "idle detection), time intelligence, browser tracker (window-title based), "
+        "alert monitor, master agent scheduler, live scoring every 60s)."
     )
     return components
 

@@ -32,7 +32,6 @@ else:
 # values from .env instead of only real OS environment variables).
 load_dotenv(PROJECT_ROOT / ".env")
 DATA_DIR = AGENT_ROOT / "data"
-SCREENSHOTS_DIR = DATA_DIR / "screenshots"
 LOG_DIR = DATA_DIR / "logs"
 
 # Single shared SQLite file at the project root — both the agent process
@@ -43,7 +42,6 @@ LOG_DIR = DATA_DIR / "logs"
 LOCAL_DB_PATH = PROJECT_ROOT / "workpulse.db"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Identity / API ──
@@ -81,13 +79,26 @@ HALF_DAY_PUNCH_OUT_WINDOW = ("13:44", "14:00")
 # check-ins for the current calendar month reach this count.
 MONTHLY_LATE_WARNING_THRESHOLD = 3
 
-# ── Screenshot behaviour ──
-# Overridable so module 23's packaged .exe can apply workpulse-config.json
-# settings (via env vars it sets before this module is first imported).
-BLUR_SCREENSHOTS = os.environ.get("WORKPULSE_BLUR_SCREENSHOTS", "false").lower() == "true"
-SCREENSHOT_INTERVAL_MINUTES = int(os.environ.get("WORKPULSE_SCREENSHOT_INTERVAL_MINUTES", "5"))
-SCREENSHOT_JPEG_QUALITY = 85
-THUMBNAIL_SIZE = (320, 180)
+# Check-in (daily_stats.work_start) is recorded the first time the active
+# window's process name or title matches one of these keywords (case
+# insensitive) — not on the day's first general keyboard/mouse input.
+# Matches both a native desktop app (process name, e.g. a "ZohoMail.exe")
+# and a browser tab (window title, e.g. "Zoho Mail - Inbox - Google
+# Chrome"), so opening Zoho either way counts. Add more keywords here if
+# another app should also count as a check-in trigger later.
+CHECK_IN_APP_KEYWORDS = ["zoho"]
+
+# ── Calendar / meeting-aware idle detection ──
+# Optional — entirely off (no behaviour change) until a real .ics file
+# exists at this path. Export your calendar (Outlook: "Save Calendar As" ->
+# iCalendar Format; Google Calendar: Settings -> a calendar's "Secret
+# address in iCal format"; Zoho Calendar: Export) to this path, or point
+# WORKPULSE_CALENDAR_ICS_PATH at wherever your calendar app keeps an
+# auto-updating .ics export so re-syncs pick up new meetings automatically.
+CALENDAR_ICS_PATH = os.environ.get(
+    "WORKPULSE_CALENDAR_ICS_PATH", str(DATA_DIR / "calendar.ics")
+)
+CALENDAR_SYNC_INTERVAL_SECONDS = 300  # re-read the .ics file every 5 minutes
 
 # ── DAR ──
 DAR_GENERATION_TIME = "18:00"

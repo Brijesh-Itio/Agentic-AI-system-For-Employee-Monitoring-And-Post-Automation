@@ -280,7 +280,7 @@ def check_late_arrival_alert(user_id: str = USER_ID) -> Optional[int]:
 
 class AlertMonitor:
     """Runs all real-time/periodic alert checks on their own thread,
-    alongside the other agent components (app tracker, screenshots, etc.)."""
+    alongside the other agent components (app tracker, calendar tracker, etc.)."""
 
     FOCUS_CHECK_INTERVAL_SECONDS = 60
     WELLBEING_CHECK_INTERVAL_SECONDS = 15 * 60

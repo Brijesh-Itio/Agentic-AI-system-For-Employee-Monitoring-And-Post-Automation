@@ -46,11 +46,9 @@ ingestion-API work, not before.
    `REPORT_RECIPIENT_EMAIL`, `LINKEDIN_EMAIL`, `LINKEDIN_PASSWORD`,
    `PEXELS_API_KEY`, `SECRET_KEY`, and `CORS_ORIGINS` (add your Vercel URL
    once you have it — step 2 below).
-5. Railway's filesystem is ephemeral on redeploy — `workpulse.db` and
-   `agent/data/screenshots/` will reset when the service restarts unless
-   you attach a Railway **Volume** to the project and point
-   `DATABASE_URL`/`SCREENSHOTS_DIR` at it (or use MinIO for screenshots,
-   see step 3).
+5. Railway's filesystem is ephemeral on redeploy — `workpulse.db` will
+   reset when the service restarts unless you attach a Railway **Volume**
+   to the project and point `DATABASE_URL` at it.
 6. **Playwright-dependent endpoints** (LinkedIn posting, lead research)
    need Chromium installed on the server, which Railway's default Nixpacks
    build does not do automatically. Either add a
@@ -72,32 +70,7 @@ ingestion-API work, not before.
 4. Deploy. Go back to Railway and add this Vercel URL to `CORS_ORIGINS`
    (see step 1.4) so the browser is actually allowed to call the API.
 
-## 3. Optional: MinIO screenshot storage (module 24.4)
-
-Off by default — screenshots stay on local disk exactly as before. To turn
-it on: run a MinIO server (self-hosted, or any S3-compatible provider),
-create a bucket, and set in `.env` (or Railway's Variables, if the agent
-is running somewhere with access to those same vars):
-
-```
-MINIO_ENDPOINT=your-minio-host:9000
-MINIO_ACCESS_KEY=...
-MINIO_SECRET_KEY=...
-MINIO_BUCKET=workpulse-screenshots
-MINIO_SECURE=true
-```
-
-Once set, every new screenshot uploads to MinIO in addition to its local
-copy (local file is never deleted), and `cloud_url` gets populated on the
-`screenshots` row. Nothing currently reads `cloud_url` in the dashboard —
-the gallery still serves from local disk via the API's
-`/api/screenshots/file/{filename}` route — so this is infrastructure for a
-future remote-dashboard-without-local-disk-access setup, not required for
-the Vercel+Railway deployment above (Railway's disk is reachable by the
-API that's serving the dashboard, so local-disk screenshots work fine
-there too, modulo the ephemeral-filesystem caveat in step 1.5).
-
-## 4. Desktop agent pointed at the cloud API (module 24.5, partial)
+## 3. Desktop agent pointed at the cloud API (module 24.5, partial)
 
 Build the packaged agent (module 23 — see the root `DEVELOPMENT.md` for
 `scripts/build_exe.bat`), run it once, and when the first-run setup dialog

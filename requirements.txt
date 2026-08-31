@@ -8,6 +8,10 @@ requests==2.34.2
 plyer==2.1.0
 pystray==0.19.5
 
+# ── Calendar tracker / meeting-aware idle detection (Module 2.8) ──
+# Parses a local .ics export — no calendar API, no OAuth, no credentials.
+icalendar==7.3.0
+
 # ── API Backend (Module 5) ──
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
@@ -33,11 +37,7 @@ playwright==1.47.0
 # ── DAR custom templates & export (Module 7.5-7.9) ──
 python-docx==1.1.2
 reportlab==4.2.5
+openpyxl==3.1.5
 
 # ── Utilities ──
 python-dotenv==1.0.1
-
-# ── Optional cloud screenshot storage (Module 24.4) ──
-# Only actually used if MINIO_* env vars are set (agent/cloud_storage.py
-# imports it lazily); harmless to have installed otherwise.
-minio==7.2.9

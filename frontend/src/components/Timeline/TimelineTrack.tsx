@@ -1,11 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { Camera } from "lucide-react";
-import type { ActivityLogEntry, Category, IdlePeriod, ScreenshotEntry } from "@/api";
+import { useState } from "react";
+import type { ActivityLogEntry, Category, IdlePeriod } from "@/api";
 import {
   type DayBounds,
   CATEGORY_COLOR,
   CATEGORY_LABEL,
-  clusterScreenshots,
   formatClock,
   formatDuration,
   hourMarks,
@@ -17,44 +15,24 @@ interface TimelineTrackProps {
   bounds: DayBounds;
   sessions: ActivityLogEntry[];
   idlePeriods: IdlePeriod[];
-  screenshots: ScreenshotEntry[];
   selectedSessionId: number | null;
-  selectedScreenshotId?: number | null;
   activeCategory?: Category | null;
   showNowLine?: boolean;
   onSelectSession: (session: ActivityLogEntry) => void;
-  onSelectScreenshot: (screenshot: ScreenshotEntry) => void;
 }
 
 export default function TimelineTrack({
   bounds,
   sessions,
   idlePeriods,
-  screenshots,
   selectedSessionId,
-  selectedScreenshotId = null,
   activeCategory = null,
   showNowLine = false,
   onSelectSession,
-  onSelectScreenshot,
 }: TimelineTrackProps) {
   const [hoveredId, setHoveredId] = useState<number | null>(null);
-  const [openClusterAt, setOpenClusterAt] = useState<number | null>(null);
-  const clusterPopoverRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (openClusterAt === null) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      if (clusterPopoverRef.current && !clusterPopoverRef.current.contains(e.target as Node)) {
-        setOpenClusterAt(null);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [openClusterAt]);
 
   const marks = hourMarks(bounds);
-  const clusters = clusterScreenshots(bounds, screenshots);
   const now = new Date();
   const nowPosition =
     showNowLine && now >= bounds.start && now <= bounds.end ? percentPosition(bounds, now) : null;
@@ -159,65 +137,6 @@ export default function TimelineTrack({
             </span>
           </div>
         )}
-
-        {/* Screenshot markers — clustered so a busy day renders as a few
-            countable badges instead of one solid overlapping strip. */}
-        {clusters.map((cluster) => {
-          const shot = cluster.shots[0];
-          const isClusterOpen = openClusterAt === cluster.position;
-          const isSingleSelected = cluster.shots.length === 1 && selectedScreenshotId === shot.id;
-
-          return (
-            <div
-              key={`cluster-${cluster.position}`}
-              className="absolute top-0 -translate-x-1/2"
-              style={{ left: `${cluster.position}%` }}
-            >
-              <button
-                onClick={() =>
-                  cluster.shots.length === 1
-                    ? onSelectScreenshot(shot)
-                    : setOpenClusterAt(isClusterOpen ? null : cluster.position)
-                }
-                className={`flex h-5 items-center justify-center rounded-full border text-white shadow-sm transition-transform hover:scale-110 ${
-                  cluster.shots.length > 1 ? "w-6 text-[10px] font-semibold" : "w-5"
-                } ${
-                  isSingleSelected || isClusterOpen
-                    ? "border-white bg-warning-500 scale-125 ring-2 ring-warning-300 dark:border-gray-900"
-                    : "border-white bg-brand-500 dark:border-gray-900"
-                }`}
-                title={
-                  cluster.shots.length === 1
-                    ? `Screenshot at ${formatClock(shot.timestamp)}`
-                    : `${cluster.shots.length} screenshots — click to view`
-                }
-              >
-                {cluster.shots.length > 1 ? cluster.shots.length : <Camera className="h-3 w-3" />}
-              </button>
-
-              {isClusterOpen && (
-                <div
-                  ref={clusterPopoverRef}
-                  className="absolute left-1/2 top-full z-30 mt-2 max-h-56 w-40 -translate-x-1/2 overflow-y-auto rounded-lg border border-gray-200 bg-white p-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
-                >
-                  {cluster.shots.map((s) => (
-                    <button
-                      key={s.id}
-                      onClick={() => {
-                        onSelectScreenshot(s);
-                        setOpenClusterAt(null);
-                      }}
-                      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/10"
-                    >
-                      <Camera className="h-3 w-3 shrink-0 text-gray-400" />
-                      {formatClock(s.timestamp)}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
       </div>
 
       {/* Hour labels beneath the track, every other hour to avoid crowding */}

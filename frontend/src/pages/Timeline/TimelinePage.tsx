@@ -11,15 +11,12 @@ import TimelineSummaryStats from "@/components/Timeline/TimelineSummaryStats";
 import CategoryLegend from "@/components/Timeline/CategoryLegend";
 import ContextSwitchingStrip from "@/components/Timeline/ContextSwitchingStrip";
 import SessionDetailPanel from "@/components/Timeline/SessionDetailPanel";
-import ScreenshotModal from "@/components/Timeline/ScreenshotModal";
 import { computeDayBounds } from "@/components/Timeline/timeScale";
 import {
   getActivityByDate,
   getIdlePeriodsByDate,
   getContextSwitchingByDate,
-  getScreenshotsByDate,
   type ActivityLogEntry,
-  type ScreenshotEntry,
   type Category,
 } from "@/api";
 
@@ -40,14 +37,13 @@ export default function TimelinePage() {
     return requested && /^\d{4}-\d{2}-\d{2}$/.test(requested) ? requested : todayStr();
   });
   const [selectedSession, setSelectedSession] = useState<ActivityLogEntry | null>(null);
-  const [selectedScreenshot, setSelectedScreenshot] = useState<ScreenshotEntry | null>(null);
   const [activeCategory, setActiveCategory] = useState<Category | null>(null);
 
   // Left/right arrow keys step a day at a time, mirroring the chevron
-  // buttons — skipped while a modal is open or a screenshot cluster is
-  // focused, so it never fights with a picker's own keyboard handling.
+  // buttons — skipped while a modal is open, so it never fights with a
+  // picker's own keyboard handling.
   useEffect(() => {
-    if (selectedSession || selectedScreenshot) return;
+    if (selectedSession) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
@@ -56,7 +52,7 @@ export default function TimelinePage() {
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [selectedSession, selectedScreenshot, date]);
+  }, [selectedSession, date]);
 
   const sessionsQuery = useQuery({
     queryKey: ["activity", "date", date],
@@ -70,29 +66,12 @@ export default function TimelinePage() {
     queryKey: ["context-switching", "date", date],
     queryFn: () => getContextSwitchingByDate(date),
   });
-  const screenshotsQuery = useQuery({
-    queryKey: ["screenshots", "date", date],
-    queryFn: () => getScreenshotsByDate(date),
-  });
 
   const sessions = sessionsQuery.data ?? [];
   const idlePeriods = idleQuery.data ?? [];
   const switching = switchingQuery.data ?? [];
-  const screenshots = screenshotsQuery.data ?? [];
 
   const bounds = useMemo(() => computeDayBounds(date, sessions, idlePeriods), [date, sessions, idlePeriods]);
-
-  const nearbyScreenshot = useMemo(() => {
-    if (!selectedSession) return null;
-    const start = new Date(selectedSession.start_time).getTime();
-    const end = selectedSession.end_time ? new Date(selectedSession.end_time).getTime() : start;
-    return (
-      screenshots.find((s) => {
-        const t = new Date(s.timestamp).getTime();
-        return t >= start - 5 * 60_000 && t <= end + 5 * 60_000;
-      }) ?? null
-    );
-  }, [selectedSession, screenshots]);
 
   const isLoading = sessionsQuery.isLoading || idleQuery.isLoading;
 
@@ -139,12 +118,10 @@ export default function TimelinePage() {
                 bounds={bounds}
                 sessions={sessions}
                 idlePeriods={idlePeriods}
-                screenshots={screenshots}
                 selectedSessionId={selectedSession?.id ?? null}
                 activeCategory={activeCategory}
                 showNowLine={date === todayStr()}
                 onSelectSession={setSelectedSession}
-                onSelectScreenshot={setSelectedScreenshot}
               />
             )}
 
@@ -154,15 +131,7 @@ export default function TimelinePage() {
       </div>
 
       {selectedSession && (
-        <SessionDetailPanel
-          session={selectedSession}
-          nearbyScreenshot={nearbyScreenshot}
-          onClose={() => setSelectedSession(null)}
-        />
-      )}
-
-      {selectedScreenshot && (
-        <ScreenshotModal screenshot={selectedScreenshot} onClose={() => setSelectedScreenshot(null)} />
+        <SessionDetailPanel session={selectedSession} onClose={() => setSelectedSession(null)} />
       )}
     </>
   );

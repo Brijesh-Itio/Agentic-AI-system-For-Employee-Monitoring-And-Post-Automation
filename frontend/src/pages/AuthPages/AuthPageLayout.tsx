@@ -1,10 +1,10 @@
 import React from "react";
 import { Link } from "react-router";
-import { BarChart3, Camera, FileText, Zap } from "lucide-react";
+import { BarChart3, Clock, FileText, Zap } from "lucide-react";
 import ThemeTogglerTwo from "../../components/common/ThemeTogglerTwo";
 
 const FEATURES = [
-  { icon: Camera, label: "Automatic screenshot capture" },
+  { icon: Clock, label: "Real-time activity timeline" },
   { icon: BarChart3, label: "Live focus & productivity scoring" },
   { icon: FileText, label: "AI-generated daily activity reports" },
 ];

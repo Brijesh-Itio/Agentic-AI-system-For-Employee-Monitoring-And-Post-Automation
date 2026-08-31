@@ -106,7 +106,7 @@ export default function AdminControls({ user, currentUserId, onDeleted }: AdminC
         </Button>
       </div>
       <p className="-mt-2 text-theme-xs text-gray-400">
-        Changing either never affects this member's tracked history — activity, screenshots, attendance, and DAR
+        Changing either never affects this member's tracked history — activity, attendance, and DAR
         reports all stay keyed to their account, not their name or email.
       </p>
 

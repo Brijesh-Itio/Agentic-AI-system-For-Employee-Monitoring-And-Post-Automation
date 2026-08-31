@@ -13,7 +13,6 @@ import {
   Clock,
   Crown,
   FileText,
-  ImageOff,
   LayoutGrid,
   List,
   Loader2,
@@ -28,8 +27,6 @@ import { Card, CardContent } from "@/components/shadcn/card";
 import StatCard from "@/components/dashboard/StatCard";
 import AttendanceCalendar from "@/components/Attendance/AttendanceCalendar";
 import TimelineTrack from "@/components/Timeline/TimelineTrack";
-import ScreenshotGrid from "@/components/Screenshots/ScreenshotGrid";
-import ScreenshotDetailModal from "@/components/Screenshots/ScreenshotDetailModal";
 import ReportsList from "@/components/Reports/ReportsList";
 import DarContent from "@/components/Reports/DarContent";
 import AdminControls from "@/components/Team/AdminControls";
@@ -38,7 +35,6 @@ import {
   getMemberActivity,
   getMemberAttendance,
   getMemberDars,
-  getMemberScreenshotsByDate,
   getTeamOverview,
   type ActivityLogEntry,
   type AttendanceDay,
@@ -46,7 +42,6 @@ import {
   type DarReport,
   type IdlePeriod,
   type MemberStatus,
-  type ScreenshotEntry,
 } from "@/api";
 import { CATEGORY_COLOR, CATEGORY_LABEL, computeDayBounds, formatDuration } from "@/components/Timeline/timeScale";
 import { useAuth } from "@/context/AuthContext";
@@ -109,7 +104,6 @@ function formatClock(iso: string | null): string {
 // every render just because `data ?? []` allocates a fresh one each time.
 const EMPTY_SESSIONS: ActivityLogEntry[] = [];
 const EMPTY_IDLE_PERIODS: IdlePeriod[] = [];
-const EMPTY_SCREENSHOTS: ScreenshotEntry[] = [];
 const EMPTY_DARS: DarReport[] = [];
 const EMPTY_ATTENDANCE_DAYS: AttendanceDay[] = [];
 
@@ -119,11 +113,10 @@ function shiftMonth(month: string, delta: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-type Tab = "overview" | "screenshots" | "attendance" | "reports";
+type Tab = "overview" | "attendance" | "reports";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
-  { id: "screenshots", label: "Screenshots" },
   { id: "attendance", label: "Attendance" },
   { id: "reports", label: "DAR Reports" },
 ];
@@ -139,8 +132,6 @@ export default function TeamMemberProfilePage() {
   const [attendanceView, setAttendanceView] = useState<"calendar" | "list">("calendar");
   const [statusFilter, setStatusFilter] = useState<AttendanceStatus | "all">("all");
   const [selectedDarDate, setSelectedDarDate] = useState<string | null>(null);
-  const [selectedShotIndex, setSelectedShotIndex] = useState<number | null>(null);
-  const [showOriginal, setShowOriginal] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);
 
   const overviewQuery = useQuery({
@@ -155,13 +146,6 @@ export default function TeamMemberProfilePage() {
     queryFn: () => getMemberActivity(userId!, date),
     enabled: userId != null && tab === "overview",
     refetchInterval: tab === "overview" ? LIVE_REFETCH_MS : false,
-  });
-
-  const screenshotsQuery = useQuery({
-    queryKey: ["team", "member-screenshots", userId, date],
-    queryFn: () => getMemberScreenshotsByDate(userId!, date),
-    enabled: userId != null && tab === "screenshots",
-    refetchInterval: tab === "screenshots" ? LIVE_REFETCH_MS : false,
   });
 
   const attendanceQuery = useQuery({
@@ -213,9 +197,6 @@ export default function TeamMemberProfilePage() {
     };
   }, [activitySessions]);
 
-  const selectedShot: ScreenshotEntry | null =
-    selectedShotIndex != null ? screenshotsQuery.data?.[selectedShotIndex] ?? null : null;
-
   const attendanceDays: AttendanceDay[] = attendanceQuery.data?.days ?? EMPTY_ATTENDANCE_DAYS;
   const filteredAttendanceDays = useMemo(
     () => (statusFilter === "all" ? attendanceDays : attendanceDays.filter((d) => d.status === statusFilter)),
@@ -233,7 +214,7 @@ export default function TeamMemberProfilePage() {
     <>
       <PageMeta
         title={member ? `${member.user.name} | WorkPulse AI` : "Team Member | WorkPulse AI"}
-        description="Individual team member activity, screenshots, attendance, and reports."
+        description="Individual team member activity, attendance, and reports."
       />
 
       <div className="space-y-6">
@@ -365,10 +346,8 @@ export default function TeamMemberProfilePage() {
                           bounds={dayBounds}
                           sessions={activitySessions}
                           idlePeriods={EMPTY_IDLE_PERIODS}
-                          screenshots={EMPTY_SCREENSHOTS}
                           selectedSessionId={selectedSessionId}
                           onSelectSession={(s) => setSelectedSessionId(s.id)}
-                          onSelectScreenshot={() => {}}
                         />
 
                         <div className="mb-2 mt-6 flex flex-wrap items-center gap-x-4 gap-y-1 text-theme-xs text-gray-400">
@@ -449,41 +428,6 @@ export default function TeamMemberProfilePage() {
                           </table>
                         </div>
                       </>
-                    )}
-                  </>
-                )}
-
-                {tab === "screenshots" && (
-                  <>
-                    <div className="mb-4 flex justify-end">
-                      <input
-                        type="date"
-                        value={date}
-                        max={todayStr()}
-                        onChange={(e) => setDate(e.target.value)}
-                        className="rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-theme-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
-                      />
-                    </div>
-                    {screenshotsQuery.isLoading ? (
-                      <div className="flex h-48 items-center justify-center text-gray-400">
-                        <Loader2 className="h-6 w-6 animate-spin" />
-                      </div>
-                    ) : !screenshotsQuery.data || screenshotsQuery.data.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center gap-2 py-16 text-center text-gray-400">
-                        <ImageOff className="h-9 w-9" />
-                        <p className="text-theme-sm font-medium text-gray-500 dark:text-gray-400">
-                          No screenshots captured for this day
-                        </p>
-                      </div>
-                    ) : (
-                      <ScreenshotGrid
-                        screenshots={screenshotsQuery.data}
-                        sessions={EMPTY_SESSIONS}
-                        selectedId={selectedShot?.id ?? null}
-                        onSelect={(shot) =>
-                          setSelectedShotIndex(screenshotsQuery.data!.findIndex((s) => s.id === shot.id))
-                        }
-                      />
                     )}
                   </>
                 )}
@@ -729,20 +673,6 @@ export default function TeamMemberProfilePage() {
           </>
         )}
       </div>
-
-      {selectedShotIndex != null && screenshotsQuery.data && screenshotsQuery.data.length > 0 && (
-        <ScreenshotDetailModal
-          screenshots={screenshotsQuery.data}
-          index={selectedShotIndex}
-          showOriginal={showOriginal}
-          onShowOriginalChange={setShowOriginal}
-          onNavigate={(i) => {
-            setSelectedShotIndex(i);
-            setShowOriginal(false);
-          }}
-          onClose={() => setSelectedShotIndex(null)}
-        />
-      )}
     </>
   );
 }

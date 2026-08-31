@@ -13,6 +13,7 @@ Sub-modules implemented (in order):
     2.5 Productive hours counter
     2.6 Longest focus session detector
     2.7 Weekly trends calculator
+    2.8 Meeting-aware idle exclusion -> calendar_events, via agent/calendar_tracker.py
 """
 import logging
 import threading
@@ -40,6 +41,50 @@ logger = logging.getLogger(__name__)
 WEEKLY_TRENDS_TIME = DAR_GENERATION_TIME
 
 GAP_TOLERANCE_SECONDS = 2  # accounts for sub-second rounding between adjacent rows
+
+
+def subtract_meeting_overlap(idle_start: datetime, idle_end: datetime, meetings: list) -> list:
+    """Pure interval-subtraction: idle_start..idle_end minus whatever
+    portion of it overlaps any calendar_events row in `meetings` (each with
+    string start_time/end_time columns, as returned by
+    database.get_calendar_events_overlapping). Returns the list of
+    remaining (start, end) datetime tuples that are genuinely idle — not
+    explained by a scheduled meeting — in chronological order.
+
+    A meeting covering the whole idle window returns []. No meetings
+    returns [(idle_start, idle_end)] unchanged. A meeting covering the
+    middle of the window returns two remaining pieces, one on each side.
+    """
+    if not meetings:
+        return [(idle_start, idle_end)]
+
+    intervals = sorted(
+        (
+            max(idle_start, datetime.fromisoformat(m["start_time"])),
+            min(idle_end, datetime.fromisoformat(m["end_time"])),
+        )
+        for m in meetings
+    )
+
+    # Merge overlapping/adjacent meeting intervals first so back-to-back or
+    # double-booked meetings don't get subtracted as separate gaps.
+    merged: list = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    remaining = []
+    cursor = idle_start
+    for meeting_start, meeting_end in merged:
+        if meeting_start > cursor:
+            remaining.append((cursor, meeting_start))
+        cursor = max(cursor, meeting_end)
+    if cursor < idle_end:
+        remaining.append((cursor, idle_end))
+
+    return [(s, e) for s, e in remaining if e > s]
 
 
 def compute_focus_runs(day: date_cls, user_id: str = USER_ID) -> list:
@@ -186,9 +231,12 @@ class TimeIntelligenceEngine:
         idle_seconds = self.idle_detector.poll()
         now = datetime.now()
 
-        # 2.2 work day detector — fresh input means the user is active right now.
+        # 2.2 work day detector — work_end keeps advancing on any fresh
+        # input. work_start (check-in) is no longer set here: it's now
+        # recorded by app_tracker.py's check-in trigger, the first time the
+        # active window matches CHECK_IN_APP_KEYWORDS (e.g. opening Zoho),
+        # not on the day's first general keyboard/mouse input.
         if idle_seconds < self.poll_interval_seconds:
-            database.set_work_start_if_unset(now.date(), now, self.user_id)
             self._maybe_touch_work_end(now)
 
         self._maybe_roll_hourly_score(now)
@@ -228,6 +276,38 @@ class TimeIntelligenceEngine:
     def _on_idle_end(self, idle_start: datetime, idle_end: datetime) -> None:
         duration_seconds = int((idle_end - idle_start).total_seconds())
 
+        # Meeting-aware idle detection: check the calendar first. Whatever
+        # portion of this idle window overlaps a scheduled meeting is a
+        # person holding their laptop through a call, not actually away —
+        # it's excluded entirely (no idle_seconds, no break row). Only the
+        # leftover, non-meeting portion(s) of the window are treated as a
+        # real idle period, exactly like before this feature existed.
+        try:
+            meetings = database.get_calendar_events_overlapping(idle_start, idle_end, self.user_id)
+        except Exception:
+            logger.exception("Failed to check calendar for meeting overlap; treating idle period as normal")
+            meetings = []
+
+        segments = subtract_meeting_overlap(idle_start, idle_end, meetings)
+        excused_seconds = duration_seconds - sum(int((e - s).total_seconds()) for s, e in segments)
+        if excused_seconds > 0:
+            subjects = ", ".join(sorted({m["subject"] for m in meetings})) or "scheduled meeting"
+            logger.info(
+                "Excused %ds of idle time (%s) — %s to %s",
+                excused_seconds, subjects, idle_start, idle_end,
+            )
+
+        for seg_start, seg_end in segments:
+            self._record_idle_segment(seg_start, seg_end)
+
+    def _record_idle_segment(self, idle_start: datetime, idle_end: datetime) -> None:
+        """The original (pre-calendar) idle-end handling, applied to one
+        genuinely-idle segment — a full idle period when there's no meeting
+        overlap at all, or a leftover slice before/after one when there is."""
+        duration_seconds = int((idle_end - idle_start).total_seconds())
+        if duration_seconds <= 0:
+            return
+
         try:
             database.insert_idle_period(idle_start, idle_end, self.user_id)
             database.update_daily_idle_seconds(idle_start.date(), duration_seconds, self.user_id)
@@ -237,7 +317,9 @@ class TimeIntelligenceEngine:
         # 2.3 break classifier — the idle detector only fires once the
         # threshold (5min) is crossed, so every detected idle period already
         # qualifies as at least a "short" break; true micro-breaks (<5min)
-        # never reach here by construction.
+        # never reach here by construction. A meeting-trimmed leftover
+        # segment can be shorter than 5min, and that's fine — it's still
+        # genuinely idle time, just a smaller amount of it.
         break_type = "long" if duration_seconds >= LONG_BREAK_THRESHOLD_SECONDS else "short"
         try:
             database.insert_break(idle_start, idle_end, break_type, self.user_id)

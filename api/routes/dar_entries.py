@@ -1,5 +1,5 @@
 """MODULE 7 extension (7.6-7.9) — Structured DAR entries, AI drafting, and
-CSV/DOCX/PDF export + CSV import.
+CSV/DOCX/PDF/XLSX export + CSV import.
 
 Entirely additive on top of module 7.1-7.4's narrative DAR generator
 (ai/dar_generator.py) — nothing here changes generate_and_save_dar()'s
@@ -268,7 +268,7 @@ def draft_entries(
     return [_entry_out(r) for r in created]
 
 
-# ── 7.8 DAR export (CSV / DOCX / PDF) ──
+# ── 7.8 DAR export (CSV / DOCX / PDF / XLSX) ──
 
 def _department_name(db: Session, department_id: int | None) -> str:
     if department_id is None:
@@ -361,6 +361,67 @@ def _export_docx(db: Session, target_date: date_type, entries: list[DarEntry], n
     )
 
 
+def _export_xlsx(db: Session, target_date: date_type, entries: list[DarEntry], narrative: str | None):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+
+    if narrative:
+        summary = wb.active
+        summary.title = "Summary"
+        summary["A1"] = f"Daily Activity Report — {target_date.isoformat()}"
+        summary["A1"].font = Font(bold=True, size=13)
+        row = 3
+        for line in narrative.splitlines():
+            summary.cell(row=row, column=1, value=line).alignment = Alignment(wrap_text=True)
+            row += 1
+        summary.column_dimensions["A"].width = 100
+        log_sheet = wb.create_sheet("Task Log")
+    else:
+        log_sheet = wb.active
+        log_sheet.title = "Task Log"
+
+    custom_keys = _custom_field_keys(db, entries)
+    columns = ["Task", "Description", "Start", "End", "Comment", "Remarks", "Link",
+               "Department", "Source", "Project", "Status", "Progress"] + custom_keys
+
+    header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+    for col_idx, header in enumerate(columns, start=1):
+        cell = log_sheet.cell(row=1, column=col_idx, value=header)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+
+    for row_idx, e in enumerate(entries, start=2):
+        custom = json.loads(e.custom_fields_json or "{}")
+        values = [
+            e.task, e.task_description or "", str(e.start_time or ""), str(e.end_time or ""),
+            e.comment or "", e.remarks or "", e.link or "",
+            _department_name(db, e.department_id), e.source,
+            e.project or "", e.status, e.progress,
+        ] + [str(custom.get(k, "")) for k in custom_keys]
+        for col_idx, value in enumerate(values, start=1):
+            log_sheet.cell(row=row_idx, column=col_idx, value=value)
+
+    if not entries:
+        log_sheet.cell(row=2, column=1, value="No entries recorded for this date.")
+
+    for col_idx in range(1, len(columns) + 1):
+        log_sheet.column_dimensions[get_column_letter(col_idx)].width = 20
+    log_sheet.freeze_panes = "A2"
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    filename = f"dar_{target_date.isoformat()}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 def _export_pdf(db: Session, target_date: date_type, entries: list[DarEntry], narrative: str | None):
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import landscape, letter
@@ -428,8 +489,8 @@ def export_dar(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if format not in ("csv", "docx", "pdf"):
-        raise HTTPException(status_code=422, detail="format must be one of: csv, docx, pdf")
+    if format not in ("csv", "docx", "pdf", "xlsx"):
+        raise HTTPException(status_code=422, detail="format must be one of: csv, docx, pdf, xlsx")
 
     entries = (
         db.query(DarEntry)
@@ -448,6 +509,8 @@ def export_dar(
         return _export_csv(db, target_date, entries)
     if format == "docx":
         return _export_docx(db, target_date, entries, narrative)
+    if format == "xlsx":
+        return _export_xlsx(db, target_date, entries, narrative)
     return _export_pdf(db, target_date, entries, narrative)
 
 

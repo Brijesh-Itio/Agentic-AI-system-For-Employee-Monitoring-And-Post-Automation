@@ -56,19 +56,6 @@ class Website(Base):
     date = Column(Date, nullable=False)
 
 
-class Screenshot(Base):
-    __tablename__ = "screenshots"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(String, nullable=False, default="local")
-    file_path = Column(String, nullable=False)
-    thumbnail_path = Column(String)
-    timestamp = Column(DateTime, nullable=False)
-    date = Column(Date, nullable=False)
-    is_blurred = Column(Integer, default=0)
-    cloud_url = Column(String)
-    original_path = Column(String)
-
-
 class DailyStats(Base):
     __tablename__ = "daily_stats"
     id = Column(Integer, primary_key=True)

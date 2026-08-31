@@ -6,26 +6,27 @@ React dashboard gives employees and managers a real-time and historical view of 
 all with zero paid cloud AI APIs.
 
 WorkPulse AI doesn't wait for button clicks. It watches, thinks, and acts: tracking
-apps and websites, scoring focus, capturing screenshots, writing a daily activity
-report every evening, and posting/emailing on your behalf, on a schedule, with no
-human intervention unless a decision genuinely needs one.
+apps and websites, scoring focus, writing a daily activity report every evening, and
+posting/emailing on your behalf, on a schedule, with no human intervention unless a
+decision genuinely needs one.
 
 ## Features
 
 **Work Intelligence**
 - Active window / app & website tracking, idle detection, break classification
-- Automatic desktop screenshots (with blur-on-capture support)
+- Meeting-aware idle detection — a scheduled meeting (synced from a local `.ics`
+  calendar export) excuses that time from counting as idle
 - Live focus score, active hours, and context-switching analysis
 - AI-written Daily Activity Reports (DAR) — narrative and structured task-log views,
   with CSV/DOCX/PDF export and CSV import
 - Department-custom DAR templates with per-department custom fields
 
 **Team Management (Admin/Manager)**
-- Per-member profile: live overview + timeline, screenshots, attendance calendar,
+- Per-member profile: live overview + timeline, attendance calendar,
   and full DAR history — not just today's snapshot
-- Admin-controlled per-employee feature toggles (screenshot capture, activity
-  tracking, DAR generation, alerts) that actually gate the employee's own desktop
-  agent, not just the dashboard view
+- Admin-controlled per-employee feature toggles (activity tracking, DAR
+  generation, alerts) that actually gate the employee's own desktop agent, not
+  just the dashboard view
 - Role-based access control: `employee` (own data only), `manager` (team oversight),
   `admin` (full account control)
 - AI-powered weekly team analysis: high performers, struggling members, workload
@@ -60,10 +61,10 @@ Three independent pieces sharing one SQLite database:
 ```
 
 - **`agent/`** — runs on each employee's machine. Tracks the active window,
-  captures screenshots, detects idle time, and writes straight to the local SQLite
-  file. Packaged as a single-file `.exe` with a system-tray icon
-  (`agent/tray_main.py`, `scripts/build_exe.bat`).
-- **`api/`** — FastAPI backend serving the dashboard: auth, activity, screenshots,
+  detects idle time, and writes straight to the local SQLite file. Packaged as
+  a single-file `.exe` with a system-tray icon (`agent/tray_main.py`,
+  `scripts/build_exe.bat`).
+- **`api/`** — FastAPI backend serving the dashboard: auth, activity,
   attendance, reports, team management, SSO.
 - **`ai/`** — the agentic layer: a LangGraph Master Agent, DAR generation,
   productivity scoring, pattern analysis, and team analysis, all via local Ollama.

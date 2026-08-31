@@ -1,15 +1,13 @@
 import { X } from "lucide-react";
-import type { ActivityLogEntry, ScreenshotEntry } from "@/api";
+import type { ActivityLogEntry } from "@/api";
 import { CATEGORY_COLOR, CATEGORY_LABEL, formatClock, formatDuration } from "./timeScale";
-import AuthImage from "@/components/common/AuthImage";
 
 interface SessionDetailPanelProps {
   session: ActivityLogEntry;
-  nearbyScreenshot: ScreenshotEntry | null;
   onClose: () => void;
 }
 
-export default function SessionDetailPanel({ session, nearbyScreenshot, onClose }: SessionDetailPanelProps) {
+export default function SessionDetailPanel({ session, onClose }: SessionDetailPanelProps) {
   return (
     <div className="fixed inset-y-0 right-0 z-50 w-full max-w-sm border-l border-gray-200 bg-white p-5 shadow-2xl dark:border-gray-800 dark:bg-gray-900">
       <div className="flex items-start justify-between">
@@ -58,17 +56,6 @@ export default function SessionDetailPanel({ session, nearbyScreenshot, onClose 
           <p className="text-theme-xs font-medium uppercase text-gray-400">Duration</p>
           <p className="mt-1 text-gray-700 dark:text-gray-300">{formatDuration(session.duration_seconds)}</p>
         </div>
-
-        {nearbyScreenshot && (
-          <div>
-            <p className="text-theme-xs font-medium uppercase text-gray-400">Nearby screenshot</p>
-            <AuthImage
-              src={`/api/screenshots/file/${nearbyScreenshot.thumbnail_path?.split(/[\\/]/).pop()}`}
-              alt="Screenshot near this session"
-              className="mt-2 w-full rounded-lg border border-gray-200 dark:border-gray-700"
-            />
-          </div>
-        )}
       </div>
     </div>
   );

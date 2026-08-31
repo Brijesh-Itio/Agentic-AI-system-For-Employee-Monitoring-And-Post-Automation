@@ -29,7 +29,6 @@ from api.routes import (
     linkedin,
     productivity,
     reports,
-    screenshots,
     sso,
     status,
     team,
@@ -62,7 +61,6 @@ app.include_router(auth.router)
 app.include_router(sso.router)
 app.include_router(attendance.router)
 app.include_router(activity.router)
-app.include_router(screenshots.router)
 app.include_router(websites.router)
 app.include_router(productivity.router)
 app.include_router(reports.router)

@@ -3,7 +3,7 @@ Local SQLite schema and data-access layer for the desktop agent.
 
 Design notes (scalability / performance):
 - WAL journal mode so the tracker thread can write while other threads
-  (screenshot, sync) read/write concurrently without lock contention.
+  (calendar sync, etc.) read/write concurrently without lock contention.
 - A single module-level lock serialises writes from multiple threads on top
   of WAL, since sqlite3 connections are not safe to share across threads
   without care.
@@ -159,19 +159,6 @@ CREATE TABLE IF NOT EXISTS weekly_trends (
 
 CREATE INDEX IF NOT EXISTS idx_weekly_trends_user_week ON weekly_trends(user_id, week_start);
 
-CREATE TABLE IF NOT EXISTS screenshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL DEFAULT 'local',
-    file_path TEXT NOT NULL,
-    thumbnail_path TEXT,
-    timestamp DATETIME NOT NULL,
-    date DATE NOT NULL,
-    is_blurred INTEGER DEFAULT 0,
-    cloud_url TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_screenshots_user_date ON screenshots(user_id, date);
-
 CREATE TABLE IF NOT EXISTS websites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL DEFAULT 'local',
@@ -275,8 +262,8 @@ CREATE TABLE IF NOT EXISTS alert_preferences (
 -- alert_preferences above, which an employee sets for themselves). An
 -- admin disabling a feature here actually stops that component on the
 -- employee's own desktop agent — see agent/app_tracker.py,
--- agent/browser_tracker.py, agent/screenshot.py and ai/dar_generator.py,
--- which all check is_feature_enabled() before doing their automatic work.
+-- agent/browser_tracker.py and ai/dar_generator.py, which all check
+-- is_feature_enabled() before doing their automatic work.
 -- Feasible without any agent<->server network call because the packaged
 -- agent and the FastAPI backend already read/write this same SQLite file
 -- (see agent/config.py's LOCAL_DB_PATH vs api/config.py's DATABASE_PATH).
@@ -505,12 +492,6 @@ _DAILY_STATS_EXTRA_COLUMNS = {
     "longest_focus_seconds": "INTEGER DEFAULT 0",
 }
 
-# module 3.3 — when blur is enabled we keep the original (unblurred) frame
-# for audit purposes alongside the blurred one used for manager view.
-_SCREENSHOTS_EXTRA_COLUMNS = {
-    "original_path": "TEXT",
-}
-
 # Login/logout + role-based access (added after module 21's users table —
 # see DEVELOPMENT.md's "Login & Role-Based Access" section). NULL
 # password_hash means the account can't log in yet (e.g. rows created by
@@ -547,7 +528,6 @@ def init_db() -> None:
         try:
             conn.executescript(SCHEMA)
             _ensure_extra_columns(conn, "daily_stats", _DAILY_STATS_EXTRA_COLUMNS)
-            _ensure_extra_columns(conn, "screenshots", _SCREENSHOTS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "users", _USERS_EXTRA_COLUMNS)
             # tasks already exists by this point (created above in SCHEMA),
             # so the task_id column's FK reference resolves correctly.
@@ -653,7 +633,10 @@ def get_daily_switch_count(day: date_cls, user_id: str = "local") -> int:
 
 
 def set_work_start_if_unset(day: date_cls, at: datetime, user_id: str = "local") -> None:
-    """2.2 — record the first input of the day, once, without overwriting it."""
+    """2.2 — record check-in for the day, once, without overwriting it.
+    Called by app_tracker.py's check-in trigger the first time the active
+    window matches CHECK_IN_APP_KEYWORDS (e.g. opening Zoho), not on the
+    day's first general keyboard/mouse input."""
     ensure_daily_stats_row(day, user_id)
     with write_cursor() as cur:
         cur.execute(
@@ -848,55 +831,6 @@ def insert_context_switch_flag(
         return cur.lastrowid
 
 
-# ── screenshots ──
-
-def insert_screenshot(
-    file_path: str,
-    thumbnail_path: Optional[str],
-    timestamp: datetime,
-    is_blurred: bool = False,
-    original_path: Optional[str] = None,
-    user_id: str = "local",
-) -> int:
-    with write_cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO screenshots
-                (user_id, file_path, thumbnail_path, timestamp, date, is_blurred, original_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                file_path,
-                thumbnail_path,
-                timestamp.isoformat(sep=" "),
-                timestamp.date().isoformat(),
-                1 if is_blurred else 0,
-                original_path,
-            ),
-        )
-        return cur.lastrowid
-
-
-def set_screenshot_cloud_url(screenshot_id: int, cloud_url: str) -> None:
-    """MODULE 24.4 — records the MinIO object URL after an optional cloud
-    upload. Never called when MINIO_* env vars aren't set (see
-    agent/cloud_storage.py) — cloud_url just stays NULL and every screenshot
-    route continues serving from local disk exactly as before."""
-    with write_cursor() as cur:
-        cur.execute("UPDATE screenshots SET cloud_url = ? WHERE id = ?", (cloud_url, screenshot_id))
-
-
-def get_screenshots_for_date(day: date_cls, user_id: str = "local"):
-    conn = get_connection()
-    return conn.execute(
-        """
-        SELECT * FROM screenshots WHERE user_id = ? AND date = ? ORDER BY timestamp ASC
-        """,
-        (user_id, day.isoformat()),
-    ).fetchall()
-
-
 # ── websites ──
 
 def insert_website_session(
@@ -1018,15 +952,6 @@ def upsert_dar_report(
         return row["id"]
 
 
-def get_screenshot_count_for_date(day: date_cls, user_id: str = "local") -> int:
-    conn = get_connection()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM screenshots WHERE user_id = ? AND date = ?",
-        (user_id, day.isoformat()),
-    ).fetchone()
-    return row["c"] if row else 0
-
-
 # ── tasks (manager-assigned work, distinct from dar_entries' daily log) ──
 
 def insert_task(
@@ -1134,6 +1059,30 @@ def get_calendar_events_for_date(day: date_cls, user_id: str = "local"):
         "SELECT * FROM calendar_events WHERE user_id = ? AND date = ? ORDER BY start_time ASC",
         (user_id, day.isoformat()),
     ).fetchall()
+
+
+def get_calendar_events_overlapping(start: datetime, end: datetime, user_id: str = "local"):
+    """Meetings with a real end_time whose [start_time, end_time) window
+    overlaps [start, end) at all — used to check whether an idle period
+    happened during a scheduled meeting. Events are stored keyed by their
+    own start date, so an idle window is only ever checked against that
+    date's (and, for a rare midnight-spanning idle period, the next date's)
+    rows rather than the whole table."""
+    conn = get_connection()
+    dates = {start.date().isoformat(), end.date().isoformat()}
+    placeholders = ",".join("?" for _ in dates)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM calendar_events
+        WHERE user_id = ? AND date IN ({placeholders}) AND end_time IS NOT NULL
+        ORDER BY start_time ASC
+        """,
+        (user_id, *dates),
+    ).fetchall()
+    return [
+        r for r in rows
+        if datetime.fromisoformat(r["start_time"]) < end and datetime.fromisoformat(r["end_time"]) > start
+    ]
 
 
 # ── file_activity_logs (Layer 1 — file watcher) ──
@@ -1327,7 +1276,7 @@ def reset_email_template(template_key: str) -> None:
 # ── feature_flags — admin-controlled per-employee monitoring toggles ──
 
 DEFAULT_FEATURE_TYPES = (
-    "screenshot_capture", "activity_tracking", "dar_generation", "alerts_enabled",
+    "activity_tracking", "dar_generation", "alerts_enabled",
     "calendar_sync", "file_activity_tracking",
 )
 

@@ -611,3 +611,418 @@ class FileActivityOut(BaseModel):
     timestamp: datetime
     date: date_type
     watched_root: Optional[str] = None
+
+
+# ── SEO Agentic AI (module 25) ──
+
+SeoCmsType = Literal["wordpress", "webflow"]
+
+
+class SeoSiteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    base_url: str
+    cms_type: str
+    cms_base_url: Optional[str] = None
+    is_active: bool
+    created_at: Optional[datetime] = None
+    gsc_site_url: Optional[str] = None
+    ga4_property_id: Optional[str] = None
+    # cms_username/cms_collection_id aren't secrets, returned as-is; the
+    # app password/API token never come back over the API once saved —
+    # only whether one is set (see api/database.py's SeoSite properties).
+    cms_username: Optional[str] = None
+    cms_collection_id: Optional[str] = None
+    cms_app_password_set: bool = False
+    cms_api_token_set: bool = False
+
+
+class SeoSiteCreate(BaseModel):
+    name: str
+    base_url: str
+    cms_type: SeoCmsType = "wordpress"
+    cms_base_url: Optional[str] = None
+    gsc_site_url: Optional[str] = None
+    ga4_property_id: Optional[str] = None
+
+
+class SeoSiteGoogleConfigUpdate(BaseModel):
+    """Blank string clears the override back to the .env fallback."""
+
+    gsc_site_url: Optional[str] = None
+    ga4_property_id: Optional[str] = None
+
+
+class SeoSiteCmsConfigUpdate(BaseModel):
+    """Blank string clears an override back to the .env fallback. Only
+    the pair matching this site's own cms_type matters — WordPress reads
+    username/app_password, Webflow reads api_token/collection_id."""
+
+    cms_base_url: Optional[str] = None
+    cms_username: Optional[str] = None
+    cms_app_password: Optional[str] = None
+    cms_api_token: Optional[str] = None
+    cms_collection_id: Optional[str] = None
+
+
+class SeoJobRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    job_type: str
+    run_date: date_type
+    status: str
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    error: Optional[str] = None
+    retry_count: int
+
+
+class SeoJobRunTrigger(BaseModel):
+    site_id: int
+    job_type: str
+
+
+class CmsPostOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    title: str
+    slug: str
+    status: str
+    link: Optional[str] = None
+    excerpt: Optional[str] = None
+    content: Optional[str] = None
+    modified_at: Optional[str] = None
+
+
+class CmsStatusOut(BaseModel):
+    site_id: int
+    cms_type: str
+    reachable: bool
+
+
+class PageSpeedCheckRequest(BaseModel):
+    site_id: int
+    url: str
+    strategy: Literal["mobile", "desktop"] = "mobile"
+
+
+class PageSpeedResultOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    url: str
+    strategy: str
+    run_date: date_type
+    performance_score: Optional[float] = None
+    lcp_ms: Optional[float] = None
+    cls: Optional[float] = None
+    inp_ms: Optional[float] = None
+    ttfb_ms: Optional[float] = None
+    fcp_ms: Optional[float] = None
+    created_at: Optional[datetime] = None
+
+
+class PageSpeedOpportunityOut(BaseModel):
+    audit_id: str
+    title: str
+    description: str
+    savings_ms: Optional[float] = None
+    savings_bytes: Optional[float] = None
+
+
+class ResourceAuditReportOut(BaseModel):
+    total_requests: Optional[int] = None
+    total_byte_weight_kb: Optional[float] = None
+    unused_css_kb: Optional[float] = None
+    unused_js_kb: Optional[float] = None
+    render_blocking_requests: Optional[int] = None
+    opportunities: list[PageSpeedOpportunityOut]
+
+
+class GscPullRequest(BaseModel):
+    site_id: int
+    days_back: int = 7
+
+
+class GscQueryRowOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    run_date: date_type
+    query: str
+    clicks: int
+    impressions: int
+    ctr: Optional[float] = None
+    position: Optional[float] = None
+    created_at: Optional[datetime] = None
+
+
+class Ga4PullRequest(BaseModel):
+    site_id: int
+    start_date: str = "7daysAgo"
+    end_date: str = "today"
+
+
+class Ga4PageRowOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    run_date: date_type
+    page_path: str
+    sessions: int
+    bounce_rate: Optional[float] = None
+    conversions: Optional[float] = None
+    created_at: Optional[datetime] = None
+
+
+class OgTagsGenerateRequest(BaseModel):
+    site_id: int
+    page_url: str
+    page_title: str
+    content_excerpt: str
+
+
+class OgTagsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    page_url: str
+    page_title: str
+    og_title: str
+    og_description: str
+    generated_at: Optional[datetime] = None
+
+
+class InterlinkPage(BaseModel):
+    site_id: int
+    url: str
+    title: str
+    content: str
+
+
+class InterlinkSuggestRequest(InterlinkPage):
+    n_results: int = 8
+
+
+class RelatedPageOut(BaseModel):
+    url: str
+    title: str
+    distance: float
+
+
+class ContentAnalyzeRequest(BaseModel):
+    content_html: str
+    primary_keyword: Optional[str] = None
+    min_words: int = 600
+    max_words: int = 3000
+
+
+class StructureIssueOut(BaseModel):
+    rule: str
+    severity: str
+    message: str
+
+
+class StructureReportOut(BaseModel):
+    word_count: int
+    h1_count: int
+    h2_count: int
+    h3_count: int
+    passed: bool
+    issues: list[StructureIssueOut]
+
+
+class FaqRequest(BaseModel):
+    site_id: int
+    page_title: str
+    max_pairs: int = 5
+
+
+class FaqPairOut(BaseModel):
+    question: str
+    answer: str
+
+
+class TechnicalAuditRequest(BaseModel):
+    site_id: int
+    max_pages: int = 100
+
+
+class TechnicalIssueOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    run_date: date_type
+    rule: str
+    severity: str
+    url: str
+    message: str
+    suggested_fix: str
+    status: str
+    reviewed_at: Optional[datetime] = None
+    reviewed_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class TechnicalIssueReview(BaseModel):
+    reviewed_by: Optional[str] = None
+
+
+class DigestGenerateRequest(BaseModel):
+    site_id: int
+    send_to_slack: bool = True
+
+
+class DigestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    run_date: date_type
+    narrative: str
+    stats_json: str
+    slack_delivered: bool
+    created_at: Optional[datetime] = None
+
+
+SocialPlatform = Literal["linkedin", "twitter", "instagram", "facebook"]
+
+
+class SocialGenerateRequest(BaseModel):
+    site_id: int
+    page_title: str
+    content_excerpt: str
+    source_url: Optional[str] = None
+    platforms: list[SocialPlatform] = ["linkedin"]
+
+
+class SocialPostOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    platform: str
+    source_url: Optional[str] = None
+    content: str
+    status: str
+    external_post_id: Optional[str] = None
+    error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    posted_at: Optional[datetime] = None
+
+
+class BacklinkPullRequest(BaseModel):
+    site_id: int
+
+
+class BacklinkMentionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    source_url: str
+    source_title: Optional[str] = None
+    anchor_text: Optional[str] = None
+    domain_rating: Optional[float] = None
+    discovered_at: Optional[str] = None
+    outreach_subject: Optional[str] = None
+    outreach_body: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class OutreachDraftRequest(BaseModel):
+    site_name: str
+    site_url: str
+
+
+class UrlInspectRequest(BaseModel):
+    site_id: int
+    url: str
+
+
+class IndexStatusOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    url: str
+    coverage_state: Optional[str] = None
+    indexing_state: Optional[str] = None
+    robots_txt_state: Optional[str] = None
+    page_fetch_state: Optional[str] = None
+    last_crawl_time: Optional[str] = None
+    google_canonical: Optional[str] = None
+    user_canonical: Optional[str] = None
+    checked_at: Optional[datetime] = None
+
+
+class IndexingSubmitRequest(BaseModel):
+    site_id: int
+    url: str
+    notification_type: Literal["URL_UPDATED", "URL_DELETED"] = "URL_UPDATED"
+
+
+class IndexingSubmissionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    url: str
+    notification_type: str
+    success: bool
+    error: Optional[str] = None
+    submitted_at: Optional[datetime] = None
+
+
+class LlmUsageLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: Optional[int] = None
+    task: str
+    provider: str
+    model: Optional[str] = None
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    cost_estimate: Optional[float] = None
+    latency_ms: Optional[float] = None
+    success: bool
+    error: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class BlogGenerateRequest(BaseModel):
+    site_id: int
+    topic: str
+    primary_keyword: Optional[str] = None
+    min_words: int = 600
+
+
+class BlogPostOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    topic: str
+    primary_keyword: Optional[str] = None
+    title: str
+    excerpt: Optional[str] = None
+    content: str
+    structure_passed: Optional[bool] = None
+    structure_issues_json: Optional[str] = None
+    status: str
+    cms_post_id: Optional[str] = None
+    cms_post_link: Optional[str] = None
+    error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    published_at: Optional[datetime] = None

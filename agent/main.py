@@ -24,6 +24,7 @@ from agent.app_tracker import AppTracker
 from agent.browser_tracker import BrowserTracker
 from agent.calendar_tracker import CalendarTracker
 from agent.database import init_db
+from agent.file_watcher import FileActivityWatcher
 from agent.logging_config import setup_logging
 from agent.time_intelligence import TimeIntelligenceEngine
 from ai.master_agent import MasterAgentScheduler
@@ -40,6 +41,7 @@ def start_components() -> list:
     components = [
         AppTracker(),
         CalendarTracker(),
+        FileActivityWatcher(),
         TimeIntelligenceEngine(),
         BrowserTracker(),
         AlertMonitor(),
@@ -51,8 +53,8 @@ def start_components() -> list:
 
     logger.info(
         "WorkPulse desktop agent running (app tracker, calendar tracker (meeting-aware "
-        "idle detection), time intelligence, browser tracker (window-title based), "
-        "alert monitor, master agent scheduler, live scoring every 60s)."
+        "idle detection), file activity watcher, time intelligence, browser tracker "
+        "(window-title based), alert monitor, master agent scheduler, live scoring every 60s)."
     )
     return components
 

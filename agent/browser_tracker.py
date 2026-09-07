@@ -188,7 +188,7 @@ class WebsiteSessionManager:
 
     def report(self, domain: Optional[str], title: Optional[str]) -> None:
         now = datetime.now()
-        with self._lock:
+        with self._lock:  
             if domain != self._current_domain:
                 self._close_current(now)
                 if domain is not None:

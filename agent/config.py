@@ -100,6 +100,19 @@ CALENDAR_ICS_PATH = os.environ.get(
 )
 CALENDAR_SYNC_INTERVAL_SECONDS = 300  # re-read the .ics file every 5 minutes
 
+# ── File activity watcher (Layer 1) ──
+# Optional — off (no folders watched, no behaviour change) until configured.
+# Comma-separated absolute paths, e.g. a shared drive or project folder:
+# WORKPULSE_FILE_WATCH_ROOTS=D:\Shared\Finance,D:\Shared\Legal
+_file_watch_roots_raw = os.environ.get("WORKPULSE_FILE_WATCH_ROOTS", "")
+FILE_WATCH_ROOTS = [p.strip() for p in _file_watch_roots_raw.split(",") if p.strip()]
+# Only real documents matter for a task log — skip lock files, temp files,
+# and anything not a document someone would recognise as "work".
+FILE_WATCH_EXTENSIONS = {
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf",
+    ".txt", ".csv", ".md",
+}
+
 # ── DAR ──
 DAR_GENERATION_TIME = "18:00"
 

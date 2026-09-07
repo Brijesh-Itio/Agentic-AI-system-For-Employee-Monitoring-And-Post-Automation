@@ -360,6 +360,220 @@ class FileActivityLog(Base):
     watched_root = Column(String)
 
 
+class SeoSite(Base):
+    __tablename__ = "seo_sites"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    base_url = Column(String, nullable=False)
+    cms_type = Column(String, nullable=False, default="wordpress")
+    cms_base_url = Column(String)
+    is_active = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime)
+    # NULL means "fall back to the .env value" — see agent/database.py's
+    # _SEO_SITES_EXTRA_COLUMNS comment for why these are per-site.
+    gsc_site_url = Column(String)
+    ga4_property_id = Column(String)
+    cms_username = Column(String)
+    cms_app_password = Column(String)
+    cms_api_token = Column(String)
+    cms_collection_id = Column(String)
+
+    # Plain Python properties (not Columns) — SeoSiteOut's from_attributes
+    # reads these via getattr same as any Column, but the API never
+    # echoes the actual secret back once saved, only whether one is set.
+    @property
+    def cms_app_password_set(self) -> bool:
+        return bool(self.cms_app_password)
+
+    @property
+    def cms_api_token_set(self) -> bool:
+        return bool(self.cms_api_token)
+
+
+class SeoJobRun(Base):
+    __tablename__ = "seo_job_runs"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    job_type = Column(String, nullable=False)
+    run_date = Column(Date, nullable=False)
+    status = Column(String, nullable=False, default="running")
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+    error = Column(String)
+    retry_count = Column(Integer, nullable=False, default=0)
+
+
+class LlmUsageLog(Base):
+    __tablename__ = "llm_usage_log"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="SET NULL"))
+    task = Column(String, nullable=False)
+    provider = Column(String, nullable=False)
+    model = Column(String)
+    tokens_in = Column(Integer)
+    tokens_out = Column(Integer)
+    cost_estimate = Column(Float)
+    latency_ms = Column(Float)
+    success = Column(Integer, nullable=False)
+    error = Column(String)
+    created_at = Column(DateTime)
+
+
+class SeoPagespeedResult(Base):
+    __tablename__ = "seo_pagespeed_results"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    url = Column(String, nullable=False)
+    strategy = Column(String, nullable=False, default="mobile")
+    run_date = Column(Date, nullable=False)
+    performance_score = Column(Float)
+    lcp_ms = Column(Float)
+    cls = Column(Float)
+    inp_ms = Column(Float)
+    ttfb_ms = Column(Float)
+    fcp_ms = Column(Float)
+    raw_json = Column(String)
+    created_at = Column(DateTime)
+
+
+class SeoGscQuery(Base):
+    __tablename__ = "seo_gsc_queries"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    run_date = Column(Date, nullable=False)
+    query = Column(String, nullable=False)
+    clicks = Column(Integer, nullable=False, default=0)
+    impressions = Column(Integer, nullable=False, default=0)
+    ctr = Column(Float)
+    position = Column(Float)
+    created_at = Column(DateTime)
+
+
+class SeoGa4Page(Base):
+    __tablename__ = "seo_ga4_pages"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    run_date = Column(Date, nullable=False)
+    page_path = Column(String, nullable=False)
+    sessions = Column(Integer, nullable=False, default=0)
+    bounce_rate = Column(Float)
+    conversions = Column(Float)
+    created_at = Column(DateTime)
+
+
+class SeoOgTags(Base):
+    __tablename__ = "seo_og_tags"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    page_url = Column(String, nullable=False)
+    page_title = Column(String, nullable=False)
+    og_title = Column(String, nullable=False)
+    og_description = Column(String, nullable=False)
+    generated_at = Column(DateTime)
+
+
+class SeoTechnicalIssue(Base):
+    __tablename__ = "seo_technical_issues"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    run_date = Column(Date, nullable=False)
+    rule = Column(String, nullable=False)
+    severity = Column(String, nullable=False)
+    url = Column(String, nullable=False)
+    message = Column(String, nullable=False)
+    suggested_fix = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    reviewed_at = Column(DateTime)
+    reviewed_by = Column(String)
+    created_at = Column(DateTime)
+
+
+class SeoDailyDigest(Base):
+    __tablename__ = "seo_daily_digests"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    run_date = Column(Date, nullable=False)
+    narrative = Column(String, nullable=False)
+    stats_json = Column(String, nullable=False)
+    slack_delivered = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime)
+
+
+class SeoSocialPost(Base):
+    __tablename__ = "seo_social_posts"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    platform = Column(String, nullable=False)
+    source_url = Column(String)
+    content = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="draft")
+    external_post_id = Column(String)
+    error = Column(String)
+    created_at = Column(DateTime)
+    posted_at = Column(DateTime)
+
+
+class SeoBacklinkMention(Base):
+    __tablename__ = "seo_backlink_mentions"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    source_url = Column(String, nullable=False)
+    source_title = Column(String)
+    anchor_text = Column(String)
+    domain_rating = Column(Float)
+    discovered_at = Column(String)
+    outreach_subject = Column(String)
+    outreach_body = Column(String)
+    created_at = Column(DateTime)
+
+
+class SeoIndexStatus(Base):
+    __tablename__ = "seo_index_status"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    url = Column(String, nullable=False)
+    coverage_state = Column(String)
+    indexing_state = Column(String)
+    robots_txt_state = Column(String)
+    page_fetch_state = Column(String)
+    last_crawl_time = Column(String)
+    google_canonical = Column(String)
+    user_canonical = Column(String)
+    sitemap_json = Column(String)
+    checked_at = Column(DateTime)
+
+
+class SeoIndexingSubmission(Base):
+    __tablename__ = "seo_indexing_submissions"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    url = Column(String, nullable=False)
+    notification_type = Column(String, nullable=False)
+    success = Column(Integer, nullable=False, default=0)
+    response_json = Column(String)
+    error = Column(String)
+    submitted_at = Column(DateTime)
+
+
+class SeoBlogPost(Base):
+    __tablename__ = "seo_blog_posts"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    topic = Column(String, nullable=False)
+    primary_keyword = Column(String)
+    title = Column(String, nullable=False)
+    excerpt = Column(String)
+    content = Column(String, nullable=False)
+    structure_passed = Column(Integer)
+    structure_issues_json = Column(String)
+    status = Column(String, nullable=False, default="draft")
+    cms_post_id = Column(String)
+    cms_post_link = Column(String)
+    error = Column(String)
+    created_at = Column(DateTime)
+    published_at = Column(DateTime)
+
+
 def init_db() -> None:
     """Ensure schema exists before the API serves any requests."""
     agent_db.init_db()

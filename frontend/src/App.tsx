@@ -17,6 +17,7 @@ import EmailPage from "./pages/Email/EmailPage";
 import TeamPage from "./pages/Team/TeamPage";
 import TeamMemberProfilePage from "./pages/Team/TeamMemberProfilePage";
 import AttendancePage from "./pages/Attendance/AttendancePage";
+import SeoPage from "./pages/Seo/SeoPage";
 
 export default function App() {
   return (
@@ -37,6 +38,7 @@ export default function App() {
             <Route path="/command" element={<CommandModePage />} />
             <Route path="/linkedin" element={<LinkedInPage />} />
             <Route path="/email" element={<EmailPage />} />
+            <Route path="/seo" element={<SeoPage />} />
             <Route element={<OversightRoute />}>
               <Route path="/team" element={<TeamPage />} />
               <Route path="/team/:userId" element={<TeamMemberProfilePage />} />

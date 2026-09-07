@@ -12,6 +12,11 @@ pystray==0.19.5
 # Parses a local .ics export — no calendar API, no OAuth, no credentials.
 icalendar==7.3.0
 
+# ── File activity watcher (Layer 1) ──
+# Native OS filesystem events (no polling) for configured shared-drive
+# folders — off by default until WORKPULSE_FILE_WATCH_ROOTS is set.
+watchdog==6.0.0
+
 # ── API Backend (Module 5) ──
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
@@ -31,6 +36,11 @@ chromadb==1.5.9
 langgraph==1.2.11
 langchain-core==1.5.4
 
+# apscheduler installed for Module 33 (SEO Agentic AI: autonomous daily
+# scheduling) — a real BackgroundScheduler thread firing the SEO pipeline
+# on a cron-style schedule, not a hand-rolled sleep loop.
+apscheduler==3.11.3
+
 # ── Browser Automation (Module 4, 18, 20) ──
 playwright==1.47.0
 
@@ -41,3 +51,9 @@ openpyxl==3.1.5
 
 # ── Utilities ──
 python-dotenv==1.0.1
+
+# ── SEO Agentic AI: site crawling for technical audits (Module 28) ──
+# Pure Python, uses stdlib html.parser by default — no C extension/lxml
+# dependency required. Explicitly the blueprint's own recommended tool for
+# on-page audit and internal-link mapping.
+beautifulsoup4==4.12.3

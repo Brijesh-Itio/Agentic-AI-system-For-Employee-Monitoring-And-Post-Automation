@@ -772,3 +772,372 @@ export const setMemberFeature = (userId: string, feature: FeatureFlag, enabled: 
   api
     .put<Record<FeatureFlag, boolean>>(`/api/team/member/${userId}/features/${feature}`, { enabled })
     .then((r) => r.data);
+
+// ── SEO Agentic AI (modules 25-31) ──
+
+export interface SeoSite {
+  id: number;
+  name: string;
+  base_url: string;
+  cms_type: string;
+  cms_base_url: string | null;
+  is_active: boolean;
+  created_at: string | null;
+  // NULL means "fall back to the GSC_SITE_URL/GA4_PROPERTY_ID in .env" —
+  // see agent/database.py's _SEO_SITES_EXTRA_COLUMNS comment.
+  gsc_site_url: string | null;
+  ga4_property_id: string | null;
+  // Same fallback story for CMS publishing credentials (module 34.2).
+  // cms_username/cms_collection_id aren't secrets; cms_app_password/
+  // cms_api_token never come back from the API once saved — only
+  // whether one is set.
+  cms_username: string | null;
+  cms_collection_id: string | null;
+  cms_app_password_set: boolean;
+  cms_api_token_set: boolean;
+}
+
+export const getSeoSites = () => api.get<SeoSite[]>("/api/seo/sites").then((r) => r.data);
+
+export const createSeoSite = (payload: {
+  name: string;
+  base_url: string;
+  cms_type: "wordpress" | "webflow";
+  gsc_site_url?: string;
+  ga4_property_id?: string;
+}) => api.post<SeoSite>("/api/seo/sites", payload).then((r) => r.data);
+
+// Lets a site's Search Console/Analytics property be set from the UI
+// instead of editing .env and restarting the backend for every site.
+export const updateSeoSiteGoogleConfig = (
+  siteId: number,
+  payload: { gsc_site_url?: string; ga4_property_id?: string }
+) => api.patch<SeoSite>(`/api/seo/sites/${siteId}/google-config`, payload).then((r) => r.data);
+
+// Same idea for CMS publishing credentials — WordPress reads base_url/
+// username/app_password, Webflow reads api_token/collection_id.
+export const updateSeoSiteCmsConfig = (
+  siteId: number,
+  payload: {
+    cms_base_url?: string;
+    cms_username?: string;
+    cms_app_password?: string;
+    cms_api_token?: string;
+    cms_collection_id?: string;
+  }
+) => api.patch<SeoSite>(`/api/seo/sites/${siteId}/cms-config`, payload).then((r) => r.data);
+
+// ── Job history + GSC/GA4 data — previously API-only, no UI ──
+export interface SeoJobRun {
+  id: number;
+  site_id: number;
+  job_type: string;
+  run_date: string;
+  status: "running" | "success" | "failed";
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
+export const getSeoJobs = (siteId: number, limit = 20) =>
+  api.get<SeoJobRun[]>("/api/seo/jobs", { params: { site_id: siteId, limit } }).then((r) => r.data);
+
+export interface GscQueryRow {
+  id: number;
+  site_id: number;
+  run_date: string;
+  query: string;
+  clicks: number;
+  impressions: number;
+  ctr: number | null;
+  position: number | null;
+}
+
+export const getGscQueries = (siteId: number, limit = 10) =>
+  api.get<GscQueryRow[]>("/api/seo/gsc", { params: { site_id: siteId, limit } }).then((r) => r.data);
+
+export interface Ga4PageRow {
+  id: number;
+  site_id: number;
+  run_date: string;
+  page_path: string;
+  sessions: number;
+  bounce_rate: number | null;
+  conversions: number | null;
+}
+
+export const getGa4Pages = (siteId: number, limit = 10) =>
+  api.get<Ga4PageRow[]>("/api/seo/ga4", { params: { site_id: siteId, limit } }).then((r) => r.data);
+
+export type TechnicalIssueSeverity = "critical" | "warning" | "info";
+export type TechnicalIssueStatus = "pending" | "approved" | "rejected";
+
+export interface TechnicalIssue {
+  id: number;
+  site_id: number;
+  run_date: string;
+  rule: string;
+  severity: TechnicalIssueSeverity;
+  url: string;
+  message: string;
+  suggested_fix: string;
+  status: TechnicalIssueStatus;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  created_at: string | null;
+}
+
+export const getTechnicalIssues = (siteId: number, status?: string) =>
+  api
+    .get<TechnicalIssue[]>("/api/seo/technical/issues", { params: { site_id: siteId, status } })
+    .then((r) => r.data);
+
+// A real crawl+detect pass — can take real time (politeness delay per
+// page) — long client timeout, same reasoning as reports.dar.generate.
+export const runTechnicalAudit = (siteId: number, maxPages = 30) =>
+  api
+    .post<TechnicalIssue[]>(
+      "/api/seo/technical/audit",
+      { site_id: siteId, max_pages: maxPages },
+      { timeout: 180_000 }
+    )
+    .then((r) => r.data);
+
+export const approveTechnicalIssue = (issueId: number) =>
+  api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/approve`, {}).then((r) => r.data);
+
+export const rejectTechnicalIssue = (issueId: number) =>
+  api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/reject`, {}).then((r) => r.data);
+
+export interface SeoDigest {
+  id: number;
+  site_id: number;
+  run_date: string;
+  narrative: string;
+  stats_json: string;
+  slack_delivered: boolean;
+  created_at: string | null;
+}
+
+export const getSeoDigests = (siteId: number) =>
+  api.get<SeoDigest[]>("/api/seo/digest", { params: { site_id: siteId } }).then((r) => r.data);
+
+// Digest generation calls the LLM factory — generous timeout for local
+// CPU inference, same reasoning as reports.dar.generate.
+export const generateSeoDigest = (siteId: number, sendToSlack = true) =>
+  api
+    .post<SeoDigest>(
+      "/api/seo/digest/generate",
+      { site_id: siteId, send_to_slack: sendToSlack },
+      { timeout: 120_000 }
+    )
+    .then((r) => r.data);
+
+export type SocialPlatform = "linkedin" | "twitter" | "instagram" | "facebook";
+export type SocialPostStatus = "draft" | "approved" | "rejected" | "posted" | "failed";
+
+export interface SocialPost {
+  id: number;
+  site_id: number;
+  platform: SocialPlatform;
+  source_url: string | null;
+  content: string;
+  status: SocialPostStatus;
+  external_post_id: string | null;
+  error: string | null;
+  created_at: string | null;
+  posted_at: string | null;
+}
+
+export const generateSocialPosts = (payload: {
+  site_id: number;
+  page_title: string;
+  content_excerpt: string;
+  source_url?: string;
+  platforms: SocialPlatform[];
+}) => api.post<SocialPost[]>("/api/seo/social/generate", payload, { timeout: 120_000 }).then((r) => r.data);
+
+export const getSocialPosts = (siteId: number, status?: string) =>
+  api.get<SocialPost[]>("/api/seo/social", { params: { site_id: siteId, status } }).then((r) => r.data);
+
+export const approveSocialPost = (postId: number) =>
+  api.post<SocialPost>(`/api/seo/social/${postId}/approve`, {}).then((r) => r.data);
+
+export const rejectSocialPost = (postId: number) =>
+  api.post<SocialPost>(`/api/seo/social/${postId}/reject`, {}).then((r) => r.data);
+
+export const publishSocialPost = (postId: number) =>
+  api.post<SocialPost>(`/api/seo/social/${postId}/publish`, {}, { timeout: 60_000 }).then((r) => r.data);
+
+export interface BacklinkMention {
+  id: number;
+  site_id: number;
+  source_url: string;
+  source_title: string | null;
+  anchor_text: string | null;
+  domain_rating: number | null;
+  discovered_at: string | null;
+  outreach_subject: string | null;
+  outreach_body: string | null;
+  created_at: string | null;
+}
+
+export const pullBacklinks = (siteId: number) =>
+  api.post<BacklinkMention[]>("/api/seo/backlinks/pull", { site_id: siteId }, { timeout: 30_000 }).then((r) => r.data);
+
+export const getBacklinks = (siteId: number) =>
+  api.get<BacklinkMention[]>("/api/seo/backlinks", { params: { site_id: siteId } }).then((r) => r.data);
+
+export const draftOutreachEmail = (mentionId: number, siteName: string, siteUrl: string) =>
+  api
+    .post<BacklinkMention>(
+      `/api/seo/backlinks/${mentionId}/draft-outreach`,
+      { site_name: siteName, site_url: siteUrl },
+      { timeout: 60_000 }
+    )
+    .then((r) => r.data);
+
+// ── Module 32 — PageSpeed resource audit + Indexing Status ──
+
+export type PageSpeedStrategy = "mobile" | "desktop";
+
+export interface PageSpeedResult {
+  id: number;
+  site_id: number;
+  url: string;
+  strategy: PageSpeedStrategy;
+  run_date: string;
+  performance_score: number | null;
+  lcp_ms: number | null;
+  cls: number | null;
+  inp_ms: number | null;
+  ttfb_ms: number | null;
+  fcp_ms: number | null;
+  created_at: string | null;
+}
+
+// A real Lighthouse run on Google's end — 20-40s is normal, but a slow/
+// heavy page can push the backend through all 3 of its own 90s retry
+// attempts before giving up, so this client timeout must clear that.
+export const checkPageSpeed = (siteId: number, url: string, strategy: PageSpeedStrategy = "mobile") =>
+  api
+    .post<PageSpeedResult>("/api/seo/pagespeed/check", { site_id: siteId, url, strategy }, { timeout: 300_000 })
+    .then((r) => r.data);
+
+export const getPageSpeedResults = (siteId: number, limit?: number) =>
+  api.get<PageSpeedResult[]>("/api/seo/pagespeed", { params: { site_id: siteId, limit } }).then((r) => r.data);
+
+export interface PageSpeedOpportunity {
+  audit_id: string;
+  title: string;
+  description: string;
+  savings_ms: number | null;
+  savings_bytes: number | null;
+}
+
+export interface ResourceAuditReport {
+  total_requests: number | null;
+  total_byte_weight_kb: number | null;
+  unused_css_kb: number | null;
+  unused_js_kb: number | null;
+  render_blocking_requests: number | null;
+  opportunities: PageSpeedOpportunity[];
+}
+
+// Parses raw_json already stored by checkPageSpeed above — no second
+// PageSpeed API call, so this is fast even though the check itself isn't.
+export const getPageSpeedOpportunities = (resultId: number) =>
+  api.get<ResourceAuditReport>(`/api/seo/pagespeed/${resultId}/opportunities`).then((r) => r.data);
+
+export interface IndexStatus {
+  id: number;
+  site_id: number;
+  url: string;
+  coverage_state: string | null;
+  indexing_state: string | null;
+  robots_txt_state: string | null;
+  page_fetch_state: string | null;
+  last_crawl_time: string | null;
+  google_canonical: string | null;
+  user_canonical: string | null;
+  checked_at: string | null;
+}
+
+// The backend retries this up to 3 times with its own hard 40s deadline
+// per attempt (see indexing_client.py) — this must clear that worst case.
+export const inspectUrl = (siteId: number, url: string) =>
+  api.post<IndexStatus>("/api/seo/indexing/inspect", { site_id: siteId, url }, { timeout: 150_000 }).then((r) => r.data);
+
+export const getIndexStatusList = (siteId: number) =>
+  api.get<IndexStatus[]>("/api/seo/indexing/status", { params: { site_id: siteId } }).then((r) => r.data);
+
+export type IndexingNotificationType = "URL_UPDATED" | "URL_DELETED";
+
+export interface IndexingSubmission {
+  id: number;
+  site_id: number;
+  url: string;
+  notification_type: IndexingNotificationType;
+  success: boolean;
+  error: string | null;
+  submitted_at: string | null;
+}
+
+export const submitForIndexing = (siteId: number, url: string, notificationType: IndexingNotificationType = "URL_UPDATED") =>
+  api
+    .post<IndexingSubmission>(
+      "/api/seo/indexing/submit",
+      { site_id: siteId, url, notification_type: notificationType },
+      { timeout: 30_000 }
+    )
+    .then((r) => r.data);
+
+export const getIndexingSubmissions = (siteId: number) =>
+  api.get<IndexingSubmission[]>("/api/seo/indexing/submissions", { params: { site_id: siteId } }).then((r) => r.data);
+
+// ── Module 34: Blog post generation + CMS draft publishing ──
+export type BlogPostStatus = "draft" | "approved" | "rejected" | "published" | "failed";
+
+export interface StructureIssue {
+  rule: string;
+  severity: "error" | "warning";
+  message: string;
+}
+
+export interface BlogPost {
+  id: number;
+  site_id: number;
+  topic: string;
+  primary_keyword: string | null;
+  title: string;
+  excerpt: string | null;
+  content: string;
+  structure_passed: boolean | null;
+  structure_issues_json: string | null;
+  status: BlogPostStatus;
+  cms_post_id: string | null;
+  cms_post_link: string | null;
+  error: string | null;
+  created_at: string | null;
+  published_at: string | null;
+}
+
+// A real, full-length post via the slower/better model (module 25's
+// fast=False path) — genuinely takes over a minute, not the 20-40s a
+// short social caption needs.
+export const generateBlogPost = (payload: { site_id: number; topic: string; primary_keyword?: string; min_words?: number }) =>
+  api.post<BlogPost>("/api/seo/blog/generate", payload, { timeout: 180_000 }).then((r) => r.data);
+
+export const getBlogPosts = (siteId: number, status?: string) =>
+  api.get<BlogPost[]>("/api/seo/blog", { params: { site_id: siteId, status } }).then((r) => r.data);
+
+export const approveBlogPost = (postId: number) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/approve`, {}).then((r) => r.data);
+
+export const rejectBlogPost = (postId: number) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/reject`, {}).then((r) => r.data);
+
+// Creates the post as a draft in WordPress/Webflow — never goes live on
+// its own, see automation/seo/cms/base.py's create_post docstring.
+export const publishBlogPost = (postId: number) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/publish`, {}, { timeout: 30_000 }).then((r) => r.data);

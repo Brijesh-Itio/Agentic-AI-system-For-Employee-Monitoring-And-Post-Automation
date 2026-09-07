@@ -12,6 +12,7 @@ Design notes (scalability / performance):
 - Schema evolves via CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN so
   upgrading the agent never destroys existing tracked data.
 """
+import json
 import logging
 import sqlite3
 import threading
@@ -482,6 +483,295 @@ CREATE TABLE IF NOT EXISTS email_templates (
 
 CREATE INDEX IF NOT EXISTS idx_file_activity_logs_user_date ON file_activity_logs(user_id, date);
 CREATE INDEX IF NOT EXISTS idx_file_activity_logs_path ON file_activity_logs(file_path);
+
+-- Module 25 — SEO Agentic AI foundation. Purely additive; nothing above
+-- this comment changes. seo_sites is the generic site registry (any
+-- number of target websites, not hardcoded to one) that every other SEO
+-- table below keys off via site_id.
+CREATE TABLE IF NOT EXISTS seo_sites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    cms_type TEXT NOT NULL DEFAULT 'wordpress',
+    cms_base_url TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- One row per pipeline run. UNIQUE(site_id, job_type, run_date) is the
+-- idempotency guarantee every SEO pipeline (module 26+) relies on: a
+-- retried or overlapping trigger for a run that's already started is
+-- rejected as a duplicate rather than double-executing against rate-
+-- limited external APIs.
+CREATE TABLE IF NOT EXISTS seo_job_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    job_type TEXT NOT NULL,
+    run_date DATE NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME,
+    error TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(site_id, job_type, run_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_job_runs_site_status ON seo_job_runs(site_id, status);
+
+-- Every ai/llm/factory.py provider call logs one row here regardless of
+-- provider (ollama/claude/openai/...) — cost/usage visibility that
+-- becomes necessary the moment a paid provider is switched on, which
+-- nothing in this codebase tracked before module 25. site_id is nullable
+-- since non-SEO LLM calls could in principle route through this layer
+-- too in the future; only SEO tasks do today.
+CREATE TABLE IF NOT EXISTS llm_usage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER REFERENCES seo_sites(id) ON DELETE SET NULL,
+    task TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    cost_estimate REAL,
+    latency_ms REAL,
+    success INTEGER NOT NULL,
+    error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_usage_log_created ON llm_usage_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_log_provider ON llm_usage_log(provider);
+
+-- Module 26.4 — PageSpeed Insights pulls. UNIQUE(site_id, url, strategy,
+-- run_date) makes re-running the same day's check for the same page
+-- idempotent (upsert, not duplicate rows) independent of seo_job_runs'
+-- one-row-per-job-per-day tracking, since one job run can check many URLs.
+CREATE TABLE IF NOT EXISTS seo_pagespeed_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    strategy TEXT NOT NULL DEFAULT 'mobile',
+    run_date DATE NOT NULL,
+    performance_score REAL,
+    lcp_ms REAL,
+    cls REAL,
+    inp_ms REAL,
+    ttfb_ms REAL,
+    fcp_ms REAL,
+    raw_json TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, url, strategy, run_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_pagespeed_site_date ON seo_pagespeed_results(site_id, run_date);
+
+-- Module 26.5 — GSC Search Analytics pulls. UNIQUE(site_id, run_date,
+-- query) makes re-running the same day's pull idempotent (upsert).
+CREATE TABLE IF NOT EXISTS seo_gsc_queries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    run_date DATE NOT NULL,
+    query TEXT NOT NULL,
+    clicks INTEGER NOT NULL DEFAULT 0,
+    impressions INTEGER NOT NULL DEFAULT 0,
+    ctr REAL,
+    position REAL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, run_date, query)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_gsc_queries_site_date ON seo_gsc_queries(site_id, run_date);
+
+-- Module 26.6 — GA4 per-page traffic pulls. Same idempotent-upsert shape.
+CREATE TABLE IF NOT EXISTS seo_ga4_pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    run_date DATE NOT NULL,
+    page_path TEXT NOT NULL,
+    sessions INTEGER NOT NULL DEFAULT 0,
+    bounce_rate REAL,
+    conversions REAL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, run_date, page_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_ga4_pages_site_date ON seo_ga4_pages(site_id, run_date);
+
+-- Module 27.3 — Generated OG tags. Stored here rather than pushed
+-- straight into CMS meta fields: WordPress's base REST API has no
+-- generic OG-tag field (that's normally an SEO plugin's custom meta —
+-- Yoast/RankMath — whose exact field names vary per install and weren't
+-- guessed at). UNIQUE(site_id, page_url) makes regenerating for the same
+-- page idempotent (upsert, latest version wins).
+CREATE TABLE IF NOT EXISTS seo_og_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    page_url TEXT NOT NULL,
+    page_title TEXT NOT NULL,
+    og_title TEXT NOT NULL,
+    og_description TEXT NOT NULL,
+    generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, page_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_og_tags_site ON seo_og_tags(site_id);
+
+-- Module 28 — Technical SEO detect+approve queue. UNIQUE(site_id, rule,
+-- url) means re-running an audit upserts the same row (refreshed
+-- message/severity/run_date) rather than piling up duplicates, and —
+-- critically — the upsert (see upsert_technical_issues below) never
+-- touches `status`, so a human's approve/reject decision on a
+-- still-unresolved issue survives the next day's re-audit instead of
+-- silently reverting to 'pending'.
+CREATE TABLE IF NOT EXISTS seo_technical_issues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    run_date DATE NOT NULL,
+    rule TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    url TEXT NOT NULL,
+    message TEXT NOT NULL,
+    suggested_fix TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewed_at DATETIME,
+    reviewed_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, rule, url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_technical_issues_site_status ON seo_technical_issues(site_id, status);
+
+-- Module 29 — Daily digest archive. UNIQUE(site_id, run_date) makes
+-- regenerating today's digest idempotent (upsert, latest version wins)
+-- rather than piling up duplicates from a re-triggered run.
+CREATE TABLE IF NOT EXISTS seo_daily_digests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    run_date DATE NOT NULL,
+    narrative TEXT NOT NULL,
+    stats_json TEXT NOT NULL,
+    slack_delivered INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, run_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_daily_digests_site ON seo_daily_digests(site_id);
+
+-- Module 30 — Social media content calendar + approval queue. Real
+-- automated posting exists only for LinkedIn (reusing module 18's
+-- Playwright automation, already tested against a real browser flow);
+-- Twitter/Instagram/Facebook stay in 'draft'/'approved' status for a
+-- human to post manually — no tested automation exists for those
+-- platforms in this codebase, and this table deliberately doesn't
+-- pretend otherwise.
+CREATE TABLE IF NOT EXISTS seo_social_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    platform TEXT NOT NULL,
+    source_url TEXT,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    external_post_id TEXT,
+    error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    posted_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_social_posts_site_status ON seo_social_posts(site_id, status);
+
+-- Module 31 — Backlink/brand-mention monitoring. UNIQUE(site_id,
+-- source_url) makes re-polling the same feed idempotent (a mention seen
+-- again on a later poll doesn't duplicate). outreach_subject/body are
+-- filled in lazily (only once a human asks for a draft), not on ingest.
+CREATE TABLE IF NOT EXISTS seo_backlink_mentions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    source_url TEXT NOT NULL,
+    source_title TEXT,
+    anchor_text TEXT,
+    domain_rating REAL,
+    discovered_at TEXT,
+    outreach_subject TEXT,
+    outreach_body TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, source_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_backlink_mentions_site ON seo_backlink_mentions(site_id);
+
+-- Indexing Status & Crawl Monitoring — the blueprint feature that was
+-- honestly incomplete (only GSC's rank/query data existed, not index
+-- coverage). UNIQUE(site_id, url) makes re-inspecting the same URL
+-- idempotent (upsert, latest inspection wins) via GSC's real
+-- urlInspection.index:inspect endpoint (automation/seo/indexing_client.py).
+CREATE TABLE IF NOT EXISTS seo_index_status (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    coverage_state TEXT,
+    indexing_state TEXT,
+    robots_txt_state TEXT,
+    page_fetch_state TEXT,
+    last_crawl_time TEXT,
+    google_canonical TEXT,
+    user_canonical TEXT,
+    sitemap_json TEXT,
+    checked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_index_status_site ON seo_index_status(site_id);
+
+-- Indexing API submission history — a call log, not upserted (each
+-- submit attempt is its own real event worth keeping, e.g. to see how
+-- often a URL is being re-submitted). Uses Google's real Indexing API
+-- (indexing.googleapis.com), which is documented for JobPosting/
+-- BroadcastEvent content — see indexing_client.py's module docstring for
+-- the honest caveat about using it for general pages.
+CREATE TABLE IF NOT EXISTS seo_indexing_submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    notification_type TEXT NOT NULL,
+    success INTEGER NOT NULL DEFAULT 0,
+    response_json TEXT,
+    error TEXT,
+    submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_indexing_submissions_site ON seo_indexing_submissions(site_id);
+
+-- Module 34 — Blog post generation + CMS draft publishing. Same
+-- draft/approved/rejected review queue shape as seo_social_posts (module
+-- 30), extended with the fields a full post needs (excerpt, primary
+-- keyword) and structure_passed/structure_issues_json so a reviewer sees
+-- content_structure.py's own H1/word-count/keyword checks (module 27.5)
+-- right next to the draft, not as a separate manual step. status is
+-- 'published' once pushed to the CMS as a real draft post there — that
+-- word means two different things at two different layers on purpose:
+-- 'published' here means "exists in the CMS", the CMS's own post status
+-- stays 'draft' until a human publishes it for real (see automation/seo/
+-- cms/base.py's create_post — publishing straight to a live site with no
+-- second human checkpoint was deliberately ruled out for this module).
+CREATE TABLE IF NOT EXISTS seo_blog_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    topic TEXT NOT NULL,
+    primary_keyword TEXT,
+    title TEXT NOT NULL,
+    excerpt TEXT,
+    content TEXT NOT NULL,
+    structure_passed INTEGER,
+    structure_issues_json TEXT,
+    status TEXT NOT NULL DEFAULT 'draft',
+    cms_post_id TEXT,
+    cms_post_link TEXT,
+    error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    published_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_blog_posts_site_status ON seo_blog_posts(site_id, status);
 """
 
 # Columns added after the initial daily_stats design (module 2.6 — longest
@@ -513,6 +803,31 @@ _DAR_ENTRIES_EXTRA_COLUMNS = {
     "task_id": "INTEGER REFERENCES tasks(id) ON DELETE SET NULL",
 }
 
+# GSC/GA4 were originally one global .env value (GSC_SITE_URL,
+# GA4_PROPERTY_ID) shared by every seo_sites row — fine for the single
+# verified test property module 26.5/26.6 shipped with, but it meant
+# switching to a second real site required editing .env and restarting
+# the backend every time. Storing them per-site instead lets each site
+# carry its own verified Search Console property / Analytics property.
+# NULL here means "fall back to the .env value" (automation/seo/
+# gsc_client.py, ga4_client.py, indexing_client.py all do this), so the
+# existing test site keeps working with zero migration action needed.
+_SEO_SITES_EXTRA_COLUMNS = {
+    "gsc_site_url": "TEXT",
+    "ga4_property_id": "TEXT",
+    # CMS publishing credentials (module 34.2) — same "NULL means fall
+    # back to .env, but only when unambiguous" story as gsc_site_url/
+    # ga4_property_id above. cms_base_url already existed (module 26.1,
+    # for a CMS admin URL that differs from the site's public base_url);
+    # these four are new. WordPress uses username/app_password; Webflow
+    # uses api_token/collection_id — each site only ever fills in the
+    # pair matching its own cms_type.
+    "cms_username": "TEXT",
+    "cms_app_password": "TEXT",
+    "cms_api_token": "TEXT",
+    "cms_collection_id": "TEXT",
+}
+
 
 def _ensure_extra_columns(conn: sqlite3.Connection, table: str, columns: dict) -> None:
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -533,6 +848,7 @@ def init_db() -> None:
             # so the task_id column's FK reference resolves correctly.
             _ensure_extra_columns(conn, "dar_entries", _DAR_ENTRIES_EXTRA_COLUMNS)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_dar_entries_task ON dar_entries(task_id)")
+            _ensure_extra_columns(conn, "seo_sites", _SEO_SITES_EXTRA_COLUMNS)
             conn.commit()
             logger.info("Local SQLite schema ready at %s", LOCAL_DB_PATH)
         except Exception:
@@ -1313,3 +1629,583 @@ def set_feature_flag(feature: str, enabled: bool, user_id: str = "local") -> Non
             """,
             (user_id, feature, 1 if enabled else 0),
         )
+
+
+# ── seo_sites — module 25 ──
+# Creation/listing for the dashboard lives in api/routes/seo.py via
+# SQLAlchemy (simple, request-driven CRUD — same pattern as
+# departments.py). This one read helper exists for background/agent code
+# (ai/seo_master_agent.py's planning node) that has no FastAPI request
+# session to work with, mirroring how ai/master_agent.py's planning_node
+# reads dar_reports straight off agent.database.get_connection().
+
+def get_active_seo_sites():
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_sites WHERE is_active = 1 ORDER BY id").fetchall()
+
+
+def count_active_seo_sites() -> int:
+    """Callers use this to decide whether falling back to the global
+    GSC_SITE_URL/GA4_PROPERTY_ID .env values is safe: unambiguous when
+    there's exactly one active site (that's who the .env value describes),
+    unsafe the moment a second site exists — verified live that it isn't
+    just a theoretical risk: with two active sites and no per-site
+    override, gsc_pull/ga4_pull for the second site silently pulled and
+    stored the FIRST site's real analytics under the second site's id,
+    reporting "success" the whole time. See gsc_client.py/ga4_client.py's
+    fetch_search_analytics/fetch_traffic_by_page callers."""
+    conn = get_connection()
+    row = conn.execute("SELECT COUNT(*) AS n FROM seo_sites WHERE is_active = 1").fetchone()
+    return row["n"]
+
+
+# ── seo_job_runs — module 25: pipeline idempotency + audit trail ──
+# Job runs and LLM usage are written from background/pipeline code
+# (module 26+ schedulers, ai/llm/factory.py), so they follow the
+# raw-sqlite write_cursor() convention every other automation log
+# (post_log, campaign_log) uses.
+
+def start_job_run(site_id: int, job_type: str, run_date: date_cls) -> Optional[int]:
+    """Begins tracking one pipeline run. Returns the new seo_job_runs row
+    id, or None if a run for this (site_id, job_type, run_date) already
+    exists. A duplicate trigger is routine (a scheduler tick landing
+    twice, a manual re-trigger) rather than an error, so it's checked for
+    up front to keep logs quiet in the common case; the UNIQUE constraint
+    (caught below) remains the real correctness guarantee against a
+    concurrent race between the check and the insert."""
+    conn = get_connection()
+    existing = conn.execute(
+        "SELECT id FROM seo_job_runs WHERE site_id = ? AND job_type = ? AND run_date = ?",
+        (site_id, job_type, run_date.isoformat()),
+    ).fetchone()
+    if existing is not None:
+        logger.info(
+            "seo_job_runs duplicate rejected: site_id=%s job_type=%s run_date=%s",
+            site_id, job_type, run_date,
+        )
+        return None
+
+    try:
+        with write_cursor() as cur:
+            cur.execute(
+                "INSERT INTO seo_job_runs (site_id, job_type, run_date, status) VALUES (?, ?, ?, 'running')",
+                (site_id, job_type, run_date.isoformat()),
+            )
+            return cur.lastrowid
+    except sqlite3.IntegrityError:
+        # Lost a race against a concurrent start_job_run() for the same
+        # key between the SELECT above and this INSERT — rare, but the
+        # UNIQUE constraint is what actually guarantees no double-run.
+        logger.info(
+            "seo_job_runs duplicate rejected (race): site_id=%s job_type=%s run_date=%s",
+            site_id, job_type, run_date,
+        )
+        return None
+
+
+def finish_job_run(run_id: int, status: str, error: Optional[str] = None) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_job_runs SET status = ?, error = ?, finished_at = ? WHERE id = ?",
+            (status, error, datetime.now().isoformat(sep=" "), run_id),
+        )
+
+
+def increment_job_run_retry(run_id: int) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_job_runs SET retry_count = retry_count + 1, status = 'running', error = NULL WHERE id = ?",
+            (run_id,),
+        )
+
+
+def get_job_run(run_id: int):
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_job_runs WHERE id = ?", (run_id,)).fetchone()
+
+
+def list_job_runs(site_id: Optional[int] = None, limit: int = 50):
+    conn = get_connection()
+    if site_id is not None:
+        return conn.execute(
+            "SELECT * FROM seo_job_runs WHERE site_id = ? ORDER BY started_at DESC LIMIT ?",
+            (site_id, limit),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM seo_job_runs ORDER BY started_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+
+
+# ── llm_usage_log — module 25: cost/usage visibility across every LLM provider ──
+
+def log_llm_usage(
+    task: str,
+    provider: str,
+    model: Optional[str],
+    success: bool,
+    site_id: Optional[int] = None,
+    tokens_in: Optional[int] = None,
+    tokens_out: Optional[int] = None,
+    cost_estimate: Optional[float] = None,
+    latency_ms: Optional[float] = None,
+    error: Optional[str] = None,
+) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO llm_usage_log
+                (site_id, task, provider, model, tokens_in, tokens_out, cost_estimate, latency_ms, success, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                site_id, task, provider, model, tokens_in, tokens_out,
+                cost_estimate, latency_ms, 1 if success else 0, error,
+            ),
+        )
+
+
+def list_llm_usage(limit: int = 100):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM llm_usage_log ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+
+
+# ── seo_pagespeed_results — module 26.4 ──
+
+def upsert_pagespeed_result(
+    site_id: int,
+    url: str,
+    strategy: str,
+    run_date: date_cls,
+    performance_score: Optional[float],
+    lcp_ms: Optional[float],
+    cls: Optional[float],
+    inp_ms: Optional[float],
+    ttfb_ms: Optional[float],
+    fcp_ms: Optional[float],
+    raw_json: str,
+) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seo_pagespeed_results
+                (site_id, url, strategy, run_date, performance_score, lcp_ms, cls, inp_ms, ttfb_ms, fcp_ms, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(site_id, url, strategy, run_date) DO UPDATE SET
+                performance_score = excluded.performance_score,
+                lcp_ms = excluded.lcp_ms,
+                cls = excluded.cls,
+                inp_ms = excluded.inp_ms,
+                ttfb_ms = excluded.ttfb_ms,
+                fcp_ms = excluded.fcp_ms,
+                raw_json = excluded.raw_json
+            """,
+            (
+                site_id, url, strategy, run_date.isoformat(), performance_score,
+                lcp_ms, cls, inp_ms, ttfb_ms, fcp_ms, raw_json,
+            ),
+        )
+
+
+def list_pagespeed_results(site_id: int, limit: int = 50):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_pagespeed_results WHERE site_id = ? ORDER BY run_date DESC, created_at DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+# ── seo_gsc_queries — module 26.5 ──
+
+def upsert_gsc_query_rows(site_id: int, run_date: date_cls, rows: list) -> None:
+    """rows: list of automation.seo.gsc_client.GscQueryRow. A no-op on an
+    empty list rather than an empty transaction."""
+    if not rows:
+        return
+    with write_cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO seo_gsc_queries (site_id, run_date, query, clicks, impressions, ctr, position)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(site_id, run_date, query) DO UPDATE SET
+                clicks = excluded.clicks,
+                impressions = excluded.impressions,
+                ctr = excluded.ctr,
+                position = excluded.position
+            """,
+            [
+                (site_id, run_date.isoformat(), r.query, r.clicks, r.impressions, r.ctr, r.position)
+                for r in rows
+            ],
+        )
+
+
+def list_gsc_queries(site_id: int, limit: int = 100):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_gsc_queries WHERE site_id = ? ORDER BY run_date DESC, clicks DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+# ── seo_ga4_pages — module 26.6 ──
+
+def upsert_ga4_page_rows(site_id: int, run_date: date_cls, rows: list) -> None:
+    """rows: list of automation.seo.ga4_client.Ga4PageRow."""
+    if not rows:
+        return
+    with write_cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO seo_ga4_pages (site_id, run_date, page_path, sessions, bounce_rate, conversions)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(site_id, run_date, page_path) DO UPDATE SET
+                sessions = excluded.sessions,
+                bounce_rate = excluded.bounce_rate,
+                conversions = excluded.conversions
+            """,
+            [
+                (site_id, run_date.isoformat(), r.page_path, r.sessions, r.bounce_rate, r.conversions)
+                for r in rows
+            ],
+        )
+
+
+def list_ga4_pages(site_id: int, limit: int = 100):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_ga4_pages WHERE site_id = ? ORDER BY run_date DESC, sessions DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+# ── seo_og_tags — module 27.3 ──
+
+def upsert_og_tags(site_id: int, page_url: str, page_title: str, og_title: str, og_description: str) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seo_og_tags (site_id, page_url, page_title, og_title, og_description, generated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(site_id, page_url) DO UPDATE SET
+                page_title = excluded.page_title,
+                og_title = excluded.og_title,
+                og_description = excluded.og_description,
+                generated_at = CURRENT_TIMESTAMP
+            """,
+            (site_id, page_url, page_title, og_title, og_description),
+        )
+
+
+def list_og_tags(site_id: int, limit: int = 100):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_og_tags WHERE site_id = ? ORDER BY generated_at DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+# ── seo_technical_issues — module 28 ──
+
+def upsert_technical_issues(site_id: int, run_date: date_cls, issues: list) -> None:
+    """issues: list of automation.seo.technical_audit.TechnicalIssue.
+    Never overwrites `status` — see this table's schema comment."""
+    if not issues:
+        return
+    with write_cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO seo_technical_issues
+                (site_id, run_date, rule, severity, url, message, suggested_fix, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+            ON CONFLICT(site_id, rule, url) DO UPDATE SET
+                run_date = excluded.run_date,
+                severity = excluded.severity,
+                message = excluded.message,
+                suggested_fix = excluded.suggested_fix
+            """,
+            [
+                (site_id, run_date.isoformat(), i.rule, i.severity, i.url, i.message, i.suggested_fix)
+                for i in issues
+            ],
+        )
+
+
+def list_technical_issues(site_id: int, status: Optional[str] = None, limit: int = 200):
+    conn = get_connection()
+    if status is not None:
+        return conn.execute(
+            "SELECT * FROM seo_technical_issues WHERE site_id = ? AND status = ? "
+            "ORDER BY severity, created_at DESC LIMIT ?",
+            (site_id, status, limit),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM seo_technical_issues WHERE site_id = ? ORDER BY severity, created_at DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+def set_technical_issue_status(issue_id: int, status: str, reviewed_by: Optional[str] = None) -> bool:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_technical_issues SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ? WHERE id = ?",
+            (status, reviewed_by, issue_id),
+        )
+        return cur.rowcount > 0
+
+
+# ── seo_daily_digests — module 29 ──
+
+def save_daily_digest(
+    site_id: int, run_date: date_cls, narrative: str, stats_json: str, slack_delivered: bool
+) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seo_daily_digests (site_id, run_date, narrative, stats_json, slack_delivered)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(site_id, run_date) DO UPDATE SET
+                narrative = excluded.narrative,
+                stats_json = excluded.stats_json,
+                slack_delivered = excluded.slack_delivered
+            """,
+            (site_id, run_date.isoformat(), narrative, stats_json, 1 if slack_delivered else 0),
+        )
+
+
+def list_daily_digests(site_id: int, limit: int = 30):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_daily_digests WHERE site_id = ? ORDER BY run_date DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+# ── seo_social_posts — module 30 ──
+
+def create_social_post(site_id: int, platform: str, content: str, source_url: Optional[str] = None) -> int:
+    with write_cursor() as cur:
+        cur.execute(
+            "INSERT INTO seo_social_posts (site_id, platform, source_url, content, status) VALUES (?, ?, ?, ?, 'draft')",
+            (site_id, platform, source_url, content),
+        )
+        return cur.lastrowid
+
+
+def list_social_posts(site_id: int, status: Optional[str] = None, limit: int = 100):
+    conn = get_connection()
+    if status is not None:
+        return conn.execute(
+            "SELECT * FROM seo_social_posts WHERE site_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?",
+            (site_id, status, limit),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM seo_social_posts WHERE site_id = ? ORDER BY created_at DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+def get_social_post(post_id: int):
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_social_posts WHERE id = ?", (post_id,)).fetchone()
+
+
+def set_social_post_status(post_id: int, status: str) -> bool:
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_social_posts SET status = ? WHERE id = ?", (status, post_id))
+        return cur.rowcount > 0
+
+
+def mark_social_post_posted(post_id: int, external_post_id: Optional[str]) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_social_posts SET status = 'posted', external_post_id = ?, posted_at = CURRENT_TIMESTAMP, error = NULL WHERE id = ?",
+            (external_post_id, post_id),
+        )
+
+
+def mark_social_post_failed(post_id: int, error: str) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_social_posts SET status = 'failed', error = ? WHERE id = ?", (error, post_id)
+        )
+
+
+# ── seo_backlink_mentions — module 31 ──
+
+def upsert_backlink_mentions(site_id: int, mentions: list) -> int:
+    """mentions: list of automation.seo.backlinks.base.Mention. Returns
+    the number of genuinely new mentions inserted (existing ones are
+    left untouched, including any outreach draft already on them)."""
+    if not mentions:
+        return 0
+    inserted = 0
+    with write_cursor() as cur:
+        for m in mentions:
+            cur.execute(
+                """
+                INSERT INTO seo_backlink_mentions
+                    (site_id, source_url, source_title, anchor_text, domain_rating, discovered_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(site_id, source_url) DO NOTHING
+                """,
+                (site_id, m.source_url, m.source_title, m.anchor_text, m.domain_rating, m.discovered_at),
+            )
+            inserted += cur.rowcount
+    return inserted
+
+
+def list_backlink_mentions(site_id: int, limit: int = 100):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_backlink_mentions WHERE site_id = ? ORDER BY created_at DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+def save_outreach_draft(mention_id: int, subject: str, body: str) -> bool:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_backlink_mentions SET outreach_subject = ?, outreach_body = ? WHERE id = ?",
+            (subject, body, mention_id),
+        )
+        return cur.rowcount > 0
+
+
+# ── seo_index_status / seo_indexing_submissions — Indexing Status & Crawl Monitoring ──
+
+def upsert_index_status(site_id: int, url: str, inspection) -> None:
+    """inspection: automation.seo.indexing_client.UrlInspectionResult."""
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seo_index_status
+                (site_id, url, coverage_state, indexing_state, robots_txt_state, page_fetch_state,
+                 last_crawl_time, google_canonical, user_canonical, sitemap_json, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(site_id, url) DO UPDATE SET
+                coverage_state = excluded.coverage_state,
+                indexing_state = excluded.indexing_state,
+                robots_txt_state = excluded.robots_txt_state,
+                page_fetch_state = excluded.page_fetch_state,
+                last_crawl_time = excluded.last_crawl_time,
+                google_canonical = excluded.google_canonical,
+                user_canonical = excluded.user_canonical,
+                sitemap_json = excluded.sitemap_json,
+                checked_at = CURRENT_TIMESTAMP
+            """,
+            (
+                site_id,
+                url,
+                inspection.coverage_state,
+                inspection.indexing_state,
+                inspection.robots_txt_state,
+                inspection.page_fetch_state,
+                inspection.last_crawl_time,
+                inspection.google_canonical,
+                inspection.user_canonical,
+                json.dumps(inspection.sitemap) if inspection.sitemap else None,
+            ),
+        )
+
+
+def list_index_status(site_id: int, limit: int = 200):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_index_status WHERE site_id = ? ORDER BY checked_at DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+def save_indexing_submission(
+    site_id: int, url: str, notification_type: str, success: bool, response_json: Optional[str], error: Optional[str]
+) -> int:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seo_indexing_submissions
+                (site_id, url, notification_type, success, response_json, error)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (site_id, url, notification_type, 1 if success else 0, response_json, error),
+        )
+        return cur.lastrowid
+
+
+def list_indexing_submissions(site_id: int, limit: int = 100):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_indexing_submissions WHERE site_id = ? ORDER BY submitted_at DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+# ── seo_blog_posts — module 34 ──
+
+def create_blog_post(
+    site_id: int,
+    topic: str,
+    primary_keyword: Optional[str],
+    title: str,
+    excerpt: Optional[str],
+    content: str,
+    structure_passed: Optional[bool],
+    structure_issues_json: Optional[str],
+) -> int:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seo_blog_posts
+                (site_id, topic, primary_keyword, title, excerpt, content,
+                 structure_passed, structure_issues_json, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft')
+            """,
+            (
+                site_id, topic, primary_keyword, title, excerpt, content,
+                None if structure_passed is None else int(structure_passed), structure_issues_json,
+            ),
+        )
+        return cur.lastrowid
+
+
+def list_blog_posts(site_id: int, status: Optional[str] = None, limit: int = 100):
+    conn = get_connection()
+    if status is not None:
+        return conn.execute(
+            "SELECT * FROM seo_blog_posts WHERE site_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?",
+            (site_id, status, limit),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM seo_blog_posts WHERE site_id = ? ORDER BY created_at DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+def get_blog_post(post_id: int):
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_blog_posts WHERE id = ?", (post_id,)).fetchone()
+
+
+def set_blog_post_status(post_id: int, status: str) -> bool:
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET status = ? WHERE id = ?", (status, post_id))
+        return cur.rowcount > 0
+
+
+def mark_blog_post_published(post_id: int, cms_post_id: Optional[str], cms_post_link: Optional[str]) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE seo_blog_posts
+            SET status = 'published', cms_post_id = ?, cms_post_link = ?,
+                published_at = CURRENT_TIMESTAMP, error = NULL
+            WHERE id = ?
+            """,
+            (cms_post_id, cms_post_link, post_id),
+        )
+
+
+def mark_blog_post_failed(post_id: int, error: str) -> None:
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET status = 'failed', error = ? WHERE id = ?", (error, post_id))

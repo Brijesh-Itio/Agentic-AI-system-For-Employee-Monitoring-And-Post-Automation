@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from agent import database as agent_db
-from api.auth import get_current_user
+from api.auth import OVERSIGHT_ROLES, get_current_user
 from api.database import Job, User, get_db
 from api.schemas import CommandRequest, JobOut
 
@@ -46,6 +46,10 @@ _ACTION_PATTERNS = [
     ("post", re.compile(r"\bpost\b.*\b(linkedin)?\b|\blinkedin\b", re.I)),
     ("email", re.compile(r"\b(email|campaign|outreach)\b", re.I)),
     ("find", re.compile(r"\b(find|research|leads?)\b", re.I)),
+    (
+        "seo_audit",
+        re.compile(r"\b(seo audit|technical seo|audit (the )?site|crawl (the )?site|run seo)\b", re.I),
+    ),
 ]
 
 
@@ -84,6 +88,27 @@ def _update_job(job_id: str, **fields) -> None:
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     with agent_db.write_cursor() as cur:
         cur.execute(f"UPDATE jobs SET {set_clause} WHERE id = ?", (*fields.values(), job_id))
+
+
+def _resolve_seo_site(raw_command: str) -> dict | None:
+    """Determines which registered SEO site a free-text command refers
+    to. With exactly one active site, that's the target regardless of
+    wording — the realistic case for a single company's own instance.
+    With more than one, the command text must name one (case-insensitive
+    substring match against the site's name): Command Mode's parser is
+    deliberately rule-based, not an LLM (see this file's module
+    docstring), so there's no NLU step to disambiguate more cleverly
+    than that."""
+    sites = agent_db.get_active_seo_sites()
+    if not sites:
+        return None
+    if len(sites) == 1:
+        return dict(sites[0])
+    lowered = raw_command.lower()
+    for site in sites:
+        if site["name"].lower() in lowered:
+            return dict(site)
+    return None
 
 
 # ── 17.2 Command router + 17.3 background execution ──
@@ -129,7 +154,7 @@ def _run_job(job_id: str, action: str, params: dict, user_id: str) -> None:
             generic_trigger_only = bool(re.fullmatch(r"(post( to)?( linkedin)?|linkedin)\W*", requested_topic, re.I))
             result = linkedin_agent.run(topic=None if generic_trigger_only else requested_topic)
             if result["status"] != "success":
-                raise RuntimeError(result["detail"])
+                raise RuntimeError(result["detail"]) 
             _update_job(
                 job_id, status="completed", progress=100, result=result["detail"],
                 completed_at=datetime.now().isoformat(sep=" "),
@@ -164,10 +189,50 @@ def _run_job(job_id: str, action: str, params: dict, user_id: str) -> None:
             )
             _append_log(job_id, result["detail"])
 
+        elif action == "seo_audit":
+            _append_log(job_id, "Calling module 28's technical SEO audit")
+            from automation.seo.crawler import crawl_site, fetch_sitemap_urls
+            from automation.seo.technical_audit import run_all_detectors
+
+
+            site = _resolve_seo_site(params["raw"])
+            if site is None:
+                raise RuntimeError(
+                    "No SEO site to audit — register one first via POST /api/seo/sites, "
+                    "or name it in the command if more than one is registered."
+                )
+
+            _append_log(job_id, f"Crawling {site['base_url']}")
+            # Capped lower than the API's own default (100 pages): an
+            # interactive command should return in a reasonable time, not
+            # tie up a job thread for the crawl's full politeness-delayed
+            # duration (crawler.CRAWL_DELAY_SECONDS per page).
+            pages = crawl_site(site["base_url"], max_pages=30)
+            if not pages:
+                raise RuntimeError(f"Crawl of {site['base_url']} failed or found nothing — see server logs")
+
+            known_urls = fetch_sitemap_urls(site["base_url"])
+            issues = run_all_detectors(pages, known_urls=known_urls, base_url=site["base_url"])
+            agent_db.upsert_technical_issues(site["id"], date_type.today(), issues)
+
+            critical = sum(1 for i in issues if i.severity == "critical")
+            warning = sum(1 for i in issues if i.severity == "warning")
+            info = sum(1 for i in issues if i.severity == "info")
+            summary = (
+                f"Audited {len(pages)} page(s) of {site['name']}: {len(issues)} issue(s) found "
+                f"({critical} critical, {warning} warning, {info} info). Review at "
+                f"/api/seo/technical/issues?site_id={site['id']}"
+            )
+            _update_job(
+                job_id, status="completed", progress=100, result=summary,
+                completed_at=datetime.now().isoformat(sep=" "),
+            )
+            _append_log(job_id, summary)
+
         else:
             raise RuntimeError(
                 f"Could not parse an action from: {params['raw']!r}. "
-                "Try wording it around report/post/email/find."
+                "Try wording it around report/post/email/find/audit."
             )
 
     except Exception as exc:
@@ -186,6 +251,19 @@ def run_command(
     payload: CommandRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     action, params = parse_command(payload.command)
+
+    # SEO audits crawl external infrastructure and can incur real paid-
+    # API cost (module 25's LLM factory, if a task is pointed at a paid
+    # provider) — a materially bigger blast radius than the other
+    # actions here, so this one gets the same oversight gate team routes
+    # use, checked before a job is even created (a proper 403, not a
+    # job that immediately fails).
+    if action == "seo_audit" and current_user.role not in OVERSIGHT_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"SEO audits require one of roles: {', '.join(OVERSIGHT_ROLES)}",
+        )
+
     job_id = str(uuid.uuid4())
     _create_job(job_id, payload.command, action)
 

@@ -10,6 +10,7 @@ import {
   Briefcase,
   Mail,
   Users,
+  Search,
   Settings as SettingsIcon,
   Zap,
 } from "lucide-react";
@@ -34,6 +35,7 @@ const navItems: NavItem[] = [
   { icon: <Briefcase />, name: "LinkedIn", path: "/linkedin" },
   { icon: <Mail />, name: "Email", path: "/email" },
   { icon: <Users />, name: "Team", path: "/team" },
+  { icon: <Search />, name: "SEO", path: "/seo" },
   { icon: <SettingsIcon />, name: "Settings", path: "/settings" },
 ];
 

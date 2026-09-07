@@ -162,6 +162,16 @@ def generate_image(post_content: str) -> Optional[Path]:
     return Path(temp_path)
 
 
+def call_fastsd(prompt: str) -> Optional[bytes]:
+    """Public entry point to the raw FastSD CPU call, for reuse outside
+    this LinkedIn-specific pipeline (module 27's ai/images/providers/
+    fastsd_provider.py, for SEO blog images) — same endpoint, same
+    LCM-LoRA config, just without this module's post-content-derived
+    prompt-engineering step (_build_image_prompt above); callers here
+    pass their own already-built image prompt directly."""
+    return _call_fastsd(prompt)
+
+
 if __name__ == "__main__":
     from agent.logging_config import setup_logging
 

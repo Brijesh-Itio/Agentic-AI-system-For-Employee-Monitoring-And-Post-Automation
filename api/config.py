@@ -159,6 +159,28 @@ class Settings(BaseSettings):
     GOOGLE_ALERTS_RSS_URL: str = ""
     AHREFS_API_KEY: str = ""  # accepted for future use — see backlinks/factory.py
 
+    # Semrush domain-level metrics (Authority Score, organic/paid keywords,
+    # organic traffic, referring domains, backlinks count) — a separate,
+    # verified integration from the Ahrefs extension point above, not the
+    # per-mention BacklinkProvider interface (see
+    # automation/seo/semrush_client.py's module docstring for why: this is
+    # whole-domain aggregate stats, refreshed periodically, closer in shape
+    # to pagespeed_client.py than to a mention list). Blank key = off, same
+    # convention as every other optional integration here — but note this
+    # one is NOT free: Semrush's own API docs describe a purchased "API
+    # units" balance tied to a paid subscription, unlike PageSpeed/GSC/GA4.
+    SEMRUSH_API_KEY: str = ""
+    SEMRUSH_DATABASE: str = "us"  # regional database code, e.g. "us", "uk", "in"
+
+    # Instagram Graph API (Content Publishing) — see
+    # automation/instagram/poster.py. Needs a Business/Creator Instagram
+    # account, a Meta developer app, and a long-lived access token with
+    # instagram_business_content_publish scope. Blank = "No automated
+    # posting exists for this platform" stays the real, honest state,
+    # same convention as every other optional integration here.
+    INSTAGRAM_ACCESS_TOKEN: str = ""
+    INSTAGRAM_BUSINESS_ACCOUNT_ID: str = ""
+
     # ── SEO Agentic AI: generic image provider layer (module 27) ──
     # "fastsd" (the default) keeps every SEO image task on the zero-cost
     # local stack (module 18.3's FastSD CPU server) with no config

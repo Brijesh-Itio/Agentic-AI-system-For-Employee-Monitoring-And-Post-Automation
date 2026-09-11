@@ -160,6 +160,23 @@ def _login(page: Page) -> bool:
 
 # ── 18.4 LinkedIn browser poster ──
 
+def _wait_for_compose_frame(page: Page, timeout_ms: int):
+    """The compose iframe attaches asynchronously after the "Start a
+    post" click — searching page.frames immediately can lose the race
+    (verified live: a StopIteration when checked with no wait at all,
+    reliable once given ~2-3s). Polls instead of a fixed sleep so this
+    isn't tuned to one observed timing."""
+    import time
+
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        for f in page.frames:
+            if "sharing/compose" in f.url:
+                return f
+        page.wait_for_timeout(200)
+    raise PlaywrightTimeoutError(f"compose iframe (sharing/compose) never attached within {timeout_ms}ms")
+
+
 def _extract_post_id(page: Page) -> Optional[str]:
     """Best-effort: LinkedIn doesn't redirect to the new post's URL, so
     this reads the most recent activity URN from the feed's own DOM
@@ -228,31 +245,60 @@ def post_to_linkedin(content: str, topic: str, image_path: Optional[Path] = None
                 # no longer exists) — its visible text is the stable target.
                 page.get_by_text("Start a post", exact=False).first.click(timeout=NAV_TIMEOUT_MS)
 
+                # LinkedIn now renders the whole composer inside an iframe at
+                # linkedin.com/sharing/compose (verified live: page.locator
+                # against the top-level page found 0 of every editor/button
+                # selector below — they all genuinely exist, just not in this
+                # frame). Every composer interaction from here on has to go
+                # through compose_frame, not page, or it silently finds nothing
+                # and times out — which is exactly what was happening before
+                # this fix (Locator.wait_for: Timeout ... exceeded, waiting for
+                # a selector that only ever existed one frame away).
+                compose_frame = _wait_for_compose_frame(page, NAV_TIMEOUT_MS)
+
                 # Image attach MUST happen before typing, not after: verified
                 # live that clicking "Add media" swaps the whole composer for a
                 # media-upload screen and the original text editor is removed
-                # from the DOM entirely (0 contenteditable elements) — any text
-                # typed beforehand is silently discarded, not merged back in.
+                # from the DOM entirely; any text typed beforehand is silently
+                # discarded, not merged back in.
                 if image_path is not None and image_path.exists():
                     # The file input doesn't exist in the DOM at all until "Add
-                    # media" is clicked (verified live) — LinkedIn renders it
-                    # lazily rather than keeping a hidden input around.
-                    page.get_by_label("Add media", exact=False).click(timeout=NAV_TIMEOUT_MS)
-                    page.set_input_files('input[type="file"]', str(image_path), timeout=NAV_TIMEOUT_MS)
+                    # media" is clicked — LinkedIn renders it lazily rather than
+                    # keeping a hidden input around. Not independently
+                    # re-verified live against the current iframe-based
+                    # composer (only the text-post path below was); if this
+                    # step breaks, treat it the same way — inspect
+                    # compose_frame's real DOM rather than guess a new class.
+                    compose_frame.get_by_label("Add media", exact=False).click(timeout=NAV_TIMEOUT_MS)
+                    compose_frame.set_input_files('input[type="file"]', str(image_path), timeout=NAV_TIMEOUT_MS)
                     page.wait_for_timeout(2_000)  # let the image preview upload/render
-                    # get_by_role("button", name="Next") is ambiguous — it also
-                    # matches an unrelated "Go to next page of document" button
-                    # elsewhere on the page (verified live via the resulting
-                    # Playwright strict-mode-violation error) — this class is
-                    # specific to the composer's own Next button.
-                    page.locator("button.share-box-footer__primary-btn").click(timeout=NAV_TIMEOUT_MS)
+                    compose_frame.get_by_role("button", name="Next", exact=True).click(timeout=NAV_TIMEOUT_MS)
 
-                editor = page.locator('div.ql-editor[contenteditable="true"]')
+                # LinkedIn migrated its composer from Quill (div.ql-editor) to
+                # Tiptap/ProseMirror (verified live: 0 matches for .ql-editor
+                # or any [contenteditable] on the top-level page; exactly 1
+                # match inside compose_frame, class="tiptap ProseMirror
+                # <hashes>"). "tiptap"/"ProseMirror" are the editor library's
+                # own stable class names, unlike the random hash suffixes
+                # alongside them.
+                editor = compose_frame.locator('.tiptap.ProseMirror[contenteditable="true"]')
                 editor.wait_for(timeout=NAV_TIMEOUT_MS)
                 editor.click()
-                editor.type(content)
+                # .type() simulates a real keystroke per character with no
+                # explicit timeout override, so it inherits Playwright's
+                # default 30s action timeout — verified live that a ~2000-
+                # character post blows past that (content this long isn't
+                # a hypothetical edge case; the LLM draft it's typing here
+                # routinely runs long). .fill() sets the value in one
+                # operation instead — verified live on this exact editor:
+                # 0.06s for the same content, byte-for-byte match.
+                editor.fill(content)
 
-                page.click('button.share-actions__primary-action', timeout=NAV_TIMEOUT_MS)
+                # Same story as the Post button: every class on it is a
+                # random per-deploy hash (verified live via DOM dump — no
+                # stable class survives), so its visible text "Post" is the
+                # only durable target, same reasoning as "Start a post" above.
+                compose_frame.get_by_role("button", name="Post", exact=True).click(timeout=NAV_TIMEOUT_MS)
                 page.wait_for_timeout(3_000)  # let the post publish before reading the feed back
 
                 post_id = _extract_post_id(page)

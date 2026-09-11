@@ -565,6 +565,48 @@ CREATE TABLE IF NOT EXISTS seo_pagespeed_results (
 
 CREATE INDEX IF NOT EXISTS idx_seo_pagespeed_site_date ON seo_pagespeed_results(site_id, run_date);
 
+-- Semrush domain-level overview/backlinks metrics — Authority Score,
+-- organic/paid keywords, organic traffic, referring domains, backlinks
+-- count. One row per site per day (UNIQUE(site_id, run_date)), same
+-- idempotent-upsert shape as seo_pagespeed_results above, but domain-
+-- scoped rather than per-URL/strategy since these are whole-domain stats,
+-- not per-page ones.
+CREATE TABLE IF NOT EXISTS seo_semrush_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    run_date DATE NOT NULL,
+    authority_score REAL,
+    organic_traffic INTEGER,
+    organic_keywords INTEGER,
+    paid_keywords INTEGER,
+    referring_domains INTEGER,
+    backlinks_total INTEGER,
+    raw_json TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, run_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_semrush_site_date ON seo_semrush_metrics(site_id, run_date);
+
+-- Server Files backups — every write/rename/delete over Server Access
+-- (automation/seo/server_access.py) snapshots the file's content as it
+-- stood immediately before the change, so an edit gone wrong (or a
+-- delete) can be undone. action is 'write'/'rename'/'delete';
+-- new_path is only set for 'rename'. content is NULL when the file
+-- didn't exist yet (a brand-new write) or couldn't be read at the time
+-- — nothing to restore in either case, not an error.
+CREATE TABLE IF NOT EXISTS seo_server_file_backups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    action TEXT NOT NULL,
+    new_path TEXT,
+    content TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_server_backups_site_path ON seo_server_file_backups(site_id, path);
+
 -- Module 26.5 — GSC Search Analytics pulls. UNIQUE(site_id, run_date,
 -- query) makes re-running the same day's pull idempotent (upsert).
 CREATE TABLE IF NOT EXISTS seo_gsc_queries (
@@ -826,6 +868,54 @@ _SEO_SITES_EXTRA_COLUMNS = {
     "cms_app_password": "TEXT",
     "cms_api_token": "TEXT",
     "cms_collection_id": "TEXT",
+    # Direct SFTP server access — a parallel escape hatch to CMS Publishing
+    # above for the files a WordPress/Webflow REST API can't reach at all:
+    # wp-content/mu-plugins/*.php, .htaccess, wp-config.php. Grew directly
+    # out of degemasecureltd.com's mu-plugin crash, where the only way in
+    # (wp-admin) was itself the thing that was down. Same "NULL means
+    # unset" story as the CMS fields; there is no .env fallback for these
+    # since a global SFTP credential shared across every site would be a
+    # much worse version of the same bug _cms_client_for's only-site guard
+    # already exists to prevent.
+    "ssh_host": "TEXT",
+    "ssh_port": "TEXT",
+    "ssh_username": "TEXT",
+    "ssh_password": "TEXT",
+    # NULL/blank means "sftp" (the original default) — added after a real
+    # tested site (webpays.com) turned out to only expose FTP/Explicit
+    # FTPS, not SFTP at all. See automation/seo/server_access.py.
+    "ssh_protocol": "TEXT",
+}
+
+# Module 35 — technical issue remediation. fix_value is the concrete,
+# ready-to-use replacement (a real title, a real meta description, the
+# page's own canonical URL) — distinct from the pre-existing static
+# suggested_fix advice text. fix_applied/fix_error are never optimistic:
+# apply_technical_issue_fix always re-reads the CMS post after writing
+# and only sets fix_applied=1 if the new value is actually confirmed
+# present, since an SEO-plugin meta key WordPress doesn't recognize is
+# silently ignored rather than rejected — a real risk this codebase's
+# own module-28 docstring called out before real fixes existed to test.
+_SEO_TECHNICAL_ISSUES_EXTRA_COLUMNS = {
+    "fix_value": "TEXT",
+    "fix_applied": "INTEGER NOT NULL DEFAULT 0",
+    "fix_error": "TEXT",
+}
+
+
+# Semrush Rank added after seo_semrush_metrics already shipped — same
+# additive-column convention as _SEO_SITES_EXTRA_COLUMNS above.
+_SEO_SEMRUSH_METRICS_EXTRA_COLUMNS = {
+    "semrush_rank": "INTEGER",
+}
+
+# Instagram's Content Publishing API has no text-only post type — every
+# post needs a public image URL, unlike LinkedIn/Twitter/Facebook. Added
+# after the fact (seo_social_posts shipped without it, module 30) rather
+# than in the base schema, same additive-column convention as the dicts
+# above.
+_SEO_SOCIAL_POSTS_EXTRA_COLUMNS = {
+    "image_url": "TEXT",
 }
 
 
@@ -849,6 +939,9 @@ def init_db() -> None:
             _ensure_extra_columns(conn, "dar_entries", _DAR_ENTRIES_EXTRA_COLUMNS)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_dar_entries_task ON dar_entries(task_id)")
             _ensure_extra_columns(conn, "seo_sites", _SEO_SITES_EXTRA_COLUMNS)
+            _ensure_extra_columns(conn, "seo_technical_issues", _SEO_TECHNICAL_ISSUES_EXTRA_COLUMNS)
+            _ensure_extra_columns(conn, "seo_semrush_metrics", _SEO_SEMRUSH_METRICS_EXTRA_COLUMNS)
+            _ensure_extra_columns(conn, "seo_social_posts", _SEO_SOCIAL_POSTS_EXTRA_COLUMNS)
             conn.commit()
             logger.info("Local SQLite schema ready at %s", LOCAL_DB_PATH)
         except Exception:
@@ -1816,6 +1909,95 @@ def list_pagespeed_results(site_id: int, limit: int = 50):
     ).fetchall()
 
 
+# ── seo_semrush_metrics ──
+
+def upsert_semrush_metrics(
+    site_id: int,
+    run_date: date_cls,
+    authority_score: Optional[float],
+    organic_traffic: Optional[int],
+    organic_keywords: Optional[int],
+    paid_keywords: Optional[int],
+    referring_domains: Optional[int],
+    backlinks_total: Optional[int],
+    raw_json: str,
+    semrush_rank: Optional[int] = None,
+) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seo_semrush_metrics
+                (site_id, run_date, authority_score, organic_traffic, organic_keywords,
+                 paid_keywords, referring_domains, backlinks_total, raw_json, semrush_rank)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(site_id, run_date) DO UPDATE SET
+                authority_score = excluded.authority_score,
+                organic_traffic = excluded.organic_traffic,
+                organic_keywords = excluded.organic_keywords,
+                paid_keywords = excluded.paid_keywords,
+                referring_domains = excluded.referring_domains,
+                backlinks_total = excluded.backlinks_total,
+                raw_json = excluded.raw_json,
+                semrush_rank = excluded.semrush_rank
+            """,
+            (
+                site_id, run_date.isoformat(), authority_score, organic_traffic, organic_keywords,
+                paid_keywords, referring_domains, backlinks_total, raw_json, semrush_rank,
+            ),
+        )
+
+
+def list_semrush_metrics(site_id: int, limit: int = 30):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_semrush_metrics WHERE site_id = ? ORDER BY run_date DESC, created_at DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+# ── seo_server_file_backups ──
+
+def create_server_file_backup(
+    site_id: int, path: str, action: str, content: Optional[str], new_path: Optional[str] = None
+) -> int:
+    with write_cursor() as cur:
+        cur.execute(
+            "INSERT INTO seo_server_file_backups (site_id, path, action, new_path, content) VALUES (?, ?, ?, ?, ?)",
+            (site_id, path, action, new_path, content),
+        )
+        return cur.lastrowid
+
+
+def list_server_file_backups(site_id: int, path: str, limit: int = 50):
+    conn = get_connection()
+    # id DESC as a tiebreaker: CURRENT_TIMESTAMP only has 1-second
+    # resolution, so two rapid edits can tie on created_at alone —
+    # id (autoincrement) is the reliable chronological order.
+    return conn.execute(
+        "SELECT * FROM seo_server_file_backups WHERE site_id = ? AND path = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+        (site_id, path, limit),
+    ).fetchall()
+
+
+def get_server_file_backup(backup_id: int):
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_server_file_backups WHERE id = ?", (backup_id,)).fetchone()
+
+
+def purge_old_server_file_backups(retention_days: int = 15) -> int:
+    """Deletes any backup row older than retention_days, across every
+    site/file — a rolling window, not a fixed calendar purge, so a
+    backup always survives exactly retention_days from when it was
+    made. Called daily from api/main.py's scheduler. Returns the number
+    of rows removed (useful for the log line, not load-bearing)."""
+    with write_cursor() as cur:
+        cur.execute(
+            "DELETE FROM seo_server_file_backups WHERE created_at < datetime('now', ?)",
+            (f"-{retention_days} days",),
+        )
+        return cur.rowcount
+
+
 # ── seo_gsc_queries — module 26.5 ──
 
 def upsert_gsc_query_rows(site_id: int, run_date: date_cls, rows: list) -> None:
@@ -1955,6 +2137,30 @@ def set_technical_issue_status(issue_id: int, status: str, reviewed_by: Optional
         return cur.rowcount > 0
 
 
+def get_technical_issue(issue_id: int):
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_technical_issues WHERE id = ?", (issue_id,)).fetchone()
+
+
+def save_technical_issue_fix_value(issue_id: int, fix_value: str) -> None:
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_technical_issues SET fix_value = ? WHERE id = ?", (fix_value, issue_id))
+
+
+def mark_technical_issue_fix_applied(issue_id: int) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_technical_issues SET fix_applied = 1, fix_error = NULL WHERE id = ?", (issue_id,)
+        )
+
+
+def mark_technical_issue_fix_failed(issue_id: int, error: str) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_technical_issues SET fix_applied = 0, fix_error = ? WHERE id = ?", (error, issue_id)
+        )
+
+
 # ── seo_daily_digests — module 29 ──
 
 def save_daily_digest(
@@ -1984,11 +2190,16 @@ def list_daily_digests(site_id: int, limit: int = 30):
 
 # ── seo_social_posts — module 30 ──
 
-def create_social_post(site_id: int, platform: str, content: str, source_url: Optional[str] = None) -> int:
+def create_social_post(
+    site_id: int, platform: str, content: str, source_url: Optional[str] = None, image_url: Optional[str] = None
+) -> int:
     with write_cursor() as cur:
         cur.execute(
-            "INSERT INTO seo_social_posts (site_id, platform, source_url, content, status) VALUES (?, ?, ?, ?, 'draft')",
-            (site_id, platform, source_url, content),
+            """
+            INSERT INTO seo_social_posts (site_id, platform, source_url, content, image_url, status)
+            VALUES (?, ?, ?, ?, ?, 'draft')
+            """,
+            (site_id, platform, source_url, content, image_url),
         )
         return cur.lastrowid
 
@@ -2167,6 +2378,29 @@ def create_blog_post(
             ),
         )
         return cur.lastrowid
+
+
+def update_blog_post(
+    post_id: int,
+    title: str,
+    excerpt: Optional[str],
+    content: str,
+    structure_passed: Optional[bool],
+    structure_issues_json: Optional[str],
+) -> bool:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE seo_blog_posts
+            SET title = ?, excerpt = ?, content = ?, structure_passed = ?, structure_issues_json = ?
+            WHERE id = ?
+            """,
+            (
+                title, excerpt, content,
+                None if structure_passed is None else int(structure_passed), structure_issues_json, post_id,
+            ),
+        )
+        return cur.rowcount > 0
 
 
 def list_blog_posts(site_id: int, status: Optional[str] = None, limit: int = 100):

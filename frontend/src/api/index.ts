@@ -677,10 +677,14 @@ export const getMemberActivity = (userId: string, targetDate?: string) =>
     .then((r) => r.data);
 
 // Real Ollama call over the whole team's weekly data — same cost profile as
-// other on-demand generation endpoints.
+// other on-demand generation endpoints (matches api/config.py's
+// OLLAMA_GENERATE_TIMEOUT_SECONDS=600; the old 120s client timeout was
+// aborting the request client-side before the backend's own 600s budget
+// was anywhere near up, surfacing as a false "Analysis failed" even though
+// the call was still succeeding server-side — verified directly).
 export const getTeamAnalysis = (windowDays = 7) =>
   api
-    .get<TeamAnalysis>("/api/team/analysis", { params: { window_days: windowDays }, timeout: 120_000 })
+    .get<TeamAnalysis>("/api/team/analysis", { params: { window_days: windowDays }, timeout: 600_000 })
     .then((r) => r.data);
 
 // ── Attendance ──
@@ -795,6 +799,19 @@ export interface SeoSite {
   cms_collection_id: string | null;
   cms_app_password_set: boolean;
   cms_api_token_set: boolean;
+  // Direct SFTP server access — host/port/username aren't secrets;
+  // ssh_password never comes back from the API once saved.
+  ssh_host: string | null;
+  ssh_port: string | null;
+  ssh_username: string | null;
+  ssh_protocol: string | null;
+  ssh_password_set: boolean;
+}
+
+export interface SshStatus {
+  site_id: number;
+  reachable: boolean;
+  error: string | null;
 }
 
 export const getSeoSites = () => api.get<SeoSite[]>("/api/seo/sites").then((r) => r.data);
@@ -826,6 +843,80 @@ export const updateSeoSiteCmsConfig = (
     cms_collection_id?: string;
   }
 ) => api.patch<SeoSite>(`/api/seo/sites/${siteId}/cms-config`, payload).then((r) => r.data);
+
+// Direct SFTP server access — for files a CMS REST API can't reach at all
+// (wp-content/mu-plugins/*.php, .htaccess).
+export const updateSeoSiteSshConfig = (
+  siteId: number,
+  payload: { ssh_host?: string; ssh_port?: string; ssh_username?: string; ssh_protocol?: string; ssh_password?: string }
+) => api.patch<SeoSite>(`/api/seo/sites/${siteId}/ssh-config`, payload).then((r) => r.data);
+
+export const getSshStatus = (siteId: number) =>
+  api.get<SshStatus>(`/api/seo/sites/${siteId}/ssh-status`).then((r) => r.data);
+
+export interface ServerDirEntry {
+  name: string;
+  is_dir: boolean;
+  size: number | null;
+}
+
+export interface ServerDirListing {
+  path: string;
+  entries: ServerDirEntry[];
+}
+
+export interface ServerFileContent {
+  path: string;
+  content: string;
+}
+
+export const listServerDir = (siteId: number, path: string) =>
+  api.get<ServerDirListing>("/api/seo/server/list", { params: { site_id: siteId, path } }).then((r) => r.data);
+
+export const readServerFile = (siteId: number, path: string) =>
+  api.get<ServerFileContent>("/api/seo/server/file", { params: { site_id: siteId, path } }).then((r) => r.data);
+
+export const writeServerFile = (siteId: number, path: string, content: string) =>
+  api.put<ServerFileContent>("/api/seo/server/file", { site_id: siteId, path, content }).then((r) => r.data);
+
+export const renameServerFile = (siteId: number, path: string, newPath: string) =>
+  api.post("/api/seo/server/rename", { site_id: siteId, path, new_path: newPath }).then((r) => r.data);
+
+export const deleteServerFile = (siteId: number, path: string) =>
+  api.delete("/api/seo/server/file", { params: { site_id: siteId, path } }).then((r) => r.data);
+
+// Every write/rename/delete over Server Access automatically snapshots
+// the file's prior content — see api/routes/seo.py's _backup_current_state.
+export interface ServerFileBackupSummary {
+  id: number;
+  path: string;
+  action: "write" | "rename" | "delete";
+  new_path: string | null;
+  created_at: string | null;
+}
+
+export interface ServerFileBackup extends ServerFileBackupSummary {
+  content: string | null;
+}
+
+export const listServerFileBackups = (siteId: number, path: string, limit = 50) =>
+  api
+    .get<ServerFileBackupSummary[]>("/api/seo/server/backups", { params: { site_id: siteId, path, limit } })
+    .then((r) => r.data);
+
+export const getServerFileBackup = (backupId: number) =>
+  api.get<ServerFileBackup>(`/api/seo/server/backups/${backupId}`).then((r) => r.data);
+
+export const restoreServerFileBackup = (backupId: number) =>
+  api.post<ServerFileContent>(`/api/seo/server/backups/${backupId}/restore`, {}).then((r) => r.data);
+
+// Records a backup the moment editing actually starts (first real
+// keystroke) — server-side, not a local download, so it lives in the
+// same 15-day-retained history as every write/rename/delete backup.
+export const createServerFileBackup = (siteId: number, path: string, content: string) =>
+  api
+    .post<ServerFileBackupSummary>("/api/seo/server/backups", { site_id: siteId, path, content })
+    .then((r) => r.data);
 
 // ── Job history + GSC/GA4 data — previously API-only, no UI ──
 export interface SeoJobRun {
@@ -872,6 +963,12 @@ export const getGa4Pages = (siteId: number, limit = 10) =>
 export type TechnicalIssueSeverity = "critical" | "warning" | "info";
 export type TechnicalIssueStatus = "pending" | "approved" | "rejected";
 
+// Rules where a real, ready-to-use replacement value is knowable at all
+// (see ai/seo/issue_remediation.py's REMEDIABLE_RULES) — everything else
+// technical_audit.py detects is structural/cross-page and stays manual-
+// fix-only, with no "Generate fix" action offered for it.
+export const REMEDIABLE_RULES = ["duplicate_title", "missing_meta_description", "missing_canonical"];
+
 export interface TechnicalIssue {
   id: number;
   site_id: number;
@@ -885,6 +982,9 @@ export interface TechnicalIssue {
   reviewed_at: string | null;
   reviewed_by: string | null;
   created_at: string | null;
+  fix_value: string | null;
+  fix_applied: boolean;
+  fix_error: string | null;
 }
 
 export const getTechnicalIssues = (siteId: number, status?: string) =>
@@ -908,6 +1008,16 @@ export const approveTechnicalIssue = (issueId: number) =>
 
 export const rejectTechnicalIssue = (issueId: number) =>
   api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/reject`, {}).then((r) => r.data);
+
+// Read-only against the live page + one LLM call — no write happens here.
+export const generateTechnicalIssueFix = (issueId: number) =>
+  api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/generate-fix`, {}, { timeout: 30_000 }).then((r) => r.data);
+
+// The one action that writes to the real site — requires the issue to
+// already be approved and a fix generated first (the backend enforces
+// both, this is just the call).
+export const applyTechnicalIssueFix = (issueId: number) =>
+  api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/apply-fix`, {}, { timeout: 30_000 }).then((r) => r.data);
 
 export interface SeoDigest {
   id: number;
@@ -942,6 +1052,9 @@ export interface SocialPost {
   platform: SocialPlatform;
   source_url: string | null;
   content: string;
+  // Required for Instagram to actually publish (its API has no
+  // text-only post type) — optional for every other platform.
+  image_url: string | null;
   status: SocialPostStatus;
   external_post_id: string | null;
   error: string | null;
@@ -954,6 +1067,7 @@ export const generateSocialPosts = (payload: {
   page_title: string;
   content_excerpt: string;
   source_url?: string;
+  image_url?: string;
   platforms: SocialPlatform[];
 }) => api.post<SocialPost[]>("/api/seo/social/generate", payload, { timeout: 120_000 }).then((r) => r.data);
 
@@ -994,6 +1108,77 @@ export const draftOutreachEmail = (mentionId: number, siteName: string, siteUrl:
       `/api/seo/backlinks/${mentionId}/draft-outreach`,
       { site_name: siteName, site_url: siteUrl },
       { timeout: 60_000 }
+    )
+    .then((r) => r.data);
+
+// Semrush domain-level metrics — Authority Score, organic/paid keywords,
+// organic traffic, referring domains, backlinks count. NOT free: spends
+// real purchased Semrush API units each time you check.
+export interface SemrushMetrics {
+  id: number;
+  site_id: number;
+  run_date: string;
+  authority_score: number | null;
+  organic_traffic: number | null;
+  organic_keywords: number | null;
+  paid_keywords: number | null;
+  referring_domains: number | null;
+  backlinks_total: number | null;
+  semrush_rank: number | null;
+  created_at: string | null;
+}
+
+export const checkSemrushMetrics = (siteId: number) =>
+  api.post<SemrushMetrics>("/api/seo/semrush/check", { site_id: siteId }, { timeout: 30_000 }).then((r) => r.data);
+
+export const getSemrushMetrics = (siteId: number, limit = 30) =>
+  api.get<SemrushMetrics[]>("/api/seo/semrush", { params: { site_id: siteId, limit } }).then((r) => r.data);
+
+export interface SemrushBacklinkRow {
+  source_url: string;
+  target_url: string;
+  anchor: string;
+  nofollow: boolean;
+  first_seen: string;
+  last_seen: string;
+  page_authority_score: number | null;
+}
+
+export interface SemrushReferringDomainRow {
+  domain: string;
+  authority_score: number | null;
+  backlinks_num: number | null;
+  country: string;
+  first_seen: string;
+  last_seen: string;
+}
+
+export interface SemrushGapRow {
+  target: string;
+  authority_score: number | null;
+  backlinks_num: number | null;
+  referring_domains_num: number | null;
+}
+
+export const getSemrushBacklinks = (siteId: number, limit = 50) =>
+  api
+    .get<SemrushBacklinkRow[]>("/api/seo/semrush/backlinks", { params: { site_id: siteId, limit }, timeout: 30_000 })
+    .then((r) => r.data);
+
+export const getSemrushReferringDomains = (siteId: number, limit = 50) =>
+  api
+    .get<SemrushReferringDomainRow[]>("/api/seo/semrush/referring-domains", {
+      params: { site_id: siteId, limit },
+      timeout: 30_000,
+    })
+    .then((r) => r.data);
+
+export const getSemrushBacklinkGap = (siteId: number, competitorDomains: string[]) =>
+  api
+    .post<SemrushGapRow[]>(
+      "/api/seo/semrush/backlink-gap",
+      { site_id: siteId, competitor_domains: competitorDomains },
+      { timeout: 30_000 }
     )
     .then((r) => r.data);
 
@@ -1130,6 +1315,11 @@ export const generateBlogPost = (payload: { site_id: number; topic: string; prim
 
 export const getBlogPosts = (siteId: number, status?: string) =>
   api.get<BlogPost[]>("/api/seo/blog", { params: { site_id: siteId, status } }).then((r) => r.data);
+
+// Only works while status is still 'draft' — re-runs the structure
+// checker server-side so the returned post's issue badges reflect the edit.
+export const updateBlogPost = (postId: number, payload: { title: string; excerpt?: string; content: string }) =>
+  api.patch<BlogPost>(`/api/seo/blog/${postId}`, payload).then((r) => r.data);
 
 export const approveBlogPost = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/approve`, {}).then((r) => r.data);

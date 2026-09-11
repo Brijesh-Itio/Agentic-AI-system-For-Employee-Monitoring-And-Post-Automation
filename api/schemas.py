@@ -637,6 +637,15 @@ class SeoSiteOut(BaseModel):
     cms_collection_id: Optional[str] = None
     cms_app_password_set: bool = False
     cms_api_token_set: bool = False
+    # Direct SFTP server access — host/port/username aren't secrets,
+    # returned as-is; the password never comes back over the API once
+    # saved, only whether one is set (see api/database.py's SeoSite
+    # properties).
+    ssh_host: Optional[str] = None
+    ssh_port: Optional[str] = None
+    ssh_username: Optional[str] = None
+    ssh_protocol: Optional[str] = None
+    ssh_password_set: bool = False
 
 
 class SeoSiteCreate(BaseModel):
@@ -665,6 +674,72 @@ class SeoSiteCmsConfigUpdate(BaseModel):
     cms_app_password: Optional[str] = None
     cms_api_token: Optional[str] = None
     cms_collection_id: Optional[str] = None
+
+
+class SeoSiteSshConfigUpdate(BaseModel):
+    """Same blank-clears/blank-keeps split as SeoSiteCmsConfigUpdate:
+    host/port/username are plain overrides (blank clears them), password
+    is a secret (blank leaves whatever's already saved untouched)."""
+
+    ssh_host: Optional[str] = None
+    ssh_port: Optional[str] = None
+    ssh_username: Optional[str] = None
+    ssh_protocol: Optional[str] = None
+    ssh_password: Optional[str] = None
+
+
+class SshStatusOut(BaseModel):
+    site_id: int
+    reachable: bool
+    error: Optional[str] = None
+
+
+class ServerFileWriteRequest(BaseModel):
+    site_id: int
+    path: str
+    content: str
+
+
+class ServerFileRenameRequest(BaseModel):
+    site_id: int
+    path: str
+    new_path: str
+
+
+class ServerFileContentOut(BaseModel):
+    path: str
+    content: str
+
+
+class ServerFileBackupCreate(BaseModel):
+    site_id: int
+    path: str
+    content: str
+
+
+class ServerFileBackupSummaryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    path: str
+    action: str
+    new_path: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class ServerFileBackupOut(ServerFileBackupSummaryOut):
+    content: Optional[str] = None
+
+
+class ServerDirEntryOut(BaseModel):
+    name: str
+    is_dir: bool
+    size: Optional[int] = None
+
+
+class ServerDirListingOut(BaseModel):
+    path: str
+    entries: list[ServerDirEntryOut]
 
 
 class SeoJobRunOut(BaseModel):
@@ -703,6 +778,62 @@ class CmsStatusOut(BaseModel):
     site_id: int
     cms_type: str
     reachable: bool
+
+
+class SemrushMetricsCheckRequest(BaseModel):
+    site_id: int
+
+
+class SemrushMetricsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    run_date: date_type
+    authority_score: Optional[float] = None
+    organic_traffic: Optional[int] = None
+    organic_keywords: Optional[int] = None
+    paid_keywords: Optional[int] = None
+    referring_domains: Optional[int] = None
+    backlinks_total: Optional[int] = None
+    semrush_rank: Optional[int] = None
+    created_at: Optional[datetime] = None
+
+
+class SemrushBacklinkListRequest(BaseModel):
+    site_id: int
+    limit: int = 50
+
+
+class SemrushBacklinkRowOut(BaseModel):
+    source_url: str
+    target_url: str
+    anchor: str
+    nofollow: bool
+    first_seen: str
+    last_seen: str
+    page_authority_score: Optional[float] = None
+
+
+class SemrushReferringDomainOut(BaseModel):
+    domain: str
+    authority_score: Optional[float] = None
+    backlinks_num: Optional[int] = None
+    country: str
+    first_seen: str
+    last_seen: str
+
+
+class SemrushBacklinkGapRequest(BaseModel):
+    site_id: int
+    competitor_domains: list[str]
+
+
+class SemrushGapRowOut(BaseModel):
+    target: str
+    authority_score: Optional[float] = None
+    backlinks_num: Optional[int] = None
+    referring_domains_num: Optional[int] = None
 
 
 class PageSpeedCheckRequest(BaseModel):
@@ -872,6 +1003,9 @@ class TechnicalIssueOut(BaseModel):
     reviewed_at: Optional[datetime] = None
     reviewed_by: Optional[str] = None
     created_at: Optional[datetime] = None
+    fix_value: Optional[str] = None
+    fix_applied: bool = False
+    fix_error: Optional[str] = None
 
 
 class TechnicalIssueReview(BaseModel):
@@ -903,6 +1037,9 @@ class SocialGenerateRequest(BaseModel):
     page_title: str
     content_excerpt: str
     source_url: Optional[str] = None
+    # Required for Instagram to actually publish (its API has no
+    # text-only post type) — optional for every other platform.
+    image_url: Optional[str] = None
     platforms: list[SocialPlatform] = ["linkedin"]
 
 
@@ -914,6 +1051,7 @@ class SocialPostOut(BaseModel):
     platform: str
     source_url: Optional[str] = None
     content: str
+    image_url: Optional[str] = None
     status: str
     external_post_id: Optional[str] = None
     error: Optional[str] = None
@@ -1006,6 +1144,12 @@ class BlogGenerateRequest(BaseModel):
     topic: str
     primary_keyword: Optional[str] = None
     min_words: int = 600
+
+
+class BlogPostUpdate(BaseModel):
+    title: str
+    excerpt: Optional[str] = None
+    content: str
 
 
 class BlogPostOut(BaseModel):

@@ -1,4 +1,4 @@
-import { Clock, CheckCircle2, AlertTriangle, Repeat2 } from "lucide-react";
+import { Clock, AlertTriangle, Repeat2 } from "lucide-react";
 import StatCard from "@/components/dashboard/StatCard";
 import type { ActivityLogEntry, ContextSwitchingHour } from "@/api";
 import { formatDuration } from "./timeScale";
@@ -11,9 +11,6 @@ interface TimelineSummaryStatsProps {
 
 export default function TimelineSummaryStats({ sessions, switching, loading }: TimelineSummaryStatsProps) {
   const totalSeconds = sessions.reduce((sum, s) => sum + (s.duration_seconds ?? 0), 0);
-  const productiveSeconds = sessions
-    .filter((s) => s.category === "productive")
-    .reduce((sum, s) => sum + (s.duration_seconds ?? 0), 0);
   const distractionSeconds = sessions
     .filter((s) => s.category === "distraction")
     .reduce((sum, s) => sum + (s.duration_seconds ?? 0), 0);
@@ -22,16 +19,8 @@ export default function TimelineSummaryStats({ sessions, switching, loading }: T
   const pct = (seconds: number) => (totalSeconds > 0 ? Math.round((seconds / totalSeconds) * 100) : 0);
 
   return (
-    <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
       <StatCard label="Total Tracked" value={formatDuration(totalSeconds)} icon={Clock} loading={loading} />
-      <StatCard
-        label="Productive"
-        value={formatDuration(productiveSeconds)}
-        hint={totalSeconds > 0 ? `${pct(productiveSeconds)}% of tracked time` : undefined}
-        icon={CheckCircle2}
-        tone="success"
-        loading={loading}
-      />
       <StatCard
         label="Distraction"
         value={formatDuration(distractionSeconds)}

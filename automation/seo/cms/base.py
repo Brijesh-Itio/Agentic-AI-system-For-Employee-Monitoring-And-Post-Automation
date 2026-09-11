@@ -25,6 +25,16 @@ class CmsPost:
     excerpt: Optional[str] = None
     content: Optional[str] = None
     modified_at: Optional[str] = None
+    # "post" or "page" — WordPress's REST API treats these as genuinely
+    # separate content types with separate endpoints (/wp/v2/posts vs
+    # /wp/v2/pages); a caller updating this post back needs to know
+    # which. Real, demonstrated need, not speculative: a live audit of a
+    # real WordPress business site found its missing-meta-description
+    # issues on /about, /packages, /contact-us — ordinary pages, not
+    # blog posts — so a resolver that only ever checked list_posts()
+    # never found a match for any of them. Defaults to "post" since
+    # every pre-existing caller only ever dealt with posts.
+    kind: str = "post"
 
 
 @dataclass
@@ -32,6 +42,12 @@ class CmsResult:
     ok: bool
     detail: str
     post: Optional[CmsPost] = None
+    # Module 35 — whatever the CMS echoed back for the `meta` dict passed
+    # to update_post, if any. Callers use this to verify an SEO-plugin
+    # meta key actually got set rather than silently ignored (WordPress
+    # doesn't reject an unregistered meta key, it just drops it) — see
+    # automation/seo/issue_applier.py.
+    meta: Optional[dict] = None
 
 
 class CmsClient(ABC):
@@ -47,7 +63,16 @@ class CmsClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_post(self, post_id: str) -> Optional[CmsPost]:
+    def list_pages(self, *, status: str = "publish", per_page: int = 20, page: int = 1) -> List[CmsPost]:
+        """Module 35 — ordinary WordPress Pages (About, Contact, ...),
+        a separate content type from Posts. Never raises — returns an
+        empty list on failure, or on a CMS (Webflow) with no such
+        distinction: Webflow's list_posts() already covers everything
+        Webflow has, so there's nothing separate to return here."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_post(self, post_id: str, *, kind: str = "post") -> Optional[CmsPost]:
         raise NotImplementedError
 
     @abstractmethod
@@ -58,10 +83,21 @@ class CmsClient(ABC):
         title: Optional[str] = None,
         excerpt: Optional[str] = None,
         content: Optional[str] = None,
+        meta: Optional[dict] = None,
+        kind: str = "post",
     ) -> CmsResult:
         """Updates only the fields actually passed (None = leave
-        untouched). Never raises — failures come back as
-        CmsResult(ok=False, detail=...)."""
+        untouched). meta is a generic passthrough to whatever custom-
+        field system the CMS has (WordPress's REST `meta` object; not
+        supported on Webflow, whose SEO fields work differently — see
+        WebflowClient's implementation) — this method doesn't itself
+        know or guess SEO-plugin-specific key names, it just forwards
+        what the caller supplies. kind selects which REST endpoint a
+        WordPress post_id resolves against ("post" -> /wp/v2/posts,
+        "page" -> /wp/v2/pages) — pass through whatever CmsPost.kind the
+        post/page came from list_posts()/list_pages(); meaningless for
+        Webflow, which has only one content type. Never raises —
+        failures come back as CmsResult(ok=False, detail=...)."""
         raise NotImplementedError
 
     @abstractmethod

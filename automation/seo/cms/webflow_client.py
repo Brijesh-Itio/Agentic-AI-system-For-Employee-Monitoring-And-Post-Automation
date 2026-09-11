@@ -86,7 +86,13 @@ class WebflowClient(CmsClient):
             logger.exception("Webflow list_posts() failed (collection_id=%s)", self._collection_id)
             return []
 
-    def get_post(self, post_id: str) -> Optional[CmsPost]:
+    def list_pages(self, *, status: str = "publish", per_page: int = 20, page: int = 1) -> List[CmsPost]:
+        # Webflow has no separate "page" content type distinct from a
+        # collection item — list_posts() above already covers everything
+        # this collection has, so there's nothing additional here.
+        return []
+
+    def get_post(self, post_id: str, *, kind: str = "post") -> Optional[CmsPost]:
         if not self._credentials_configured():
             logger.error(
                 "Webflow not configured — set WEBFLOW_API_TOKEN/WEBFLOW_COLLECTION_ID in .env"
@@ -111,9 +117,17 @@ class WebflowClient(CmsClient):
         title: Optional[str] = None,
         excerpt: Optional[str] = None,
         content: Optional[str] = None,
+        meta: Optional[dict] = None,
+        kind: str = "post",
     ) -> CmsResult:
         if not self._credentials_configured():
             return CmsResult(ok=False, detail="Webflow credentials not configured")
+        if meta is not None:
+            # Webflow has no generic "meta" concept — SEO fields are
+            # either real Webflow-native settings or plain fieldData
+            # entries, never SEO-plugin postmeta the way WordPress has.
+            # Failing closed here rather than silently dropping it.
+            return CmsResult(ok=False, detail="Setting arbitrary meta fields isn't supported on Webflow")
 
         field_data = {}
         if title is not None:

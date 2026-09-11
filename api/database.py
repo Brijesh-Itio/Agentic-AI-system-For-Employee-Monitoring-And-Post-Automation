@@ -377,6 +377,13 @@ class SeoSite(Base):
     cms_app_password = Column(String)
     cms_api_token = Column(String)
     cms_collection_id = Column(String)
+    # Direct SFTP server access — see agent/database.py's
+    # _SEO_SITES_EXTRA_COLUMNS comment for why these exist alongside CMS.
+    ssh_host = Column(String)
+    ssh_port = Column(String)
+    ssh_username = Column(String)
+    ssh_password = Column(String)
+    ssh_protocol = Column(String)  # NULL/blank means "sftp" — see agent/database.py
 
     # Plain Python properties (not Columns) — SeoSiteOut's from_attributes
     # reads these via getattr same as any Column, but the API never
@@ -388,6 +395,10 @@ class SeoSite(Base):
     @property
     def cms_api_token_set(self) -> bool:
         return bool(self.cms_api_token)
+
+    @property
+    def ssh_password_set(self) -> bool:
+        return bool(self.ssh_password)
 
 
 class SeoJobRun(Base):
@@ -433,6 +444,33 @@ class SeoPagespeedResult(Base):
     ttfb_ms = Column(Float)
     fcp_ms = Column(Float)
     raw_json = Column(String)
+    created_at = Column(DateTime)
+
+
+class SeoSemrushMetric(Base):
+    __tablename__ = "seo_semrush_metrics"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    run_date = Column(Date, nullable=False)
+    authority_score = Column(Float)
+    organic_traffic = Column(Integer)
+    organic_keywords = Column(Integer)
+    paid_keywords = Column(Integer)
+    referring_domains = Column(Integer)
+    backlinks_total = Column(Integer)
+    raw_json = Column(String)
+    semrush_rank = Column(Integer)
+    created_at = Column(DateTime)
+
+
+class SeoServerFileBackup(Base):
+    __tablename__ = "seo_server_file_backups"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    path = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    new_path = Column(String)
+    content = Column(String)
     created_at = Column(DateTime)
 
 
@@ -486,6 +524,9 @@ class SeoTechnicalIssue(Base):
     reviewed_at = Column(DateTime)
     reviewed_by = Column(String)
     created_at = Column(DateTime)
+    fix_value = Column(String)
+    fix_applied = Column(Integer, nullable=False, default=0)
+    fix_error = Column(String)
 
 
 class SeoDailyDigest(Base):
@@ -506,6 +547,7 @@ class SeoSocialPost(Base):
     platform = Column(String, nullable=False)
     source_url = Column(String)
     content = Column(String, nullable=False)
+    image_url = Column(String)  # required for Instagram (no text-only post type); optional elsewhere
     status = Column(String, nullable=False, default="draft")
     external_post_id = Column(String)
     error = Column(String)

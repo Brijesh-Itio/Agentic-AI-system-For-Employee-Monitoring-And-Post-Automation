@@ -87,7 +87,7 @@ export default function CommandModePage() {
                 onChange={(e) => setCommand(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleRun()}
                 placeholder="e.g. generate today's report, post to linkedin about agentic AI…"
-                className="flex-1 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
+                className="min-w-0 flex-1 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
               />
               <Button onClick={handleRun} disabled={!command.trim() || runMutation.isPending || isRunning}>
                 {runMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}

@@ -38,7 +38,12 @@ export const Dropdown: React.FC<DropdownProps> = ({
   return (
     <div
       ref={dropdownRef}
-      className={`absolute z-40  right-0 mt-2  rounded-xl border border-gray-200 bg-white  shadow-theme-lg dark:border-gray-800 dark:bg-gray-dark ${className}`}
+      // max-w clamps every consumer's own width class (e.g. NotificationDropdown's
+      // w-80, UserDropdown's w-[240px]) to the viewport on narrow phones — right-0
+      // anchors it to its toggle button, which sits near the screen's right edge in
+      // the header, so without this cap a wide panel spills off the left edge
+      // instead of just filling the available width.
+      className={`absolute z-40 right-0 mt-2 max-w-[calc(100vw-1.5rem)] rounded-xl border border-gray-200 bg-white shadow-theme-lg dark:border-gray-800 dark:bg-gray-dark ${className}`}
     >
       {children}
     </div>

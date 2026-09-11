@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ai.llm.factory import get_provider
+from ai.llm.sanitize import strip_leaked_prompt_markers
 
 logger = logging.getLogger(__name__)
 
@@ -67,4 +68,8 @@ def generate_social_post(
         logger.warning("Social content generation failed for %s: %s", platform, result.error)
         return None
 
-    return SocialPostDraft(platform=platform, content=result.text.strip())
+    content = strip_leaked_prompt_markers(result.text.strip(), prompt=prompt)
+    if not content:
+        logger.warning("Social content generation for %s produced only a leaked prompt, no real content", platform)
+        return None
+    return SocialPostDraft(platform=platform, content=content)

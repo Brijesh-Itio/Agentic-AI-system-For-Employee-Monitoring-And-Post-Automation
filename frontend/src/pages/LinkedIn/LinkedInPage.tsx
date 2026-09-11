@@ -55,14 +55,14 @@ export default function LinkedInPage() {
               Module 18 — Ollama-written posts, real Playwright browser automation.
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap">
             <input
               value={topic}
               onChange={(e) => setTopic(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && postMutation.mutate()}
               placeholder="Topic (optional) — e.g. agentic AI in the workplace"
               disabled={postMutation.isPending || isRunning}
-              className="w-64 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-700 disabled:opacity-60 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
+              className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-700 disabled:opacity-60 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 sm:w-64"
             />
             <Button
               onClick={() => postMutation.mutate()}

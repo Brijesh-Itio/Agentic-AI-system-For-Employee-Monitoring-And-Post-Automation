@@ -9,8 +9,10 @@ import json
 import logging
 from datetime import date as date_cls, datetime, timedelta
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from agent import database
@@ -29,6 +31,8 @@ from api.database import (
     SeoJobRun,
     SeoOgTags,
     SeoPagespeedResult,
+    SeoSemrushMetric,
+    SeoServerFileBackup,
     SeoSite,
     SeoSocialPost,
     SeoTechnicalIssue,
@@ -37,6 +41,7 @@ from api.database import (
 from api.schemas import (
     BlogGenerateRequest,
     BlogPostOut,
+    BlogPostUpdate,
     CmsPostOut,
     CmsStatusOut,
     ContentAnalyzeRequest,
@@ -66,10 +71,26 @@ from api.schemas import (
     OutreachDraftRequest,
     SeoJobRunOut,
     SeoJobRunTrigger,
+    SemrushBacklinkGapRequest,
+    SemrushBacklinkRowOut,
+    SemrushGapRowOut,
+    SemrushMetricsCheckRequest,
+    SemrushMetricsOut,
+    SemrushReferringDomainOut,
+    ServerDirEntryOut,
+    ServerFileBackupCreate,
+    ServerFileBackupOut,
+    ServerFileBackupSummaryOut,
+    ServerDirListingOut,
+    ServerFileContentOut,
+    ServerFileRenameRequest,
+    ServerFileWriteRequest,
     SeoSiteCreate,
     SeoSiteCmsConfigUpdate,
     SeoSiteGoogleConfigUpdate,
     SeoSiteOut,
+    SeoSiteSshConfigUpdate,
+    SshStatusOut,
     SocialGenerateRequest,
     SocialPostOut,
     StructureReportOut,
@@ -82,6 +103,7 @@ from ai.seo.blog_content import generate_blog_post
 from ai.seo.content_structure import analyze_structure, generate_faq
 from ai.seo.daily_digest import generate_daily_digest
 from ai.seo.interlink_engine import find_related_pages, index_page
+from ai.seo.issue_remediation import generate_fix_value
 from ai.seo.outreach_drafter import draft_outreach_email
 from ai.seo.social_content import generate_social_post
 from automation.seo.backlinks.factory import get_provider as get_backlink_provider
@@ -90,7 +112,16 @@ from automation.seo.crawler import crawl_site, fetch_sitemap_urls
 from automation.seo.ga4_client import fetch_traffic_by_page
 from automation.seo.gsc_client import fetch_search_analytics
 from automation.seo.indexing_client import fetch_url_inspection, submit_url_for_indexing
+from automation.seo.issue_applier import apply_fix as apply_issue_fix
+from automation.seo.issue_applier import apply_fix_to_static_file
 from automation.seo.pagespeed_client import extract_resource_report, fetch_page_speed
+from automation.seo.semrush_client import (
+    fetch_backlink_gap as fetch_semrush_backlink_gap,
+    fetch_backlinks_list as fetch_semrush_backlinks_list,
+    fetch_domain_metrics as fetch_semrush_domain_metrics,
+    fetch_referring_domains as fetch_semrush_referring_domains,
+)
+from automation.seo.server_access import client_for_site as sftp_client_for_site
 from automation.seo.slack_notifier import send_slack_message
 from automation.seo.social_poster import publish_social_post
 from automation.seo.technical_audit import run_all_detectors
@@ -213,6 +244,181 @@ def update_site_cms_config(site_id: int, payload: SeoSiteCmsConfigUpdate, db: Se
     return site
 
 
+@router.patch("/sites/{site_id}/ssh-config", response_model=SeoSiteOut)
+def update_site_ssh_config(site_id: int, payload: SeoSiteSshConfigUpdate, db: Session = Depends(get_db)):
+    """Direct server access (SFTP, FTP, or FTPS), for the files a CMS REST
+    API can't reach (wp-content/mu-plugins/*.php, .htaccess). Same
+    blank-clears/blank-keeps split as update_site_cms_config above."""
+    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+
+    site.ssh_host = (payload.ssh_host or "").strip() or None
+    site.ssh_port = (payload.ssh_port or "").strip() or None
+    site.ssh_username = (payload.ssh_username or "").strip() or None
+    site.ssh_protocol = (payload.ssh_protocol or "").strip().lower() or None
+    if payload.ssh_password and payload.ssh_password.strip():
+        site.ssh_password = payload.ssh_password.strip()
+    db.commit()
+    db.refresh(site)
+    return site
+
+
+@router.get("/sites/{site_id}/ssh-status", response_model=SshStatusOut)
+def ssh_status(site_id: int, db: Session = Depends(get_db)):
+    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+    client = sftp_client_for_site(site)
+    if client is None:
+        return SshStatusOut(site_id=site_id, reachable=False, error="No SSH credentials saved for this site yet.")
+    reachable, error = client.is_reachable()
+    return SshStatusOut(site_id=site_id, reachable=reachable, error=error)
+
+
+def _server_client_or_400(site: SeoSite):
+    client = sftp_client_for_site(site)
+    if client is None:
+        raise HTTPException(status_code=400, detail="No server access credentials saved for this site yet.")
+    return client
+
+
+def _site_or_404(site_id: int, db: Session) -> SeoSite:
+    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+    return site
+
+
+@router.get("/server/list", response_model=ServerDirListingOut)
+def server_list_dir(site_id: int, path: str, db: Session = Depends(get_db)):
+    site = _site_or_404(site_id, db)
+    client = _server_client_or_400(site)
+    try:
+        entries = client.list_dir(path)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Directory list failed: {exc}")
+    return ServerDirListingOut(
+        path=path,
+        entries=[ServerDirEntryOut(name=e.name, is_dir=e.is_dir, size=e.size) for e in entries],
+    )
+
+
+@router.get("/server/file", response_model=ServerFileContentOut)
+def server_read_file(site_id: int, path: str, db: Session = Depends(get_db)):
+    site = _site_or_404(site_id, db)
+    client = _server_client_or_400(site)
+    try:
+        content = client.read_file(path)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"File read failed: {exc}")
+    return ServerFileContentOut(path=path, content=content)
+
+
+def _backup_current_state(client, site_id: int, path: str, action: str, new_path: Optional[str] = None) -> None:
+    """Snapshots whatever's at `path` right now, before a write/rename/
+    delete changes or removes it. content=None (file didn't exist yet,
+    or couldn't be read) is recorded as-is — a real, honest state, not
+    an error; there's simply nothing to restore for that entry."""
+    try:
+        previous = client.read_file(path)
+    except Exception:
+        previous = None
+    database.create_server_file_backup(site_id, path, action, previous, new_path=new_path)
+
+
+@router.put("/server/file", response_model=ServerFileContentOut)
+def server_write_file(payload: ServerFileWriteRequest, db: Session = Depends(get_db)):
+    site = _site_or_404(payload.site_id, db)
+    client = _server_client_or_400(site)
+    _backup_current_state(client, payload.site_id, payload.path, "write")
+    try:
+        client.write_file(payload.path, payload.content)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"File write failed: {exc}")
+    return ServerFileContentOut(path=payload.path, content=payload.content)
+
+
+@router.post("/server/rename", status_code=204)
+def server_rename_file(payload: ServerFileRenameRequest, db: Session = Depends(get_db)):
+    site = _site_or_404(payload.site_id, db)
+    client = _server_client_or_400(site)
+    _backup_current_state(client, payload.site_id, payload.path, "rename", new_path=payload.new_path)
+    try:
+        client.rename_file(payload.path, payload.new_path)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"File rename failed: {exc}")
+
+
+@router.delete("/server/file", status_code=204)
+def server_delete_file(site_id: int, path: str, db: Session = Depends(get_db)):
+    site = _site_or_404(site_id, db)
+    client = _server_client_or_400(site)
+    _backup_current_state(client, site_id, path, "delete")
+    try:
+        client.delete_file(path)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"File delete failed: {exc}")
+
+
+@router.post("/server/backups", response_model=ServerFileBackupSummaryOut, status_code=201)
+def create_server_file_backup_route(payload: ServerFileBackupCreate, db: Session = Depends(get_db)):
+    """Lets the frontend record a backup the moment editing actually
+    starts (the first real keystroke), not only at save time — so the
+    original content is protected server-side even if the browser
+    closes before Save is ever clicked. action='edit-start'
+    distinguishes this from the write/rename/delete backups
+    _backup_current_state creates automatically on an actual mutation."""
+    _site_or_404(payload.site_id, db)
+    backup_id = database.create_server_file_backup(payload.site_id, payload.path, "edit-start", payload.content)
+    db.expire_all()
+    return db.query(SeoServerFileBackup).filter(SeoServerFileBackup.id == backup_id).first()
+
+
+@router.get("/server/backups", response_model=list[ServerFileBackupSummaryOut])
+def list_server_file_backups_route(site_id: int, path: str, limit: int = 50, db: Session = Depends(get_db)):
+    _site_or_404(site_id, db)
+    return (
+        db.query(SeoServerFileBackup)
+        .filter(SeoServerFileBackup.site_id == site_id, SeoServerFileBackup.path == path)
+        # id DESC as a tiebreaker — see list_server_file_backups in
+        # agent/database.py for why created_at alone isn't reliable.
+        .order_by(SeoServerFileBackup.created_at.desc(), SeoServerFileBackup.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get("/server/backups/{backup_id}", response_model=ServerFileBackupOut)
+def get_server_file_backup_route(backup_id: int, db: Session = Depends(get_db)):
+    row = db.query(SeoServerFileBackup).filter(SeoServerFileBackup.id == backup_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No backup {backup_id}")
+    return row
+
+
+@router.post("/server/backups/{backup_id}/restore", response_model=ServerFileContentOut)
+def restore_server_file_backup_route(backup_id: int, db: Session = Depends(get_db)):
+    """Writes a backup's content back to its original path. Itself
+    creates a fresh backup of whatever was there immediately before the
+    restore, same as any other write — restoring is undoable too, not a
+    one-way door."""
+    row = db.query(SeoServerFileBackup).filter(SeoServerFileBackup.id == backup_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No backup {backup_id}")
+    if row.content is None:
+        raise HTTPException(status_code=409, detail="This backup has no stored content to restore")
+
+    site = _site_or_404(row.site_id, db)
+    client = _server_client_or_400(site)
+    _backup_current_state(client, row.site_id, row.path, "write")
+    try:
+        client.write_file(row.path, row.content)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Restore failed: {exc}")
+    return ServerFileContentOut(path=row.path, content=row.content)
+
+
 @router.get("/jobs", response_model=list[SeoJobRunOut])
 def list_jobs(site_id: Optional[int] = None, limit: int = 50, db: Session = Depends(get_db)):
     query = db.query(SeoJobRun)
@@ -242,6 +448,85 @@ def cms_posts(site_id: int, status: str = "publish", db: Session = Depends(get_d
         raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
     client = _cms_client_for(site)
     return client.list_posts(status=status)
+
+
+@router.post("/semrush/check", response_model=SemrushMetricsOut, status_code=201)
+def check_semrush_metrics(payload: SemrushMetricsCheckRequest, db: Session = Depends(get_db)):
+    """Pulls Authority Score, organic/paid keywords, organic traffic,
+    referring domains, and backlinks count for this site's domain — see
+    automation/seo/semrush_client.py for why this is its own client/table
+    rather than a BacklinkProvider, and why it's not a free call (spends
+    real purchased Semrush API units)."""
+    site = _site_or_404(payload.site_id, db)
+    domain = urlparse(site.base_url).netloc or site.base_url
+    metrics = fetch_semrush_domain_metrics(domain)
+    if metrics is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Semrush fetch failed — check SEMRUSH_API_KEY is set and the account has API units left (see server logs).",
+        )
+
+    run_date = date_cls.today()
+    database.upsert_semrush_metrics(
+        site_id=payload.site_id,
+        run_date=run_date,
+        authority_score=metrics.authority_score,
+        organic_traffic=metrics.organic_traffic,
+        organic_keywords=metrics.organic_keywords,
+        paid_keywords=metrics.paid_keywords,
+        referring_domains=metrics.referring_domains,
+        backlinks_total=metrics.backlinks_total,
+        raw_json=json.dumps(metrics.raw),
+        semrush_rank=metrics.semrush_rank,
+    )
+
+    db.expire_all()  # written through agent.database's raw connection, not this session
+    row = (
+        db.query(SeoSemrushMetric)
+        .filter(SeoSemrushMetric.site_id == payload.site_id, SeoSemrushMetric.run_date == run_date)
+        .first()
+    )
+    return row
+
+
+@router.get("/semrush", response_model=list[SemrushMetricsOut])
+def list_semrush_metrics(site_id: int, limit: int = 30, db: Session = Depends(get_db)):
+    return (
+        db.query(SeoSemrushMetric)
+        .filter(SeoSemrushMetric.site_id == site_id)
+        .order_by(SeoSemrushMetric.run_date.desc(), SeoSemrushMetric.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get("/semrush/backlinks", response_model=list[SemrushBacklinkRowOut])
+def semrush_backlinks(site_id: int, limit: int = 50, db: Session = Depends(get_db)):
+    """On-demand, not persisted — a live proxy onto Semrush's `backlinks`
+    report, same as /cms/posts proxies the CMS rather than storing a copy.
+    Unit cost scales with rows returned (display_limit caps it)."""
+    site = _site_or_404(site_id, db)
+    domain = urlparse(site.base_url).netloc or site.base_url
+    return fetch_semrush_backlinks_list(domain, limit=limit)
+
+
+@router.get("/semrush/referring-domains", response_model=list[SemrushReferringDomainOut])
+def semrush_referring_domains(site_id: int, limit: int = 50, db: Session = Depends(get_db)):
+    site = _site_or_404(site_id, db)
+    domain = urlparse(site.base_url).netloc or site.base_url
+    return fetch_semrush_referring_domains(domain, limit=limit)
+
+
+@router.post("/semrush/backlink-gap", response_model=list[SemrushGapRowOut])
+def semrush_backlink_gap(payload: SemrushBacklinkGapRequest, db: Session = Depends(get_db)):
+    """This site vs one or more competitor domains, aggregate backlink
+    stats side by side (Semrush's `backlinks_comparison` report) — see
+    automation/seo/semrush_client.fetch_backlink_gap's docstring for how
+    this differs from Semrush's own richer Backlink Gap UI."""
+    site = _site_or_404(payload.site_id, db)
+    domain = urlparse(site.base_url).netloc or site.base_url
+    targets = [domain, *[d.strip() for d in payload.competitor_domains if d.strip()]]
+    return fetch_semrush_backlink_gap(targets)
 
 
 @router.post("/pagespeed/check", response_model=PageSpeedResultOut, status_code=201)
@@ -583,12 +868,21 @@ def run_technical_audit_route(payload: TechnicalAuditRequest, db: Session = Depe
 
 @router.get("/technical/issues", response_model=list[TechnicalIssueOut])
 def list_technical_issues_route(
-    site_id: int, status: Optional[str] = None, limit: int = 200, db: Session = Depends(get_db)
+    site_id: int, status: Optional[str] = None, limit: int = 1000, db: Session = Depends(get_db)
 ):
     query = db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.site_id == site_id)
     if status is not None:
         query = query.filter(SeoTechnicalIssue.status == status)
-    return query.order_by(SeoTechnicalIssue.severity.asc(), SeoTechnicalIssue.created_at.desc()).limit(limit).all()
+    # Plain .asc() on the severity string sorts "critical" < "info" <
+    # "warning" alphabetically — backwards from actual importance, and a
+    # real bug: on a site with hundreds of low-value 'info' issues (e.g.
+    # orphaned_page), those alphabetically beat every 'warning' issue for
+    # a spot within the row limit, silently burying real, fixable
+    # warnings (missing_meta_description, missing_canonical) off the end
+    # of the list. This explicit rank fixes the order to what the
+    # severity name actually means.
+    severity_rank = case((SeoTechnicalIssue.severity == "critical", 0), (SeoTechnicalIssue.severity == "warning", 1), else_=2)
+    return query.order_by(severity_rank, SeoTechnicalIssue.created_at.desc()).limit(limit).all()
 
 
 @router.post("/technical/issues/{issue_id}/approve", response_model=TechnicalIssueOut)
@@ -605,6 +899,65 @@ def reject_technical_issue_route(issue_id: int, payload: TechnicalIssueReview, d
     ok = database.set_technical_issue_status(issue_id, "rejected", payload.reviewed_by)
     if not ok:
         raise HTTPException(status_code=404, detail=f"No technical issue {issue_id}")
+    db.expire_all()
+    return db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
+
+
+@router.post("/technical/issues/{issue_id}/generate-fix", response_model=TechnicalIssueOut)
+def generate_technical_issue_fix_route(issue_id: int, db: Session = Depends(get_db)):
+    """Module 35 — produces a real, ready-to-use replacement value (not
+    just advice text) for the small set of rules where one is knowable
+    at all. Read-only against the live site plus one LLM call; never
+    writes anything — see /apply-fix for that, which additionally
+    requires the issue to be approved first."""
+    row = db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No technical issue {issue_id}")
+
+    result = generate_fix_value(row.rule, row.url, row.message, site_id=row.site_id)
+    if result.value is None:
+        raise HTTPException(status_code=422, detail=result.error or "Could not generate a fix for this issue")
+
+    database.save_technical_issue_fix_value(issue_id, result.value)
+    db.expire_all()
+    return db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
+
+
+@router.post("/technical/issues/{issue_id}/apply-fix", response_model=TechnicalIssueOut)
+def apply_technical_issue_fix_route(issue_id: int, db: Session = Depends(get_db)):
+    """Writes the generated fix_value to the real CMS post — the one
+    action in this whole feature that touches the live site. Requires
+    the issue to already be 'approved' (the human checkpoint) and a
+    fix_value to already exist (call /generate-fix first). Always
+    re-reads the post afterward to confirm the write actually took —
+    see automation/seo/issue_applier.py for why that check exists."""
+    row = db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No technical issue {issue_id}")
+    if row.status != "approved":
+        raise HTTPException(status_code=409, detail=f"Issue must be approved first (current status: {row.status})")
+    if not row.fix_value:
+        raise HTTPException(status_code=409, detail="No fix value generated yet — call generate-fix first")
+
+    site = db.query(SeoSite).filter(SeoSite.id == row.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
+
+    client = _cms_client_for(site)
+    result = apply_issue_fix(client, row.rule, row.url, row.fix_value)
+    if not result.ok and result.not_found:
+        # No CMS post/page backs this URL at all — a real, verified case
+        # (webpays.com's landing pages are static files, not WP content),
+        # not just a fallback-of-last-resort. Try editing the file
+        # directly if this site has Server Access credentials saved.
+        server_client = sftp_client_for_site(site)
+        if server_client is not None:
+            result = apply_fix_to_static_file(server_client, row.url, row.rule, row.fix_value)
+    if result.ok:
+        database.mark_technical_issue_fix_applied(issue_id)
+    else:
+        database.mark_technical_issue_fix_failed(issue_id, result.detail)
+
     db.expire_all()
     return db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
 
@@ -663,7 +1016,9 @@ def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = De
         draft = generate_social_post(platform, payload.page_title, payload.content_excerpt, site_id=payload.site_id)
         if draft is None:
             continue  # one platform failing shouldn't fail the whole batch
-        post_id = database.create_social_post(payload.site_id, platform, draft.content, payload.source_url)
+        post_id = database.create_social_post(
+            payload.site_id, platform, draft.content, payload.source_url, payload.image_url
+        )
         created_ids.append(post_id)
 
     if not created_ids:
@@ -704,10 +1059,14 @@ def publish_social_post_route(post_id: int, db: Session = Depends(get_db)):
     row = db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No social post {post_id}")
-    if row.status != "approved":
+    # 'failed' is retryable without a fresh approval, same reasoning as
+    # publish_blog_post_route: a publish failure here is typically
+    # transient (a LinkedIn selector/timing hiccup), not a reason to make
+    # a human re-approve content they already approved once.
+    if row.status not in ("approved", "failed"):
         raise HTTPException(status_code=409, detail=f"Post must be approved first (current status: {row.status})")
 
-    result = publish_social_post(row.platform, row.content)
+    result = publish_social_post(row.platform, row.content, image_url=row.image_url)
     if result.ok:
         database.mark_social_post_posted(post_id, result.external_post_id)
     else:
@@ -868,6 +1227,32 @@ def list_blog_posts_route(site_id: int, status: Optional[str] = None, limit: int
     if status is not None:
         query = query.filter(SeoBlogPost.status == status)
     return query.order_by(SeoBlogPost.created_at.desc()).limit(limit).all()
+
+
+@router.patch("/blog/{post_id}", response_model=BlogPostOut)
+def update_blog_post_route(post_id: int, payload: BlogPostUpdate, db: Session = Depends(get_db)):
+    """Lets a reviewer fix a draft directly — tighten wording, clear a
+    word-count minimum, adjust a heading — instead of only Approve/Reject
+    on whatever the LLM produced. Re-runs the same structure checker
+    generate_blog_post_route does, so the issue badges reflect the edit
+    immediately rather than showing stale findings from the original
+    draft. Only while still 'draft': once approved/published the content
+    is either about to go out or already has, so this doesn't quietly
+    rewrite it after the fact."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+    if row.status != "draft":
+        raise HTTPException(status_code=409, detail=f"Only a draft post can be edited (current status: {row.status})")
+
+    structure = analyze_structure(payload.content, primary_keyword=row.primary_keyword)
+    structure_issues_json = json.dumps(
+        [{"rule": i.rule, "severity": i.severity, "message": i.message} for i in structure.issues]
+    )
+    database.update_blog_post(post_id, payload.title, payload.excerpt, payload.content, structure.passed, structure_issues_json)
+
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
 
 
 @router.post("/blog/{post_id}/approve", response_model=BlogPostOut)

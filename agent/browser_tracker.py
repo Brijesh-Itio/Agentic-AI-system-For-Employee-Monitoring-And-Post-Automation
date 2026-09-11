@@ -274,7 +274,7 @@ class _TitleWatcher:
         app_name, window_title = info
 
         if app_name not in BROWSER_PROCESSES:
-            self.session_manager.close_if_open()
+            self.session_manager.close_if_open();
             return
 
         page_title = parse_browser_title(window_title)

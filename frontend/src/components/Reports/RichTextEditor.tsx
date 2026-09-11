@@ -3,12 +3,27 @@ import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
-import { Bold, Italic, Link as LinkIcon, List, ListOrdered, Strikethrough, Undo2, Redo2 } from "lucide-react";
+import {
+  Bold,
+  Heading2,
+  Heading3,
+  Italic,
+  Link as LinkIcon,
+  List,
+  ListOrdered,
+  Strikethrough,
+  Undo2,
+  Redo2,
+} from "lucide-react";
 
 interface RichTextEditorProps {
   value: string;
   onChange: (html: string) => void;
   placeholder?: string;
+  // Off by default (comments have no business with headings) — blog post
+  // body editing turns this on. H1 is deliberately excluded: that's the
+  // post's own title field, not something to duplicate inside the body.
+  headings?: boolean;
 }
 
 function ToolbarButton({
@@ -44,10 +59,10 @@ function ToolbarButton({
   );
 }
 
-export default function RichTextEditor({ value, onChange, placeholder }: RichTextEditorProps) {
+export default function RichTextEditor({ value, onChange, placeholder, headings = false }: RichTextEditorProps) {
   const editor = useEditor({
     extensions: [
-      StarterKit.configure({ heading: false }),
+      StarterKit.configure({ heading: headings ? { levels: [2, 3] } : false }),
       Link.configure({ openOnClick: false, autolink: true, HTMLAttributes: { rel: "noopener noreferrer" } }),
       Placeholder.configure({ placeholder: placeholder ?? "Write a comment…" }),
     ],
@@ -85,6 +100,25 @@ export default function RichTextEditor({ value, onChange, placeholder }: RichTex
   return (
     <div className="overflow-hidden rounded-lg border border-gray-300 bg-white dark:border-gray-700 dark:bg-gray-900">
       <div className="flex items-center gap-0.5 border-b border-gray-100 px-2 py-1 dark:border-gray-800">
+        {headings && (
+          <>
+            <ToolbarButton
+              label="Heading 2"
+              active={editor.isActive("heading", { level: 2 })}
+              onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
+            >
+              <Heading2 className="h-3.5 w-3.5" />
+            </ToolbarButton>
+            <ToolbarButton
+              label="Heading 3"
+              active={editor.isActive("heading", { level: 3 })}
+              onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
+            >
+              <Heading3 className="h-3.5 w-3.5" />
+            </ToolbarButton>
+            <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
+          </>
+        )}
         <ToolbarButton
           label="Bold"
           active={editor.isActive("bold")}

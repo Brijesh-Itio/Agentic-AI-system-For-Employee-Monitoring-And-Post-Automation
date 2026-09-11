@@ -57,3 +57,8 @@ python-dotenv==1.0.1
 # dependency required. Explicitly the blueprint's own recommended tool for
 # on-page audit and internal-link mapping.
 beautifulsoup4==4.12.3
+
+# ── SEO Agentic AI: direct SFTP server access (automation/seo/server_access.py) ──
+# Escape hatch alongside CMS Publishing for server-level files a REST API
+# can't reach (wp-content/mu-plugins/*.php, .htaccess).
+paramiko==5.0.0

@@ -61,9 +61,31 @@ logger = logging.getLogger(__name__)
 seo_scheduler = BackgroundScheduler()
 
 
+def _run_server_file_backup_cleanup() -> None:
+    from agent.database import purge_old_server_file_backups
+
+    removed = purge_old_server_file_backups(retention_days=15)
+    if removed:
+        logger.info("Server file backup cleanup: removed %d backup row(s) older than 15 days", removed)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+
+    # Housekeeping, not gated behind SEO_AUTOMATION_ENABLED — the Server
+    # Files backup history (seo_server_file_backups) is a rolling
+    # 15-day window regardless of whether the SEO pipeline itself runs.
+    seo_scheduler.add_job(
+        _run_server_file_backup_cleanup,
+        trigger="cron",
+        hour=3,
+        minute=30,
+        id="server_file_backup_cleanup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
     if settings.SEO_AUTOMATION_ENABLED:
         from ai.seo_master_agent import run_daily_cycle_for_all_sites
 
@@ -76,8 +98,10 @@ async def lifespan(app: FastAPI):
             replace_existing=True,
             misfire_grace_time=3600,
         )
-        seo_scheduler.start()
         logger.info("SEO daily automation scheduled for %02d:00 local time", settings.SEO_AUTOMATION_HOUR)
+
+    seo_scheduler.start()
+    logger.info("Server file backup cleanup scheduled for 03:30 local time (15-day retention)")
     logger.info("WorkPulse AI API started")
     yield
     if seo_scheduler.running:

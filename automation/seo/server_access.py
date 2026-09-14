@@ -97,6 +97,36 @@ class SftpClient:
         finally:
             client.close()
 
+    def write_binary_file(self, remote_path: str, data: bytes) -> None:
+        """Same as write_file but for non-text content (generated
+        images) — sftp.open's write() takes raw bytes directly, no
+        encoding step, unlike the text path above."""
+        client = self._connect()
+        try:
+            sftp = client.open_sftp()
+            with sftp.open(remote_path, "wb") as f:
+                f.write(data)
+        finally:
+            client.close()
+
+    def mkdir_p(self, remote_dir: str) -> None:
+        """Creates remote_dir and any missing parent directories —
+        mirrors `mkdir -p`, since sftp.mkdir fails if a parent segment
+        doesn't exist yet (e.g. a fresh seo-agent uploads folder)."""
+        client = self._connect()
+        try:
+            sftp = client.open_sftp()
+            parts = [p for p in remote_dir.split("/") if p]
+            path = ""
+            for part in parts:
+                path += "/" + part
+                try:
+                    sftp.stat(path)
+                except FileNotFoundError:
+                    sftp.mkdir(path)
+        finally:
+            client.close()
+
     def rename_file(self, remote_path: str, new_path: str) -> None:
         client = self._connect()
         try:
@@ -178,6 +208,31 @@ class FtpClient:
         ftp = self._connect()
         try:
             ftp.storbinary(f"STOR {remote_path}", io.BytesIO(content.encode("utf-8")))
+        finally:
+            ftp.quit()
+
+    def write_binary_file(self, remote_path: str, data: bytes) -> None:
+        ftp = self._connect()
+        try:
+            ftp.storbinary(f"STOR {remote_path}", io.BytesIO(data))
+        finally:
+            ftp.quit()
+
+    def mkdir_p(self, remote_dir: str) -> None:
+        """Creates remote_dir and any missing parent directories — FTP's
+        MKD has no recursive form, so each segment is created in turn,
+        tolerating the "already exists" error on segments that are
+        already there."""
+        ftp = self._connect()
+        try:
+            parts = [p for p in remote_dir.split("/") if p]
+            path = ""
+            for part in parts:
+                path += "/" + part
+                try:
+                    ftp.mkd(path)
+                except ftplib.error_perm:
+                    pass  # already exists
         finally:
             ftp.quit()
 

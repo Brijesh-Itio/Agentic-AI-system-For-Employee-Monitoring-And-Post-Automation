@@ -486,6 +486,16 @@ CREATE INDEX IF NOT EXISTS idx_file_activity_logs_path ON file_activity_logs(fil
 
 -- Module 25 — SEO Agentic AI foundation. Purely additive; nothing above
 -- this comment changes. seo_sites is the generic site registry (any
+-- Module 36 — a minimal generic key-value store, first used to
+-- remember the Google Sheets spreadsheet id this app creates for
+-- itself (ai/seo/sheets_client.py) so it creates one once, not a new
+-- spreadsheet on every write.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- number of target websites, not hardcoded to one) that every other SEO
 -- table below keys off via site_id.
 CREATE TABLE IF NOT EXISTS seo_sites (
@@ -699,6 +709,59 @@ CREATE TABLE IF NOT EXISTS seo_daily_digests (
 
 CREATE INDEX IF NOT EXISTS idx_seo_daily_digests_site ON seo_daily_digests(site_id);
 
+-- Module 36 — weekly/monthly roll-ups. A separate table rather than
+-- reusing seo_daily_digests: that table's UNIQUE(site_id, run_date)
+-- would collide the moment a weekly rollup's period_start date matches
+-- some daily digest's own run_date (e.g. any digest generated on a
+-- Monday). period_start/period_end are the calendar range this rollup
+-- covers, not "the date it ran."
+CREATE TABLE IF NOT EXISTS seo_digest_rollups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    period TEXT NOT NULL CHECK(period IN ('weekly', 'monthly')),
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    narrative TEXT NOT NULL,
+    stats_json TEXT NOT NULL,
+    slack_delivered INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, period, period_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_digest_rollups_site ON seo_digest_rollups(site_id, period);
+
+-- Module 39 — bulk CMS image-to-WebP conversion. Two tables:
+-- seo_webp_conversions caches which source image URLs have already
+-- been downloaded/converted/uploaded (keyed per site+URL) so a second
+-- run — or the same image appearing in five different posts, or five
+-- different srcset size-variants of the same file — never re-does work
+-- already done; the job is naturally idempotent because of this, not
+-- because of a separate "already processed" flag. seo_content_backups
+-- snapshots a post's raw content immediately before its src/srcset
+-- URLs get rewritten, so a bad conversion run can be undone by hand.
+CREATE TABLE IF NOT EXISTS seo_webp_conversions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    original_url TEXT NOT NULL,
+    webp_url TEXT NOT NULL,
+    original_bytes INTEGER,
+    webp_bytes INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, original_url)
+);
+
+CREATE TABLE IF NOT EXISTS seo_content_backups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    cms_post_id TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'post',
+    reason TEXT NOT NULL,
+    original_content TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_content_backups_site ON seo_content_backups(site_id, cms_post_id);
+
 -- Module 30 — Social media content calendar + approval queue. Real
 -- automated posting exists only for LinkedIn (reusing module 18's
 -- Playwright automation, already tested against a real browser flow);
@@ -814,6 +877,52 @@ CREATE TABLE IF NOT EXISTS seo_blog_posts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_seo_blog_posts_site_status ON seo_blog_posts(site_id, status);
+
+-- GSC Search Analytics pulls, page dimension — the "CTR by page"/"position
+-- changes for all tracked URLs" half of the daily GSC pull that
+-- seo_gsc_queries (query dimension only) never covered. Same idempotent
+-- shape as seo_gsc_queries; feeds the meta-rewrite opportunity detector
+-- below, which needs a real page URL (not just a query string) to draft a
+-- rewrite against.
+CREATE TABLE IF NOT EXISTS seo_gsc_pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    run_date DATE NOT NULL,
+    page TEXT NOT NULL,
+    clicks INTEGER NOT NULL DEFAULT 0,
+    impressions INTEGER NOT NULL DEFAULT 0,
+    ctr REAL,
+    position REAL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(site_id, run_date, page)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_gsc_pages_site_date ON seo_gsc_pages(site_id, run_date);
+
+-- Meta-rewrite opportunity queue — pages the daily cycle flagged as high
+-- impressions / low CTR (real search demand, underperforming snippet).
+-- UNIQUE(site_id, url) so a page re-flagged on a later day refreshes its
+-- metrics in place rather than piling up duplicate queue entries; status
+-- stays a human decision once made (see upsert_meta_rewrite_candidate's
+-- docstring) so a re-detection never silently resurrects a dismissed item.
+CREATE TABLE IF NOT EXISTS seo_meta_rewrite_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    run_date DATE NOT NULL,
+    impressions INTEGER NOT NULL DEFAULT 0,
+    clicks INTEGER NOT NULL DEFAULT 0,
+    ctr REAL,
+    position REAL,
+    suggested_title TEXT,
+    suggested_description TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at DATETIME,
+    UNIQUE(site_id, url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_meta_rewrite_queue_site_status ON seo_meta_rewrite_queue(site_id, status);
 """
 
 # Columns added after the initial daily_stats design (module 2.6 — longest
@@ -896,10 +1005,20 @@ _SEO_SITES_EXTRA_COLUMNS = {
 # present, since an SEO-plugin meta key WordPress doesn't recognize is
 # silently ignored rather than rejected — a real risk this codebase's
 # own module-28 docstring called out before real fixes existed to test.
+#
+# Module 41 — ai_suggestion is a separate, advisory-only field: an
+# Ollama-generated, page-specific explanation of how to fix ANY issue
+# rule (not just the 3 REMEDIABLE_RULES with a knowable CMS field
+# value). It is never written to the live site by anything in this
+# codebase — only fix_value ever is, and only through the existing
+# approve-then-apply flow — so offering it for every rule type doesn't
+# widen the "catastrophic misapplication" risk issue_remediation.py's
+# docstring already drew the line around.
 _SEO_TECHNICAL_ISSUES_EXTRA_COLUMNS = {
     "fix_value": "TEXT",
     "fix_applied": "INTEGER NOT NULL DEFAULT 0",
     "fix_error": "TEXT",
+    "ai_suggestion": "TEXT",
 }
 
 
@@ -916,6 +1035,21 @@ _SEO_SEMRUSH_METRICS_EXTRA_COLUMNS = {
 # above.
 _SEO_SOCIAL_POSTS_EXTRA_COLUMNS = {
     "image_url": "TEXT",
+}
+
+# Module 36 — blog posts shipped without a featured-image field; added
+# after the fact once image_pipeline.py gave the app a real way to
+# generate and attach one, same additive-column convention as above.
+# Module 38 — slug/tags/categories added the same way. tags and
+# categories are stored as JSON arrays of plain names (TEXT column, not
+# a join table) — this app never needs to query "all posts tagged X,"
+# only to send the list through to the CMS at publish time, so a JSON
+# blob is the right amount of structure for the one thing it's used for.
+_SEO_BLOG_POSTS_EXTRA_COLUMNS = {
+    "image_url": "TEXT",
+    "slug": "TEXT",
+    "tags": "TEXT",
+    "categories": "TEXT",
 }
 
 
@@ -942,12 +1076,32 @@ def init_db() -> None:
             _ensure_extra_columns(conn, "seo_technical_issues", _SEO_TECHNICAL_ISSUES_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_semrush_metrics", _SEO_SEMRUSH_METRICS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_social_posts", _SEO_SOCIAL_POSTS_EXTRA_COLUMNS)
+            _ensure_extra_columns(conn, "seo_blog_posts", _SEO_BLOG_POSTS_EXTRA_COLUMNS)
             conn.commit()
             logger.info("Local SQLite schema ready at %s", LOCAL_DB_PATH)
         except Exception:
             conn.rollback()
             logger.exception("Failed to initialise local SQLite schema")
             raise
+
+
+# ── app_settings — module 36 ──
+
+def get_app_setting(key: str) -> Optional[str]:
+    conn = get_connection()
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_app_setting(key: str, value: str) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, value),
+        )
 
 
 # ── activity_logs ──
@@ -2031,6 +2185,75 @@ def list_gsc_queries(site_id: int, limit: int = 100):
     ).fetchall()
 
 
+def list_gsc_query_run_dates(site_id: int, limit: int = 2):
+    """Most recent distinct run_dates this site has GSC query data for,
+    newest first. Two callers: rank_alerts.py needs exactly the latest two
+    to diff (today vs the last pull before it) without guessing whether
+    "yesterday" actually has data (a missed/failed run any given day is
+    routine, not an error)."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT DISTINCT run_date FROM seo_gsc_queries WHERE site_id = ? ORDER BY run_date DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+    # sqlite3 returns a DATE column as a plain TEXT string, not a date
+    # object (no detect_types configured on this connection) — parsed
+    # back to date_cls here so this matches every other run_date-typed
+    # function in this module (upsert_gsc_query_rows, list_gsc_queries_
+    # for_date, ...), which all expect a real date and call .isoformat()
+    # on it themselves.
+    return [date_cls.fromisoformat(row["run_date"]) for row in rows]
+
+
+def list_gsc_queries_for_date(site_id: int, run_date: date_cls):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_gsc_queries WHERE site_id = ? AND run_date = ?",
+        (site_id, run_date.isoformat()),
+    ).fetchall()
+
+
+# ── seo_gsc_pages — page-dimension GSC pull ──
+
+def upsert_gsc_page_rows(site_id: int, run_date: date_cls, rows: list) -> None:
+    """rows: list of automation.seo.gsc_client.GscPageRow. A no-op on an
+    empty list rather than an empty transaction."""
+    if not rows:
+        return
+    with write_cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO seo_gsc_pages (site_id, run_date, page, clicks, impressions, ctr, position)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(site_id, run_date, page) DO UPDATE SET
+                clicks = excluded.clicks,
+                impressions = excluded.impressions,
+                ctr = excluded.ctr,
+                position = excluded.position
+            """,
+            [
+                (site_id, run_date.isoformat(), r.page, r.clicks, r.impressions, r.ctr, r.position)
+                for r in rows
+            ],
+        )
+
+
+def list_gsc_pages(site_id: int, limit: int = 100):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_gsc_pages WHERE site_id = ? ORDER BY run_date DESC, impressions DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+def list_gsc_pages_for_date(site_id: int, run_date: date_cls):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_gsc_pages WHERE site_id = ? AND run_date = ?",
+        (site_id, run_date.isoformat()),
+    ).fetchall()
+
+
 # ── seo_ga4_pages — module 26.6 ──
 
 def upsert_ga4_page_rows(site_id: int, run_date: date_cls, rows: list) -> None:
@@ -2147,6 +2370,11 @@ def save_technical_issue_fix_value(issue_id: int, fix_value: str) -> None:
         cur.execute("UPDATE seo_technical_issues SET fix_value = ? WHERE id = ?", (fix_value, issue_id))
 
 
+def save_technical_issue_ai_suggestion(issue_id: int, ai_suggestion: str) -> None:
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_technical_issues SET ai_suggestion = ? WHERE id = ?", (ai_suggestion, issue_id))
+
+
 def mark_technical_issue_fix_applied(issue_id: int) -> None:
     with write_cursor() as cur:
         cur.execute(
@@ -2188,6 +2416,112 @@ def list_daily_digests(site_id: int, limit: int = 30):
     ).fetchall()
 
 
+def list_daily_digests_between(site_id: int, start: date_cls, end: date_cls):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_daily_digests WHERE site_id = ? AND run_date >= ? AND run_date <= ? ORDER BY run_date ASC",
+        (site_id, start.isoformat(), end.isoformat()),
+    ).fetchall()
+
+
+# ── seo_digest_rollups — module 36 ──
+
+def save_digest_rollup(
+    site_id: int, period: str, period_start: date_cls, period_end: date_cls,
+    narrative: str, stats_json: str, slack_delivered: bool,
+) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seo_digest_rollups (site_id, period, period_start, period_end, narrative, stats_json, slack_delivered)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(site_id, period, period_start) DO UPDATE SET
+                period_end = excluded.period_end,
+                narrative = excluded.narrative,
+                stats_json = excluded.stats_json,
+                slack_delivered = excluded.slack_delivered
+            """,
+            (site_id, period, period_start.isoformat(), period_end.isoformat(), narrative, stats_json, 1 if slack_delivered else 0),
+        )
+
+
+def list_digest_rollups(site_id: int, period: Optional[str] = None, limit: int = 20):
+    conn = get_connection()
+    if period is not None:
+        return conn.execute(
+            "SELECT * FROM seo_digest_rollups WHERE site_id = ? AND period = ? ORDER BY period_start DESC LIMIT ?",
+            (site_id, period, limit),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM seo_digest_rollups WHERE site_id = ? ORDER BY period_start DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+# ── seo_webp_conversions / seo_content_backups — module 39 ──
+
+def get_cached_webp_conversion(site_id: int, original_url: str) -> Optional[str]:
+    """Returns the already-converted WebP URL for this exact source URL
+    on this site, if one exists — the cache that makes re-running the
+    bulk job (or the same image appearing in several posts) a no-op
+    instead of duplicate work."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT webp_url FROM seo_webp_conversions WHERE site_id = ? AND original_url = ?",
+        (site_id, original_url),
+    ).fetchone()
+    return row["webp_url"] if row else None
+
+
+def save_webp_conversion(
+    site_id: int, original_url: str, webp_url: str, original_bytes: Optional[int], webp_bytes: Optional[int]
+) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seo_webp_conversions (site_id, original_url, webp_url, original_bytes, webp_bytes)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(site_id, original_url) DO UPDATE SET
+                webp_url = excluded.webp_url,
+                original_bytes = excluded.original_bytes,
+                webp_bytes = excluded.webp_bytes
+            """,
+            (site_id, original_url, webp_url, original_bytes, webp_bytes),
+        )
+
+
+def save_content_backup(site_id: int, cms_post_id: str, kind: str, reason: str, original_content: str) -> int:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seo_content_backups (site_id, cms_post_id, kind, reason, original_content)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (site_id, cms_post_id, kind, reason, original_content),
+        )
+        return cur.lastrowid
+
+
+def list_content_backups(site_id: int, cms_post_id: Optional[str] = None, limit: int = 50):
+    conn = get_connection()
+    if cms_post_id is not None:
+        return conn.execute(
+            "SELECT id, site_id, cms_post_id, kind, reason, created_at FROM seo_content_backups "
+            "WHERE site_id = ? AND cms_post_id = ? ORDER BY created_at DESC LIMIT ?",
+            (site_id, cms_post_id, limit),
+        ).fetchall()
+    return conn.execute(
+        "SELECT id, site_id, cms_post_id, kind, reason, created_at FROM seo_content_backups "
+        "WHERE site_id = ? ORDER BY created_at DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+def get_content_backup(backup_id: int):
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_content_backups WHERE id = ?", (backup_id,)).fetchone()
+
+
 # ── seo_social_posts — module 30 ──
 
 def create_social_post(
@@ -2225,6 +2559,12 @@ def get_social_post(post_id: int):
 def set_social_post_status(post_id: int, status: str) -> bool:
     with write_cursor() as cur:
         cur.execute("UPDATE seo_social_posts SET status = ? WHERE id = ?", (status, post_id))
+        return cur.rowcount > 0
+
+
+def set_social_post_image(post_id: int, image_url: str) -> bool:
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_social_posts SET image_url = ? WHERE id = ?", (image_url, post_id))
         return cur.rowcount > 0
 
 
@@ -2329,6 +2669,21 @@ def list_index_status(site_id: int, limit: int = 200):
     ).fetchall()
 
 
+def get_index_status(site_id: int, url: str):
+    """The row for this URL as it stood BEFORE the caller's next
+    upsert_index_status call — callers read this first to compare against
+    a fresh inspection result and detect a coverage_state transition (e.g.
+    "Submitted and indexed" -> anything else = just dropped out of the
+    index), then upsert the new result. None means this URL has never been
+    inspected before, which callers treat as "no prior state to compare
+    against" rather than a drop."""
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_index_status WHERE site_id = ? AND url = ?",
+        (site_id, url),
+    ).fetchone()
+
+
 def save_indexing_submission(
     site_id: int, url: str, notification_type: str, success: bool, response_json: Optional[str], error: Optional[str]
 ) -> int:
@@ -2403,6 +2758,21 @@ def update_blog_post(
         return cur.rowcount > 0
 
 
+def set_blog_post_taxonomy(post_id: int, slug: Optional[str], tags_json: Optional[str], categories_json: Optional[str]) -> None:
+    """Module 38 — a dedicated setter rather than folding these into
+    update_blog_post's own signature, so existing callers of that
+    function (the content-edit PATCH route) don't need to change. Only
+    touches the fields actually passed (None = leave untouched) — same
+    "sparse update" shape as set_blog_post_image."""
+    with write_cursor() as cur:
+        if slug is not None:
+            cur.execute("UPDATE seo_blog_posts SET slug = ? WHERE id = ?", (slug, post_id))
+        if tags_json is not None:
+            cur.execute("UPDATE seo_blog_posts SET tags = ? WHERE id = ?", (tags_json, post_id))
+        if categories_json is not None:
+            cur.execute("UPDATE seo_blog_posts SET categories = ? WHERE id = ?", (categories_json, post_id))
+
+
 def list_blog_posts(site_id: int, status: Optional[str] = None, limit: int = 100):
     conn = get_connection()
     if status is not None:
@@ -2440,6 +2810,112 @@ def mark_blog_post_published(post_id: int, cms_post_id: Optional[str], cms_post_
         )
 
 
+def mark_blog_post_live(post_id: int) -> None:
+    """Module 38 — 'published' only ever meant "created as a draft in
+    the CMS" (see automation/seo/cms/base.py's create_post docstring);
+    this is the actual go-live step, a distinct terminal status so the
+    frontend can tell "sitting in the CMS as a draft" apart from
+    "genuinely public on the website" rather than overloading
+    'published' to mean both."""
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET status = 'live', error = NULL WHERE id = ?", (post_id,))
+
+
+def mark_blog_post_go_live_failed(post_id: int, error: str) -> None:
+    """Deliberately leaves status as 'published' rather than 'failed' —
+    'failed' is one of the statuses /blog/{id}/publish treats as
+    retryable, and retrying publish on a post that already has a real
+    cms_post_id would create a SECOND duplicate post in the CMS instead
+    of just retrying the go-live step. Records the error for display
+    without touching status, so the Go Live button stays the right
+    (and only) retry path."""
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET error = ? WHERE id = ?", (error, post_id))
+
+
 def mark_blog_post_failed(post_id: int, error: str) -> None:
     with write_cursor() as cur:
         cur.execute("UPDATE seo_blog_posts SET status = 'failed', error = ? WHERE id = ?", (error, post_id))
+
+
+def set_blog_post_image(post_id: int, image_url: str) -> None:
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET image_url = ? WHERE id = ?", (image_url, post_id))
+
+
+# ── seo_meta_rewrite_queue — CTR opportunity detection ──
+
+def get_meta_rewrite_candidate(site_id: int, url: str):
+    conn = get_connection()
+    return conn.execute(
+        "SELECT * FROM seo_meta_rewrite_queue WHERE site_id = ? AND url = ?",
+        (site_id, url),
+    ).fetchone()
+
+
+def upsert_meta_rewrite_candidate(
+    site_id: int,
+    url: str,
+    run_date: date_cls,
+    impressions: int,
+    clicks: int,
+    ctr: float,
+    position: float,
+    suggested_title: Optional[str],
+    suggested_description: Optional[str],
+) -> None:
+    """Refreshes this URL's metrics (impressions/clicks/ctr/position,
+    run_date) every time it's re-detected as an opportunity, but only sets
+    suggested_title/suggested_description and resets status back to
+    'queued' when the row didn't already exist or a prior AI draft is
+    genuinely missing — once a human has approved/dismissed/applied an
+    item (status != 'queued'), a later day's re-detection must not
+    silently overwrite that decision or regenerate copy nobody asked to
+    revisit. Callers only pass a non-None suggested_title/description for
+    a URL not already in the queue (see meta_opportunity_node), so this
+    stays correct either way."""
+    existing = get_meta_rewrite_candidate(site_id, url)
+    with write_cursor() as cur:
+        if existing is None:
+            cur.execute(
+                """
+                INSERT INTO seo_meta_rewrite_queue
+                    (site_id, url, run_date, impressions, clicks, ctr, position,
+                     suggested_title, suggested_description, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')
+                """,
+                (site_id, url, run_date.isoformat(), impressions, clicks, ctr, position,
+                 suggested_title, suggested_description),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE seo_meta_rewrite_queue
+                SET run_date = ?, impressions = ?, clicks = ?, ctr = ?, position = ?
+                WHERE site_id = ? AND url = ?
+                """,
+                (run_date.isoformat(), impressions, clicks, ctr, position, site_id, url),
+            )
+
+
+def list_meta_rewrite_queue(site_id: int, status: Optional[str] = None, limit: int = 100):
+    conn = get_connection()
+    if status is not None:
+        return conn.execute(
+            "SELECT * FROM seo_meta_rewrite_queue WHERE site_id = ? AND status = ? "
+            "ORDER BY impressions DESC LIMIT ?",
+            (site_id, status, limit),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM seo_meta_rewrite_queue WHERE site_id = ? ORDER BY impressions DESC LIMIT ?",
+        (site_id, limit),
+    ).fetchall()
+
+
+def set_meta_rewrite_status(item_id: int, status: str) -> bool:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_meta_rewrite_queue SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, item_id),
+        )
+        return cur.rowcount > 0

@@ -17,6 +17,7 @@ import {
   Gauge,
   Globe,
   History,
+  Image as ImageIcon,
   LayoutDashboard,
   Link2,
   Loader2,
@@ -34,6 +35,7 @@ import {
   Share2,
   Sparkles,
   Trash2,
+  TrendingDown,
   TrendingUp,
   WholeWord,
   X,
@@ -61,38 +63,59 @@ import { syntaxTree } from "@codemirror/language";
 import { useTheme } from "@/context/ThemeContext";
 import { useToast } from "@/context/ToastContext";
 import {
+  adoptSheets,
   applyTechnicalIssueFix,
   approveBlogPost,
   BlogPost,
+  approveMetaRewrite,
   approveSocialPost,
   approveTechnicalIssue,
   BacklinkMention,
   checkPageSpeed,
   createSeoSite,
+  analyzeContentStructure,
+  DigestRollup,
   draftOutreachEmail,
+  FaqPair,
   Ga4PageRow,
   generateBlogPost,
+  generateBlogPostImage,
+  generateDigestRollup,
+  generateFaq,
+  generateOgTags,
   generateSeoDigest,
+  generateSocialPostImage,
   generateSocialPosts,
+  generateTechnicalIssueAiSuggestion,
   generateTechnicalIssueFix,
   getBacklinks,
   getBlogPosts,
   getGa4Pages,
+  getGscPages,
   getGscQueries,
   getIndexingSubmissions,
   getIndexStatusList,
+  getMetaRewrites,
   getPageSpeedOpportunities,
   getPageSpeedResults,
+  getRankAlerts,
   getSeoDigests,
+  checkKeywordDifficulty,
+  checkRapidApiKeywords,
   checkSemrushMetrics,
+  KeywordDifficulty,
+  KeywordResearchRow,
   createServerFileBackup,
   deleteServerFile,
   getSemrushBacklinkGap,
   getSemrushBacklinks,
   getSemrushMetrics,
+  getDigestRollups,
   getSemrushReferringDomains,
   getSeoJobs,
   getSeoSites,
+  getSheetsStatus,
+  indexPageForInterlinks,
   getSocialPosts,
   getServerFileBackup,
   getSshStatus,
@@ -107,25 +130,45 @@ import {
   ServerDirEntry,
   writeServerFile,
   getTechnicalIssues,
+  GscPageRow,
   GscQueryRow,
   IndexingNotificationType,
   inspectUrl,
+  MetaRewrite,
+  OgTags,
   PageSpeedResult,
   PageSpeedStrategy,
+  goLiveBlogPost,
   publishBlogPost,
   publishSocialPost,
   pullBacklinks,
+  pullGscPages,
+  RankChange,
+  RelatedPage,
   rejectBlogPost,
+  rejectMetaRewrite,
   updateBlogPost,
+  updateBlogPostTaxonomy,
+  uploadBlogPostImage,
+  uploadSocialPostImage,
   rejectSocialPost,
   rejectTechnicalIssue,
+  resolveTechnicalIssue,
   REMEDIABLE_RULES,
+  DETERMINISTIC_FIX_RULES,
+  researchKeywords,
+  BulkConvertReport,
+  runWebpConvertUrl,
   runTechnicalAudit,
   SeoJobRun,
   SeoSite,
+  shareSheets,
+  SheetsStatus,
   SocialPlatform,
   StructureIssue,
+  StructureReport,
   submitForIndexing,
+  suggestInterlinks,
   TechnicalIssue,
   updateSeoSiteCmsConfig,
   updateSeoSiteGoogleConfig,
@@ -133,7 +176,7 @@ import {
 } from "@/api";
 
 type Tab = "overview" | "performance" | "indexing" | "social" | "blog" | "backlinks";
-type IssueFilter = "pending" | "approved" | "rejected" | "all";
+type IssueFilter = "pending" | "approved" | "rejected" | "resolved" | "all";
 
 // lucide-react 1.x dropped every brand/logo icon (trademark policy), so
 // these platform glyphs are small bespoke SVGs — simplified marks, not
@@ -184,6 +227,7 @@ const issueStatusVariant: Record<TechnicalIssue["status"], "warning" | "success"
   pending: "warning",
   approved: "success",
   rejected: "outline",
+  resolved: "success",
 };
 
 const socialStatusVariant: Record<string, "warning" | "success" | "outline" | "destructive"> = {
@@ -225,7 +269,11 @@ function formatJobType(jobType: string) {
 const blogStatusVariant: Record<string, "warning" | "success" | "outline" | "destructive"> = {
   draft: "outline",
   approved: "warning",
-  published: "success",
+  // "published" only ever means "created as a draft in the CMS" — not
+  // actually public yet, hence warning (needs the Go Live action) not
+  // success. "live" is the one that's genuinely done.
+  published: "warning",
+  live: "success",
   rejected: "outline",
   failed: "destructive",
 };
@@ -1362,6 +1410,291 @@ function ServerFileBrowser({ site }: { site: SeoSite }) {
   );
 }
 
+// Closes two more blueprint gaps: Google Sheets ("live command centre")
+// had no UI at all, and the weekly/monthly digest roll-up had no way to
+// trigger or view it either.
+// Module 39 — per-URL CMS image-to-WebP conversion. Paste a specific
+// page's URL, it resolves to the actual CMS post behind it, finds any
+// JPG/PNG <img src>/<img srcset> on that one page, converts each to
+// WebP, uploads it alongside the original (nothing deleted), and
+// rewrites just that page's content to point at the new file. Always
+// dry-runs first (default here too) so the report can be reviewed
+// before anything actually changes.
+function WebpBulkConvertCard({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  const [url, setUrl] = useState("");
+  const [report, setReport] = useState<BulkConvertReport | null>(null);
+  const [hasReviewedDryRun, setHasReviewedDryRun] = useState(false);
+
+  const dryRunMutation = useMutation({
+    mutationFn: () => runWebpConvertUrl(siteId, url.trim(), true),
+    onSuccess: (data) => {
+      setReport(data);
+      setHasReviewedDryRun(true);
+      if (data.error) toast.error(data.error);
+      else toast.success(`Found ${data.images_found} image(s) on this page.`);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Scan failed.")),
+  });
+
+  const runMutation = useMutation({
+    mutationFn: () => runWebpConvertUrl(siteId, url.trim(), false),
+    onSuccess: (data) => {
+      setReport(data);
+      setHasReviewedDryRun(false);
+      if (data.error) toast.error(data.error);
+      else toast.success(`Converted ${data.images_converted} image(s) on this page.`);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Conversion failed.")),
+  });
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <ImageIcon className="h-4 w-4 text-brand-500" />
+          Convert Page Images to WebP
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          Paste a specific page's URL to convert its JPG/PNG images to WebP and rewrite that page's content to use
+          them. Originals are never deleted, and the page is backed up first. Always scan (dry run) before
+          converting for real.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Input
+            value={url}
+            onChange={(e) => {
+              setUrl(e.target.value);
+              setHasReviewedDryRun(false);
+              setReport(null);
+            }}
+            placeholder="https://yoursite.com/some-page/"
+            className="max-w-md"
+          />
+          <Button size="sm" variant="outline" onClick={() => dryRunMutation.mutate()} disabled={dryRunMutation.isPending || !url.trim()}>
+            {dryRunMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+            Scan (dry run)
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => {
+              if (window.confirm("Convert images on this page for real? This uploads new WebP files and rewrites its content (originals are kept, and a backup is saved first).")) {
+                runMutation.mutate();
+              }
+            }}
+            disabled={runMutation.isPending || !hasReviewedDryRun}
+          >
+            {runMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            Convert for real
+          </Button>
+        </div>
+        {!hasReviewedDryRun && !runMutation.isPending && (
+          <p className="mt-2 text-theme-xs text-gray-400">Scan this URL first — "Convert for real" unlocks once you've reviewed it.</p>
+        )}
+        {report && (
+          <div className="mt-4 space-y-3">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-md border border-gray-100 p-3 dark:border-gray-800">
+                <p className="text-theme-xs text-gray-400">Posts scanned</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">{report.posts_scanned}</p>
+              </div>
+              <div className="rounded-md border border-gray-100 p-3 dark:border-gray-800">
+                <p className="text-theme-xs text-gray-400">Images found</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">{report.images_found}</p>
+              </div>
+              <div className="rounded-md border border-gray-100 p-3 dark:border-gray-800">
+                <p className="text-theme-xs text-gray-400">{report.dry_run ? "Already converted" : "Converted"}</p>
+                <p className="text-lg font-semibold text-success-600 dark:text-success-400">
+                  {report.dry_run ? report.images_cached : report.images_converted}
+                </p>
+              </div>
+              <div className="rounded-md border border-gray-100 p-3 dark:border-gray-800">
+                <p className="text-theme-xs text-gray-400">{report.dry_run ? "Posts affected" : "Posts updated"}</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                  {report.dry_run ? report.posts_with_images : report.posts_updated}
+                </p>
+              </div>
+            </div>
+            {report.images_failed > 0 && (
+              <p className="text-theme-xs text-error-500">{report.images_failed} image(s) failed — see details below.</p>
+            )}
+            {report.details.length > 0 && (
+              <ul className="space-y-1.5">
+                {report.details.map((d) => (
+                  <li key={d.post_id} className="rounded-md border border-gray-100 p-2 text-theme-xs dark:border-gray-800">
+                    <span className="font-medium text-gray-700 dark:text-gray-300">{d.title}</span>{" "}
+                    <span className="text-gray-400">
+                      — {d.image_urls_found.length} image(s)
+                      {!report.dry_run && d.updated && ", updated"}
+                      {!report.dry_run && d.error && `, error: ${d.error}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ReportingPanel({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  const [rollupPeriod, setRollupPeriod] = useState<"weekly" | "monthly">("weekly");
+  const [rollup, setRollup] = useState<DigestRollup | null>(null);
+  const [sheets, setSheets] = useState<SheetsStatus | null>(null);
+  const [shareEmail, setShareEmail] = useState("");
+  const [sheetUrl, setSheetUrl] = useState("");
+
+  const rollupsQuery = useQuery({
+    queryKey: ["seo", "digest-rollups", siteId, rollupPeriod],
+    queryFn: () => getDigestRollups(siteId, rollupPeriod),
+  });
+  const latestSaved = rollupsQuery.data?.[0] ?? null;
+
+  const checkSheetsMutation = useMutation({
+    mutationFn: getSheetsStatus,
+    onSuccess: (data) => {
+      setSheets(data);
+      if (!data.configured) toast.error(data.error || "Sheets not configured yet.");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Could not reach the Sheets API.")),
+  });
+
+  const rollupMutation = useMutation({
+    mutationFn: () => generateDigestRollup(siteId, rollupPeriod),
+    onSuccess: (data) => {
+      setRollup(data);
+      toast.success(`${rollupPeriod === "weekly" ? "Weekly" : "Monthly"} roll-up generated.`);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Roll-up generation failed.")),
+  });
+
+  const shareMutation = useMutation({
+    mutationFn: () => shareSheets(shareEmail.trim()),
+    onSuccess: (data) => {
+      setSheets(data);
+      if (data.configured) toast.success(`Shared with ${shareEmail.trim()}.`);
+      else toast.error(data.error || "Sharing failed.");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Sharing failed.")),
+  });
+
+  // Service accounts created after April 2025 have zero Drive storage
+  // quota and can't create their own spreadsheet — this is the real
+  // path: paste a sheet you created yourself and shared with the
+  // service account as Editor.
+  const adoptMutation = useMutation({
+    mutationFn: () => adoptSheets(sheetUrl.trim()),
+    onSuccess: (data) => {
+      setSheets(data);
+      if (data.configured) toast.success("Connected — tabs and headers set up.");
+      else toast.error(data.error || "Could not connect to that sheet.");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Could not connect to that sheet.")),
+  });
+
+  const shown = rollup ?? latestSaved;
+
+  return (
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <Card>
+        <CardContent className="p-6">
+          <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <History className="h-4 w-4 text-brand-500" />
+            Google Sheets command centre
+          </h2>
+          <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+            A live spreadsheet the app writes rank/CWV/content/issue/link/digest data to automatically. Google
+            gives service accounts no Drive storage of their own, so create a blank sheet yourself, share it with{" "}
+            <span className="font-mono">workpulse-seo-agent@workpulse-ai-506706.iam.gserviceaccount.com</span> as
+            Editor, and paste its link below — the app sets up the tabs for you.
+          </p>
+          <div className="mb-3 flex flex-wrap gap-2">
+            <Input
+              value={sheetUrl}
+              onChange={(e) => setSheetUrl(e.target.value)}
+              placeholder="Paste your Google Sheet URL or ID"
+              className="max-w-sm"
+            />
+            <Button size="sm" onClick={() => adoptMutation.mutate()} disabled={adoptMutation.isPending || !sheetUrl.trim()}>
+              {adoptMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Connect
+            </Button>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => checkSheetsMutation.mutate()} disabled={checkSheetsMutation.isPending}>
+            {checkSheetsMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            {sheets?.configured ? "Refresh" : "Check status"}
+          </Button>
+          {sheets?.configured && sheets.url && (
+            <a
+              href={sheets.url}
+              target="_blank"
+              rel="noreferrer"
+              className="ml-2 text-theme-sm text-brand-600 underline dark:text-brand-400"
+            >
+              Open spreadsheet
+            </a>
+          )}
+          {sheets && !sheets.configured && (
+            <p className="mt-2 text-theme-xs text-error-500">{sheets.error}</p>
+          )}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Input
+              value={shareEmail}
+              onChange={(e) => setShareEmail(e.target.value)}
+              placeholder="Share with a different Google account email"
+              className="max-w-xs"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => shareMutation.mutate()}
+              disabled={shareMutation.isPending || !shareEmail.trim()}
+            >
+              {shareMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Share
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-6">
+          <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <Sparkles className="h-4 w-4 text-brand-500" />
+            Weekly / monthly roll-up
+          </h2>
+          <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+            Trend summary across this period's daily digests. Also runs automatically (Monday mornings / 1st of
+            month).
+          </p>
+          <div className="mb-3 flex gap-2">
+            <Button size="sm" variant={rollupPeriod === "weekly" ? "default" : "outline"} onClick={() => { setRollupPeriod("weekly"); setRollup(null); }}>
+              Weekly
+            </Button>
+            <Button size="sm" variant={rollupPeriod === "monthly" ? "default" : "outline"} onClick={() => { setRollupPeriod("monthly"); setRollup(null); }}>
+              Monthly
+            </Button>
+            <Button size="sm" onClick={() => rollupMutation.mutate()} disabled={rollupMutation.isPending}>
+              {rollupMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Generate now
+            </Button>
+          </div>
+          {rollupsQuery.isLoading ? (
+            <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
+          ) : shown ? (
+            <p className="whitespace-pre-line text-theme-sm text-gray-700 dark:text-gray-300">{shown.narrative}</p>
+          ) : (
+            <p className="text-theme-sm text-gray-400">No roll-up generated yet.</p>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function OverviewTab({ site }: { site: SeoSite }) {
   const siteId = site.id;
   const queryClient = useQueryClient();
@@ -1434,6 +1767,14 @@ function OverviewTab({ site }: { site: SeoSite }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] }),
   });
 
+  const resolveMutation = useMutation({
+    mutationFn: (issueId: number) => resolveTechnicalIssue(issueId),
+    onSuccess: () => {
+      toast.success("Marked as fixed.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
+    },
+  });
+
   const generateFixMutation = useMutation({
     mutationFn: (issueId: number) => generateTechnicalIssueFix(issueId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] }),
@@ -1452,6 +1793,15 @@ function OverviewTab({ site }: { site: SeoSite }) {
         toast.error(result.fix_error || "Applying the fix failed.");
       }
       queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
+    },
+  });
+
+  const aiSuggestionMutation = useMutation({
+    mutationFn: (issueId: number) => generateTechnicalIssueAiSuggestion(issueId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] }),
+    onError: (err) => {
+      const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
+      toast.error(detail || "Could not generate an AI suggestion for this issue.");
     },
   });
 
@@ -1548,7 +1898,15 @@ function OverviewTab({ site }: { site: SeoSite }) {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <SearchConsolePanel siteId={siteId} />
         <AnalyticsPanel siteId={siteId} />
+        <PageCtrPanel siteId={siteId} />
+        <RankAlertsPanel siteId={siteId} />
       </div>
+
+      <MetaRewriteQueuePanel siteId={siteId} />
+
+      <ReportingPanel siteId={siteId} />
+
+      <WebpBulkConvertCard siteId={siteId} />
 
       <JobHistoryPanel jobs={jobs} loading={jobsQuery.isLoading} />
 
@@ -1560,7 +1918,7 @@ function OverviewTab({ site }: { site: SeoSite }) {
               Technical Issues
             </h2>
             <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-white/5">
-              {(["pending", "approved", "rejected", "all"] as IssueFilter[]).map((f) => (
+              {(["pending", "approved", "rejected", "resolved", "all"] as IssueFilter[]).map((f) => (
                 <button
                   key={f}
                   onClick={() => setIssueFilter(f)}
@@ -1605,12 +1963,43 @@ function OverviewTab({ site }: { site: SeoSite }) {
                     Suggested fix: {issue.suggested_fix}
                   </p>
 
-                  {REMEDIABLE_RULES.includes(issue.rule) ? (
+                  <div className="mt-2 rounded-md border border-dashed border-gray-200 p-3 dark:border-gray-700">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="flex items-center gap-1 text-theme-xs font-medium text-gray-500 dark:text-gray-400">
+                        <Sparkles className="h-3.5 w-3.5 text-brand-500" />
+                        Ollama suggestion
+                      </p>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => aiSuggestionMutation.mutate(issue.id)}
+                        disabled={aiSuggestionMutation.isPending}
+                      >
+                        {aiSuggestionMutation.isPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Sparkles className="h-3.5 w-3.5" />
+                        )}
+                        {issue.ai_suggestion ? "Regenerate suggestion" : "Get AI suggestion"}
+                      </Button>
+                    </div>
+                    {issue.ai_suggestion && (
+                      <p className="mt-2 whitespace-pre-line text-theme-sm text-gray-700 dark:text-gray-300">
+                        {issue.ai_suggestion}
+                      </p>
+                    )}
+                  </div>
+
+                  {REMEDIABLE_RULES.includes(issue.rule) || DETERMINISTIC_FIX_RULES.includes(issue.rule) ? (
                     <div className="mt-3 rounded-md bg-gray-50 p-3 dark:bg-white/5">
                       {issue.fix_value ? (
                         <>
                           <p className="text-theme-xs font-medium text-gray-500 dark:text-gray-400">
-                            {issue.fix_applied ? "Applied to the live site:" : "Ready to apply:"}
+                            {issue.fix_applied
+                              ? "Applied to the live site:"
+                              : REMEDIABLE_RULES.includes(issue.rule)
+                                ? "Ready to apply:"
+                                : "Exact fix — copy this into your CMS/theme:"}
                           </p>
                           <p className="mt-1 break-all text-theme-sm text-gray-800 dark:text-gray-200">
                             {issue.fix_value}
@@ -1631,7 +2020,7 @@ function OverviewTab({ site }: { site: SeoSite }) {
                         </p>
                       )}
                       {!issue.fix_applied && (
-                        <div className="mt-2 flex flex-wrap gap-2">
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
                           <Button
                             size="sm"
                             variant="outline"
@@ -1645,7 +2034,7 @@ function OverviewTab({ site }: { site: SeoSite }) {
                             )}
                             {issue.fix_value ? "Regenerate fix" : "Generate fix"}
                           </Button>
-                          {issue.fix_value && issue.status === "approved" && (
+                          {issue.fix_value && REMEDIABLE_RULES.includes(issue.rule) && issue.status === "approved" && (
                             <Button size="sm" onClick={() => applyFixMutation.mutate(issue.id)} disabled={applyFixMutation.isPending}>
                               {applyFixMutation.isPending ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1655,30 +2044,53 @@ function OverviewTab({ site }: { site: SeoSite }) {
                               Apply to website
                             </Button>
                           )}
-                          {issue.fix_value && issue.status !== "approved" && (
+                          {issue.fix_value && REMEDIABLE_RULES.includes(issue.rule) && issue.status !== "approved" && (
                             <span className="self-center text-theme-xs text-gray-400">Approve this issue to apply the fix</span>
+                          )}
+                          {issue.fix_value && DETERMINISTIC_FIX_RULES.includes(issue.rule) && (
+                            <span className="self-center text-theme-xs text-gray-400">
+                              No CMS field to write this to automatically — paste it in yourself, then mark it fixed below.
+                            </span>
                           )}
                         </div>
                       )}
                     </div>
                   ) : (
                     <p className="mt-2 text-theme-xs text-gray-400">
-                      Structural issue — needs a manual fix, can't be auto-applied.
+                      Structural issue — no exact auto-generated value. Use the Ollama suggestion above, fix it in your
+                      CMS/theme, then mark it fixed below.
                     </p>
                   )}
 
-                  {issue.status === "pending" && (
-                    <div className="mt-3 flex gap-2">
-                      <Button size="sm" variant="outline" onClick={() => approveMutation.mutate(issue.id)}>
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        Approve
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {issue.status === "pending" && (
+                      <>
+                        <Button size="sm" variant="outline" onClick={() => approveMutation.mutate(issue.id)}>
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          Approve
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => rejectMutation.mutate(issue.id)}>
+                          <XCircle className="h-3.5 w-3.5" />
+                          Reject
+                        </Button>
+                      </>
+                    )}
+                    {(issue.status === "pending" || issue.status === "approved") && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => resolveMutation.mutate(issue.id)}
+                        disabled={resolveMutation.isPending}
+                      >
+                        {resolveMutation.isPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                        )}
+                        Mark as fixed manually
                       </Button>
-                      <Button size="sm" variant="outline" onClick={() => rejectMutation.mutate(issue.id)}>
-                        <XCircle className="h-3.5 w-3.5" />
-                        Reject
-                      </Button>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -1863,6 +2275,209 @@ function AnalyticsPanel({ siteId }: { siteId: number }) {
   );
 }
 
+function PageCtrPanel({ siteId }: { siteId: number }) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  const query = useQuery({ queryKey: ["seo", "gsc-pages", siteId], queryFn: () => getGscPages(siteId, 10) });
+  const rows = query.data ?? [];
+
+  const pullMutation = useMutation({
+    mutationFn: () => pullGscPages(siteId, 28),
+    onSuccess: () => {
+      toast.success("Pulled page-level Search Console data.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "gsc-pages", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "GSC page pull failed — check GSC_SITE_URL/service account access.")),
+  });
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <BarChart3 className="h-4 w-4 text-brand-500" />
+            CTR by Page
+          </h2>
+          <Button size="sm" variant="outline" onClick={() => pullMutation.mutate()} disabled={pullMutation.isPending}>
+            {pullMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            Pull now
+          </Button>
+        </div>
+        {query.isLoading ? (
+          <div className="flex h-20 items-center justify-center text-gray-400">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </div>
+        ) : rows.length === 0 ? (
+          <p className="text-theme-sm text-gray-400">
+            No page-level Search Console data yet — click "Pull now" or wait for the daily automated cycle.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {rows.map((row: GscPageRow) => (
+              <div key={row.id} className="flex items-center justify-between gap-3 text-theme-sm">
+                <span className="truncate text-gray-700 dark:text-gray-300">{row.page}</span>
+                <span className="shrink-0 text-theme-xs text-gray-400">
+                  {row.clicks} clicks · {row.impressions} impr. · {row.ctr != null ? `${(row.ctr * 100).toFixed(1)}% CTR` : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function RankAlertsPanel({ siteId }: { siteId: number }) {
+  const query = useQuery({ queryKey: ["seo", "rank-alerts", siteId], queryFn: () => getRankAlerts(siteId) });
+  const changes = query.data ?? [];
+  const drops = changes.filter((c) => c.previous_position <= 10 && c.current_position > 10);
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <TrendingDown className="h-4 w-4 text-brand-500" />
+          Rank Alerts
+        </h2>
+        <p className="mb-4 text-theme-sm text-gray-500 dark:text-gray-400">
+          Position changes vs. the last Search Console pull.
+        </p>
+        {query.isLoading ? (
+          <div className="flex h-20 items-center justify-center text-gray-400">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </div>
+        ) : changes.length === 0 ? (
+          <p className="text-theme-sm text-gray-400">
+            Not enough data yet — needs at least two days of pulled Search Console data to compare.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {drops.length > 0 && (
+              <div className="mb-3 space-y-2">
+                {drops.map((c: RankChange) => (
+                  <div
+                    key={`drop-${c.query}`}
+                    className="flex items-center justify-between gap-3 rounded-lg border border-error-200 bg-error-50 p-3 text-theme-sm dark:border-error-500/30 dark:bg-error-500/10"
+                  >
+                    <span className="truncate text-gray-800 dark:text-gray-200">{c.query}</span>
+                    <Badge variant="destructive">
+                      fell out of top 10 ({c.previous_position.toFixed(0)} → {c.current_position.toFixed(0)})
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            )}
+            {changes
+              .filter((c) => !drops.includes(c))
+              .map((c: RankChange) => (
+                <div key={c.query} className="flex items-center justify-between gap-3 text-theme-sm">
+                  <span className="truncate text-gray-700 dark:text-gray-300">{c.query}</span>
+                  <span className="shrink-0 flex items-center gap-1 text-theme-xs text-gray-400">
+                    {c.delta < 0 ? (
+                      <TrendingUp className="h-3.5 w-3.5 text-success-500" />
+                    ) : c.delta > 0 ? (
+                      <TrendingDown className="h-3.5 w-3.5 text-warning-500" />
+                    ) : null}
+                    {c.previous_position.toFixed(0)} → {c.current_position.toFixed(0)}
+                  </span>
+                </div>
+              ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+const metaRewriteStatusVariant: Record<string, "warning" | "success" | "outline"> = {
+  queued: "warning",
+  approved: "success",
+  rejected: "outline",
+};
+
+function MetaRewriteQueuePanel({ siteId }: { siteId: number }) {
+  const queryClient = useQueryClient();
+  const query = useQuery({ queryKey: ["seo", "meta-rewrites", siteId], queryFn: () => getMetaRewrites(siteId) });
+  const items = query.data ?? [];
+
+  const approveMutation = useMutation({
+    mutationFn: (id: number) => approveMetaRewrite(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "meta-rewrites", siteId] }),
+  });
+  const rejectMutation = useMutation({
+    mutationFn: (id: number) => rejectMetaRewrite(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "meta-rewrites", siteId] }),
+  });
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <Sparkles className="h-4 w-4 text-brand-500" />
+          Meta Rewrite Opportunities
+        </h2>
+        <p className="mb-4 text-theme-sm text-gray-500 dark:text-gray-400">
+          Pages with real search demand (high impressions) but a snippet that isn't earning clicks (low CTR) —
+          AI-drafted rewrites, never auto-published. Review and apply the ones you approve manually.
+        </p>
+        {query.isLoading ? (
+          <div className="flex h-20 items-center justify-center text-gray-400">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </div>
+        ) : items.length === 0 ? (
+          <p className="text-theme-sm text-gray-400">
+            No opportunities queued yet — found automatically once a page has enough impressions and low enough CTR
+            during the daily cycle.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {items.map((item: MetaRewrite) => (
+              <div key={item.id} className="rounded-lg border border-gray-100 p-4 dark:border-gray-800">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={metaRewriteStatusVariant[item.status] ?? "outline"}>{item.status}</Badge>
+                  <span className="text-theme-xs text-gray-400">
+                    {item.impressions} impr. · {item.clicks} clicks ·{" "}
+                    {item.ctr != null ? `${(item.ctr * 100).toFixed(1)}% CTR` : "—"} · pos{" "}
+                    {item.position != null ? item.position.toFixed(1) : "—"}
+                  </span>
+                </div>
+                <p className="mt-2 break-all text-theme-sm font-medium text-gray-900 dark:text-white">{item.url}</p>
+                {item.suggested_title ? (
+                  <div className="mt-2 space-y-1">
+                    <p className="text-theme-sm text-gray-700 dark:text-gray-300">
+                      <span className="text-gray-400">Suggested title: </span>
+                      {item.suggested_title}
+                    </p>
+                    <p className="text-theme-sm text-gray-700 dark:text-gray-300">
+                      <span className="text-gray-400">Suggested description: </span>
+                      {item.suggested_description}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="mt-2 text-theme-xs text-gray-400">No AI draft yet for this item.</p>
+                )}
+                {item.status === "queued" && (
+                  <div className="mt-3 flex gap-2">
+                    <Button size="sm" variant="outline" onClick={() => approveMutation.mutate(item.id)}>
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      Approve
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => rejectMutation.mutate(item.id)}>
+                      <XCircle className="h-3.5 w-3.5" />
+                      Reject
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function SocialTab({ siteId }: { siteId: number }) {
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -1909,6 +2524,28 @@ function SocialTab({ siteId }: { siteId: number }) {
       queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
     },
   });
+
+  // Instagram has no text-only post type — this is what actually lets
+  // an Instagram draft become publishable, without requiring a human to
+  // hand-paste an image URL from somewhere else first.
+  const imageMutation = useMutation({
+    mutationFn: (id: number) => generateSocialPostImage(id),
+    onSuccess: () => {
+      toast.success("Image generated and uploaded to the site.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Image generation failed.")),
+  });
+
+  const uploadImageMutation = useMutation({
+    mutationFn: ({ id, file }: { id: number; file: File }) => uploadSocialPostImage(id, file),
+    onSuccess: () => {
+      toast.success("Image uploaded to the site.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Image upload failed.")),
+  });
+  const uploadInputRefs = useRef<Record<number, HTMLInputElement | null>>({});
 
   const togglePlatform = (p: SocialPlatform) => {
     setSelectedPlatforms((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
@@ -2022,7 +2659,7 @@ function SocialTab({ siteId }: { siteId: number }) {
                   )}
                   {post.error && <p className="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">{post.error}</p>}
                   {post.status === "draft" && (
-                    <div className="mt-3 flex gap-2">
+                    <div className="mt-3 flex flex-wrap gap-2">
                       <Button size="sm" variant="outline" onClick={() => approveMutation.mutate(post.id)}>
                         <CheckCircle2 className="h-3.5 w-3.5" />
                         Approve
@@ -2030,6 +2667,37 @@ function SocialTab({ siteId }: { siteId: number }) {
                       <Button size="sm" variant="outline" onClick={() => rejectMutation.mutate(post.id)}>
                         <XCircle className="h-3.5 w-3.5" />
                         Reject
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => imageMutation.mutate(post.id)}
+                        disabled={imageMutation.isPending}
+                      >
+                        {imageMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}
+                        {post.image_url ? "Regenerate image" : "Generate image"}
+                      </Button>
+                      <input
+                        ref={(el) => {
+                          uploadInputRefs.current[post.id] = el;
+                        }}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) uploadImageMutation.mutate({ id: post.id, file });
+                          e.target.value = "";
+                        }}
+                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => uploadInputRefs.current[post.id]?.click()}
+                        disabled={uploadImageMutation.isPending}
+                      >
+                        {uploadImageMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}
+                        Upload image
                       </Button>
                     </div>
                   )}
@@ -2054,16 +2722,254 @@ function SocialTab({ siteId }: { siteId: number }) {
   );
 }
 
+// Image generation, OG tags, interlink suggestions, and FAQ generation
+// all had a working backend but no frontend UI at all — this panel is
+// the fix, attached inline to each blog post card rather than a
+// separate tab, since every one of these acts on one specific post.
+function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost }) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  const [imagePrompt, setImagePrompt] = useState("");
+  const [ogTags, setOgTags] = useState<OgTags | null>(null);
+  const [related, setRelated] = useState<RelatedPage[] | null>(null);
+  const [faqs, setFaqs] = useState<FaqPair[] | null>(null);
+
+  const imageMutation = useMutation({
+    mutationFn: () => generateBlogPostImage(post.id, imagePrompt.trim() || undefined),
+    onSuccess: () => {
+      toast.success("Image generated and uploaded to the site.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Image generation failed.")),
+  });
+
+  const uploadImageMutation = useMutation({
+    mutationFn: (file: File) => uploadBlogPostImage(post.id, file),
+    onSuccess: () => {
+      toast.success("Image uploaded to the site.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Image upload failed.")),
+  });
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+
+  const ogMutation = useMutation({
+    mutationFn: () =>
+      generateOgTags({
+        site_id: siteId,
+        page_url: post.cms_post_link || `draft:${post.id}`,
+        page_title: post.title,
+        content_excerpt: post.excerpt || post.content.slice(0, 500),
+      }),
+    onSuccess: (data) => {
+      setOgTags(data);
+      toast.success("OG tags generated.");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "OG tag generation failed.")),
+  });
+
+  const interlinkMutation = useMutation({
+    mutationFn: () =>
+      suggestInterlinks({ site_id: siteId, url: post.cms_post_link || `draft:${post.id}`, title: post.title, content: post.content }),
+    onSuccess: (data) => {
+      setRelated(data);
+      if (data.length === 0) toast.info("No related pages found yet — publish more posts first so there's something to link to.");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Interlink suggestion failed.")),
+  });
+
+  const faqMutation = useMutation({
+    mutationFn: () => generateFaq({ site_id: siteId, page_title: post.title }),
+    onSuccess: (data) => {
+      setFaqs(data);
+      toast.success("FAQ generated.");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "FAQ generation failed.")),
+  });
+
+  // Publishing already does this automatically — this is for a post
+  // that was edited directly in the CMS afterward, so future posts'
+  // interlink suggestions pick up the change.
+  const reindexMutation = useMutation({
+    mutationFn: () =>
+      indexPageForInterlinks({ site_id: siteId, url: post.cms_post_link || `draft:${post.id}`, title: post.title, content: post.content }),
+    onSuccess: () => toast.success("Indexed for interlinking — future posts can now link to this one."),
+    onError: (err) => toast.error(serverErrorDetail(err, "Indexing failed.")),
+  });
+
+  return (
+    <div className="mt-3 space-y-3 rounded-md border border-gray-100 bg-gray-50 p-3 dark:border-gray-800 dark:bg-white/5">
+      <div>
+        <p className="mb-1.5 text-theme-xs font-medium text-gray-500 dark:text-gray-400">Featured image</p>
+        {post.image_url && (
+          <a href={post.image_url} target="_blank" rel="noreferrer" className="mb-1.5 block truncate text-theme-xs text-brand-600 underline dark:text-brand-400">
+            {post.image_url}
+          </a>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <Input
+            value={imagePrompt}
+            onChange={(e) => setImagePrompt(e.target.value)}
+            placeholder="Image prompt (optional — defaults to the post title)"
+            className="max-w-xs"
+          />
+          <Button size="sm" variant="outline" onClick={() => imageMutation.mutate()} disabled={imageMutation.isPending}>
+            {imageMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}
+            {post.image_url ? "Regenerate image" : "Generate image"}
+          </Button>
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) uploadImageMutation.mutate(file);
+              e.target.value = "";
+            }}
+          />
+          <Button size="sm" variant="outline" onClick={() => uploadInputRef.current?.click()} disabled={uploadImageMutation.isPending}>
+            {uploadImageMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}
+            Upload image
+          </Button>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="outline" onClick={() => ogMutation.mutate()} disabled={ogMutation.isPending}>
+          {ogMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          Generate OG tags
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => interlinkMutation.mutate()} disabled={interlinkMutation.isPending}>
+          {interlinkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          Suggest interlinks
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => faqMutation.mutate()} disabled={faqMutation.isPending}>
+          {faqMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          Generate FAQ
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => reindexMutation.mutate()} disabled={reindexMutation.isPending}>
+          {reindexMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          Index for interlinking
+        </Button>
+      </div>
+
+      {ogTags && (
+        <div className="rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
+          <p><span className="text-gray-400">og:title — </span>{ogTags.og_title}</p>
+          <p className="mt-1"><span className="text-gray-400">og:description — </span>{ogTags.og_description}</p>
+        </div>
+      )}
+
+      {related && related.length > 0 && (
+        <ul className="rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
+          {related.map((p) => (
+            <li key={p.url} className="truncate">
+              <a href={p.url} target="_blank" rel="noreferrer" className="text-brand-600 underline dark:text-brand-400">
+                {p.title}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {faqs && faqs.length > 0 && (
+        <div className="space-y-2 rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
+          {faqs.map((f, idx) => (
+            <div key={idx}>
+              <p className="font-medium text-gray-700 dark:text-gray-300">{f.question}</p>
+              <p className="text-gray-500 dark:text-gray-400">{f.answer}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The blueprint's "Content Word Limit + Structure" feature had a real
+// backend (ai/seo/content_structure.py, /api/seo/content/analyze) but
+// no way to use it on anything except a post this app itself generated
+// — this is a general-purpose tool for any content, e.g. something
+// written directly in the CMS.
+function ContentStructureChecker() {
+  const toast = useToast();
+  const [content, setContent] = useState("");
+  const [keyword, setKeyword] = useState("");
+  const [report, setReport] = useState<StructureReport | null>(null);
+
+  const analyzeMutation = useMutation({
+    mutationFn: () => analyzeContentStructure({ content_html: content, primary_keyword: keyword.trim() || undefined }),
+    onSuccess: (data) => setReport(data),
+    onError: (err) => toast.error(serverErrorDetail(err, "Analysis failed.")),
+  });
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <CaseSensitive className="h-4 w-4 text-brand-500" />
+          Content structure checker
+        </h2>
+        <p className="mb-4 text-theme-sm text-gray-500 dark:text-gray-400">
+          Paste any HTML content (e.g. something written directly in the CMS) to check word count, heading
+          structure, and keyword usage against the same rules generated posts are held to.
+        </p>
+        <div className="space-y-3">
+          <div>
+            <Label htmlFor="structure-keyword">Primary keyword (optional)</Label>
+            <Input id="structure-keyword" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+          </div>
+          <div>
+            <Label htmlFor="structure-content">Content (HTML)</Label>
+            <RichTextEditor value={content} onChange={setContent} headings placeholder="Paste content here…" />
+          </div>
+          <Button onClick={() => analyzeMutation.mutate()} disabled={analyzeMutation.isPending || !content.trim()}>
+            {analyzeMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Analyze
+          </Button>
+        </div>
+        {report && (
+          <div className="mt-4 rounded-md border border-gray-100 bg-gray-50 p-4 dark:border-gray-800 dark:bg-white/5">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <Badge variant={report.passed ? "success" : "warning"}>{report.passed ? "Passed" : `${report.issues.length} issue(s)`}</Badge>
+              <span className="text-theme-xs text-gray-500 dark:text-gray-400">
+                {report.word_count} words · H1×{report.h1_count} · H2×{report.h2_count} · H3×{report.h3_count}
+              </span>
+            </div>
+            {report.issues.length > 0 && (
+              <ul className="space-y-0.5">
+                {report.issues.map((issue, idx) => (
+                  <li key={idx} className="text-theme-xs text-gray-500 dark:text-gray-400">
+                    <Badge variant={issue.severity === "error" ? "destructive" : "warning"} className="mr-1.5">
+                      {issue.severity}
+                    </Badge>
+                    {issue.message}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function BlogTab({ siteId }: { siteId: number }) {
   const queryClient = useQueryClient();
   const toast = useToast();
   const [topic, setTopic] = useState("");
   const [primaryKeyword, setPrimaryKeyword] = useState("");
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [seoToolsId, setSeoToolsId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [editExcerpt, setEditExcerpt] = useState("");
   const [editContent, setEditContent] = useState("");
+  const [editSlug, setEditSlug] = useState("");
+  const [editTags, setEditTags] = useState("");
+  const [editCategories, setEditCategories] = useState("");
 
   const postsQuery = useQuery({ queryKey: ["seo", "blog", siteId], queryFn: () => getBlogPosts(siteId) });
   const posts = postsQuery.data ?? [];
@@ -2073,11 +2979,27 @@ function BlogTab({ siteId }: { siteId: number }) {
     setEditTitle(post.title);
     setEditExcerpt(post.excerpt ?? "");
     setEditContent(post.content);
+    setEditSlug(post.slug ?? "");
+    setEditTags(post.tags ? (JSON.parse(post.tags) as string[]).join(", ") : "");
+    setEditCategories(post.categories ? (JSON.parse(post.categories) as string[]).join(", ") : "");
     setExpandedId(post.id);
   };
 
+  const splitCsv = (value: string) =>
+    value
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
   const updateMutation = useMutation({
-    mutationFn: (postId: number) => updateBlogPost(postId, { title: editTitle, excerpt: editExcerpt, content: editContent }),
+    mutationFn: async (postId: number) => {
+      await updateBlogPost(postId, { title: editTitle, excerpt: editExcerpt, content: editContent });
+      await updateBlogPostTaxonomy(postId, {
+        slug: editSlug.trim() || undefined,
+        tags: splitCsv(editTags),
+        categories: splitCsv(editCategories),
+      });
+    },
     onSuccess: () => {
       toast.success("Draft updated.");
       setEditingId(null);
@@ -2107,9 +3029,21 @@ function BlogTab({ siteId }: { siteId: number }) {
     mutationFn: (id: number) => publishBlogPost(id),
     onSuccess: (result) => {
       if (result.status === "published") {
-        toast.success("Created as a draft in your CMS — open it there to review and publish for real.");
+        toast.success('Created as a draft in your CMS — click "Go Live" when you\'re ready to publish it for real.');
       } else {
         toast.error(result.error || "Publishing to the CMS failed.");
+      }
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+  });
+
+  const goLiveMutation = useMutation({
+    mutationFn: (id: number) => goLiveBlogPost(id),
+    onSuccess: (result) => {
+      if (result.status === "live") {
+        toast.success("It's live on the website.");
+      } else {
+        toast.error(result.error || "Couldn't make it live — see the error on the card.");
       }
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
@@ -2190,7 +3124,7 @@ function BlogTab({ siteId }: { siteId: number }) {
                           rel="noreferrer"
                           className="text-theme-xs text-brand-600 underline dark:text-brand-400"
                         >
-                          View draft in CMS
+                          {post.status === "live" ? "View live post" : "View draft in CMS"}
                         </a>
                       )}
                     </div>
@@ -2209,17 +3143,40 @@ function BlogTab({ siteId }: { siteId: number }) {
                       </ul>
                     )}
                     {post.error && <p className="mt-1 text-theme-xs text-red-500">{post.error}</p>}
+                    {(post.slug || post.tags || post.categories) && (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-theme-xs text-gray-400">
+                        {post.slug && <span>/{post.slug}</span>}
+                        {post.tags &&
+                          (JSON.parse(post.tags) as string[]).map((tag) => (
+                            <Badge key={tag} variant="outline">
+                              {tag}
+                            </Badge>
+                          ))}
+                        {post.categories &&
+                          (JSON.parse(post.categories) as string[]).map((cat) => (
+                            <Badge key={cat} variant="warning">
+                              {cat}
+                            </Badge>
+                          ))}
+                      </div>
+                    )}
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <Button size="sm" variant="outline" onClick={() => setExpandedId(expandedId === post.id ? null : post.id)}>
                         {expandedId === post.id ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                         {expandedId === post.id ? "Hide content" : "View content"}
                       </Button>
+                      <Button size="sm" variant="outline" onClick={() => setSeoToolsId(seoToolsId === post.id ? null : post.id)}>
+                        <Sparkles className="h-3.5 w-3.5" />
+                        SEO Tools
+                      </Button>
+                      {(post.status === "draft" || post.status === "approved" || post.status === "failed") && (
+                        <Button size="sm" variant="outline" onClick={() => startEditing(post)}>
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit
+                        </Button>
+                      )}
                       {post.status === "draft" && (
                         <>
-                          <Button size="sm" variant="outline" onClick={() => startEditing(post)}>
-                            <Pencil className="h-3.5 w-3.5" />
-                            Edit
-                          </Button>
                           <Button size="sm" variant="outline" onClick={() => approveMutation.mutate(post.id)}>
                             <CheckCircle2 className="h-3.5 w-3.5" />
                             Approve
@@ -2234,6 +3191,12 @@ function BlogTab({ siteId }: { siteId: number }) {
                         <Button size="sm" onClick={() => publishMutation.mutate(post.id)} disabled={publishMutation.isPending}>
                           <Send className="h-3.5 w-3.5" />
                           {post.status === "failed" ? "Retry publish" : "Publish"}
+                        </Button>
+                      )}
+                      {post.status === "published" && (
+                        <Button size="sm" onClick={() => goLiveMutation.mutate(post.id)} disabled={goLiveMutation.isPending}>
+                          {goLiveMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Globe className="h-3.5 w-3.5" />}
+                          {post.error ? "Retry Go Live" : "Go Live"}
                         </Button>
                       )}
                     </div>
@@ -2254,6 +3217,35 @@ function BlogTab({ siteId }: { siteId: number }) {
                         <div>
                           <Label htmlFor={`blog-edit-content-${post.id}`}>Content</Label>
                           <RichTextEditor value={editContent} onChange={setEditContent} headings placeholder="Post body…" />
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          <div>
+                            <Label htmlFor={`blog-edit-slug-${post.id}`}>Slug</Label>
+                            <Input
+                              id={`blog-edit-slug-${post.id}`}
+                              value={editSlug}
+                              onChange={(e) => setEditSlug(e.target.value)}
+                              placeholder="url-friendly-slug"
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor={`blog-edit-tags-${post.id}`}>Tags</Label>
+                            <Input
+                              id={`blog-edit-tags-${post.id}`}
+                              value={editTags}
+                              onChange={(e) => setEditTags(e.target.value)}
+                              placeholder="comma, separated, tags"
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor={`blog-edit-categories-${post.id}`}>Categories</Label>
+                            <Input
+                              id={`blog-edit-categories-${post.id}`}
+                              value={editCategories}
+                              onChange={(e) => setEditCategories(e.target.value)}
+                              placeholder="comma, separated"
+                            />
+                          </div>
                         </div>
                         <div className="flex gap-2">
                           <Button
@@ -2277,6 +3269,7 @@ function BlogTab({ siteId }: { siteId: number }) {
                         />
                       )
                     )}
+                    {seoToolsId === post.id && <BlogSeoToolsPanel siteId={siteId} post={post} />}
                   </div>
                 );
               })}
@@ -2284,6 +3277,8 @@ function BlogTab({ siteId }: { siteId: number }) {
           )}
         </CardContent>
       </Card>
+
+      <ContentStructureChecker />
     </>
   );
 }
@@ -2923,6 +3918,236 @@ function SemrushBacklinkGapCard({ siteId }: { siteId: number }) {
   );
 }
 
+// Module 37 — "Semrush Magic Tool" on RapidAPI, verified live returning
+// real keyword research data (search volume, CPC, competition, intent,
+// monetization scoring) for hundreds of related keywords per seed
+// keyword. A different, working product from the broken one below.
+function KeywordResearchCard() {
+  const toast = useToast();
+  const [keyword, setKeyword] = useState("");
+  const [country, setCountry] = useState("us");
+  const [rows, setRows] = useState<KeywordResearchRow[] | null>(null);
+
+  const researchMutation = useMutation({
+    mutationFn: () => researchKeywords(keyword.trim(), "en", country),
+    onSuccess: (data) => {
+      setRows([...data].sort((a, b) => (b.avg_monthly_searches ?? 0) - (a.avg_monthly_searches ?? 0)));
+      toast.success(`Found ${data.length} related keyword(s).`);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Keyword research failed.")),
+  });
+
+  const shown = rows?.slice(0, 50) ?? [];
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <Search className="h-4 w-4 text-brand-500" />
+          Keyword Research
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          Search volume, CPC, competition, and intent for a seed keyword and hundreds of related/long-tail
+          variations. Third-party data source (not Semrush's own official API).
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Input
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            placeholder="Seed keyword, e.g. seo automation"
+            className="max-w-sm"
+          />
+          <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country" className="max-w-20" />
+          <Button size="sm" onClick={() => researchMutation.mutate()} disabled={researchMutation.isPending || !keyword.trim()}>
+            {researchMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Research
+          </Button>
+        </div>
+        {researchMutation.isPending && (
+          <p className="mt-2 text-theme-xs text-gray-400">This can take up to a minute…</p>
+        )}
+        {rows && (
+          <div className="mt-3 overflow-x-auto">
+            {rows.length > 50 && (
+              <p className="mb-2 text-theme-xs text-gray-400">Showing top 50 of {rows.length} by search volume.</p>
+            )}
+            <table className="w-full text-left">
+              <thead>
+                <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                  <th className="pb-2 pr-4 font-medium">Keyword</th>
+                  <th className="pb-2 pr-4 font-medium">Avg. Monthly Searches</th>
+                  <th className="pb-2 pr-4 font-medium">CPC</th>
+                  <th className="pb-2 pr-4 font-medium">Competition</th>
+                  <th className="pb-2 pr-4 font-medium">Intent</th>
+                  <th className="pb-2 font-medium">Monetization</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((row, idx) => (
+                  <tr key={idx} className="border-b border-gray-50 last:border-0 dark:border-gray-800/50">
+                    <td className="py-2 pr-4 text-theme-sm text-gray-700 dark:text-gray-300">{row.keyword}</td>
+                    <td className="py-2 pr-4 text-theme-sm text-gray-500 dark:text-gray-400">
+                      {row.avg_monthly_searches ?? "—"}
+                    </td>
+                    <td className="py-2 pr-4 text-theme-xs text-gray-400">
+                      {row.low_cpc ?? "—"}–{row.high_cpc ?? "—"}
+                    </td>
+                    <td className="py-2 pr-4">
+                      <Badge
+                        variant={
+                          row.competition_value === "low" ? "success" : row.competition_value === "high" ? "destructive" : "warning"
+                        }
+                      >
+                        {row.competition_value ?? "—"} {row.competition_index != null && `(${row.competition_index})`}
+                      </Badge>
+                    </td>
+                    <td className="py-2 pr-4 text-theme-xs text-gray-500 dark:text-gray-400">{row.intent.join(", ") || "—"}</td>
+                    <td className="py-2 text-theme-sm text-gray-500 dark:text-gray-400">
+                      {row.monetization_score != null ? row.monetization_score.toFixed(1) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// A THIRD distinct RapidAPI product/host (semrush-seo10), same
+// application/key as KeywordResearchCard above — verified live
+// returning real difficulty score, volume, competition, CPC, and a
+// monthly trend for one specific keyword (a quick single-keyword check,
+// complementing KeywordResearchCard's hundreds-of-related-keywords view).
+function KeywordDifficultyCard() {
+  const toast = useToast();
+  const [keyword, setKeyword] = useState("");
+  const [country, setCountry] = useState("us");
+  const [result, setResult] = useState<KeywordDifficulty | null>(null);
+
+  const checkMutation = useMutation({
+    mutationFn: () => checkKeywordDifficulty(keyword.trim(), country),
+    onSuccess: (data) => {
+      setResult(data);
+      toast.success("Difficulty check complete.");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Keyword difficulty check failed.")),
+  });
+
+  const difficulty = result?.keyword_difficulty ?? null;
+  const difficultyTone = difficulty == null ? "neutral" : difficulty < 34 ? "success" : difficulty < 67 ? "warning" : "error";
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <Gauge className="h-4 w-4 text-brand-500" />
+          Keyword Difficulty
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          Quick single-keyword check: difficulty score (0-100), volume, competition, and CPC.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="Keyword" className="max-w-sm" />
+          <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country" className="max-w-20" />
+          <Button size="sm" onClick={() => checkMutation.mutate()} disabled={checkMutation.isPending || !keyword.trim()}>
+            {checkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Check
+          </Button>
+        </div>
+        {result && (
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-md border border-gray-100 p-3 dark:border-gray-800">
+              <p className="text-theme-xs text-gray-400">Difficulty</p>
+              <p
+                className={`text-lg font-semibold ${
+                  difficultyTone === "success"
+                    ? "text-success-600 dark:text-success-400"
+                    : difficultyTone === "warning"
+                    ? "text-warning-600 dark:text-warning-400"
+                    : difficultyTone === "error"
+                    ? "text-error-600 dark:text-error-400"
+                    : "text-gray-400"
+                }`}
+              >
+                {difficulty ?? "—"}
+              </p>
+            </div>
+            <div className="rounded-md border border-gray-100 p-3 dark:border-gray-800">
+              <p className="text-theme-xs text-gray-400">Volume</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{result.volume ?? "—"}</p>
+            </div>
+            <div className="rounded-md border border-gray-100 p-3 dark:border-gray-800">
+              <p className="text-theme-xs text-gray-400">Competition</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{result.competition ?? "—"}</p>
+            </div>
+            <div className="rounded-md border border-gray-100 p-3 dark:border-gray-800">
+              <p className="text-theme-xs text-gray-400">CPC</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                {result.cpc_dollars != null ? `$${result.cpc_dollars}` : "—"}
+              </p>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Module 37 — a third-party RapidAPI keyword wrapper (NOT Semrush's own
+// official API), added as a cheaper alternative for keyword research.
+// Every live test this session returned the provider's own generic
+// error, not real data, so this shows the raw response as-is (unknown
+// shape) rather than a polished table — tighten this once a real
+// successful response has actually been observed.
+function RapidApiKeywordCard({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  const [country, setCountry] = useState("us");
+  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+
+  const checkMutation = useMutation({
+    mutationFn: () => checkRapidApiKeywords(siteId, country),
+    onSuccess: (data) => {
+      setResult(data);
+      toast.success("Response received — see raw result below.");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "RapidAPI keyword check failed.")),
+  });
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <Search className="h-4 w-4 text-brand-500" />
+          Domain Keyword Check (RapidAPI, currently unavailable)
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          A different third-party provider than the Keyword Research tool above. Live testing found this
+          provider's backend returning errors even for well-known domains — shown as raw data below in case
+          that changes.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country code" className="max-w-24" />
+          <Button size="sm" onClick={() => checkMutation.mutate()} disabled={checkMutation.isPending}>
+            {checkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Check
+          </Button>
+        </div>
+        {checkMutation.isPending && (
+          <p className="mt-2 text-theme-xs text-gray-400">This provider can take up to a minute to respond…</p>
+        )}
+        {result && (
+          <pre className="mt-3 max-h-64 overflow-auto rounded-md border border-gray-200 bg-gray-50 p-3 text-theme-xs text-gray-700 dark:border-gray-800 dark:bg-white/5 dark:text-gray-300">
+            {JSON.stringify(result, null, 2)}
+          </pre>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function BacklinksTab({ siteId, siteName, siteUrl }: { siteId: number; siteName: string; siteUrl: string }) {
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -2953,6 +4178,9 @@ function BacklinksTab({ siteId, siteName, siteUrl }: { siteId: number; siteName:
       <SemrushDomainOverview siteId={siteId} />
       <SemrushLinkExplorer siteId={siteId} />
       <SemrushBacklinkGapCard siteId={siteId} />
+      <KeywordResearchCard />
+      <KeywordDifficultyCard />
+      <RapidApiKeywordCard siteId={siteId} />
       <Card>
         <CardContent className="p-6">
         <div className="mb-4 flex items-center justify-between">

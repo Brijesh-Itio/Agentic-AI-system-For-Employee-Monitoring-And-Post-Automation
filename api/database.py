@@ -487,6 +487,36 @@ class SeoGscQuery(Base):
     created_at = Column(DateTime)
 
 
+class SeoGscPage(Base):
+    __tablename__ = "seo_gsc_pages"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    run_date = Column(Date, nullable=False)
+    page = Column(String, nullable=False)
+    clicks = Column(Integer, nullable=False, default=0)
+    impressions = Column(Integer, nullable=False, default=0)
+    ctr = Column(Float)
+    position = Column(Float)
+    created_at = Column(DateTime)
+
+
+class SeoMetaRewrite(Base):
+    __tablename__ = "seo_meta_rewrite_queue"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    url = Column(String, nullable=False)
+    run_date = Column(Date, nullable=False)
+    impressions = Column(Integer, nullable=False, default=0)
+    clicks = Column(Integer, nullable=False, default=0)
+    ctr = Column(Float)
+    position = Column(Float)
+    suggested_title = Column(String)
+    suggested_description = Column(String)
+    status = Column(String, nullable=False, default="queued")
+    created_at = Column(DateTime)
+    reviewed_at = Column(DateTime)
+
+
 class SeoGa4Page(Base):
     __tablename__ = "seo_ga4_pages"
     id = Column(Integer, primary_key=True)
@@ -527,6 +557,7 @@ class SeoTechnicalIssue(Base):
     fix_value = Column(String)
     fix_applied = Column(Integer, nullable=False, default=0)
     fix_error = Column(String)
+    ai_suggestion = Column(String)
 
 
 class SeoDailyDigest(Base):
@@ -534,6 +565,19 @@ class SeoDailyDigest(Base):
     id = Column(Integer, primary_key=True)
     site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
     run_date = Column(Date, nullable=False)
+    narrative = Column(String, nullable=False)
+    stats_json = Column(String, nullable=False)
+    slack_delivered = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime)
+
+
+class SeoDigestRollup(Base):
+    __tablename__ = "seo_digest_rollups"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("seo_sites.id", ondelete="CASCADE"), nullable=False)
+    period = Column(String, nullable=False)
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
     narrative = Column(String, nullable=False)
     stats_json = Column(String, nullable=False)
     slack_delivered = Column(Integer, nullable=False, default=0)
@@ -609,6 +653,10 @@ class SeoBlogPost(Base):
     structure_passed = Column(Integer)
     structure_issues_json = Column(String)
     status = Column(String, nullable=False, default="draft")
+    image_url = Column(String)
+    slug = Column(String)
+    tags = Column(String)
+    categories = Column(String)
     cms_post_id = Column(String)
     cms_post_link = Column(String)
     error = Column(String)

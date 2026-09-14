@@ -15,7 +15,20 @@ per active site per day, each independently idempotent via seo_job_runs
 (site_id, job_type, run_date) guarantee module 25 built and every manual
 endpoint in api/routes/seo.py already relies on):
 
-    technical_audit -> gsc_pull -> ga4_pull -> pagespeed_check -> digest
+    technical_audit -> gsc_pull -> gsc_pages_pull -> index_check -> ga4_pull
+        -> pagespeed_check -> meta_opportunity -> digest
+
+Module 39 adds three more nodes to that chain: gsc_pages_pull (page-
+dimension GSC data — "CTR by page"), index_check (automated Indexing
+Status & Crawl Monitoring, with an instant Slack alert the moment a
+previously-indexed URL drops out of Google's index), and
+meta_opportunity (high-impression/low-CTR pages get an AI-drafted
+title/description rewrite queued for human review). Keyword-level rank
+drops ("fell out of the top 10") are computed from the existing gsc_pull
+data by ai/seo/rank_alerts.py and surfacet in the daily digest rather than
+as their own pipeline node — no new external calls are needed for that
+one, just a diff against yesterday's stored pull, surfaced in the daily
+digest.
 
 Each node is graceful-degrade, matching every other external-call site in
 this codebase: a failure logs, marks that job_run failed, and the graph
@@ -53,10 +66,12 @@ from langgraph.graph import END, START, StateGraph
 from agent import database
 from ai.llm.factory import get_provider
 from ai.seo.daily_digest import generate_daily_digest
+from ai.seo.meta_rewrite_generator import generate_meta_rewrite
 from api.config import settings
-from automation.seo.crawler import crawl_site, fetch_sitemap_urls
+from automation.seo.crawler import crawl_site, fetch_page_title, fetch_sitemap_urls
 from automation.seo.ga4_client import fetch_traffic_by_page
-from automation.seo.gsc_client import fetch_search_analytics
+from automation.seo.gsc_client import fetch_search_analytics, fetch_search_analytics_by_page
+from automation.seo.indexing_client import fetch_url_inspection
 from automation.seo.pagespeed_client import fetch_page_speed
 from automation.seo.slack_notifier import send_slack_message
 from automation.seo.technical_audit import run_all_detectors
@@ -152,6 +167,22 @@ def _run_job(state: SeoAgentState, job_type: str, work) -> dict:
         return {"failed_tasks": state["failed_tasks"] + [job_type]}
 
 
+def _log_to_sheet(sheet_name: str, row: list) -> None:
+    """Module 36 — best-effort write to the Google Sheets command
+    centre (automation/seo/sheets_client.py). Never lets a Sheets
+    failure (API not yet enabled for the project, quota, network) fail
+    the pipeline step that's trying to log to it — this is a mirror of
+    the data already safely stored in this app's own database, not the
+    source of truth."""
+    try:
+        from automation.seo.sheets_client import append_row, get_or_create_spreadsheet
+
+        if get_or_create_spreadsheet():
+            append_row(sheet_name, row)
+    except Exception:
+        logger.exception("Sheets logging failed for %r — pipeline data is still safe in the app's own database", sheet_name)
+
+
 def technical_audit_node(state: SeoAgentState) -> dict:
     def work(site: dict, run_date):
         pages = crawl_site(site["base_url"], max_pages=100)
@@ -160,6 +191,11 @@ def technical_audit_node(state: SeoAgentState) -> dict:
         known_urls = fetch_sitemap_urls(site["base_url"])
         issues = run_all_detectors(pages, known_urls=known_urls, base_url=site["base_url"])
         database.upsert_technical_issues(site["id"], run_date, issues)
+        for issue in issues[:20]:
+            _log_to_sheet(
+                "Issue Log",
+                [run_date.isoformat(), site["name"], issue.rule, issue.severity, "pending", issue.message],
+            )
 
     return _run_job(state, "technical_audit", work)
 
@@ -171,8 +207,73 @@ def gsc_pull_node(state: SeoAgentState) -> dict:
         if rows is None:
             raise RuntimeError("fetch_search_analytics failed — see server logs")
         database.upsert_gsc_query_rows(site["id"], run_date, rows)
+        for row in rows[:20]:
+            _log_to_sheet(
+                "Rank Tracker",
+                [run_date.isoformat(), site["name"], row.query, row.clicks, row.impressions, row.position],
+            )
 
     return _run_job(state, "gsc_pull", work)
+
+
+def gsc_pages_pull_node(state: SeoAgentState) -> dict:
+    """The page-dimension half of the daily GSC pull — "CTR by page" and
+    per-URL position tracking, which the query-dimension pull above can't
+    give you. Feeds meta_opportunity_node below."""
+    def work(site: dict, run_date):
+        start_date = run_date - timedelta(days=7)
+        rows = fetch_search_analytics_by_page(start_date, run_date, site_url=_effective_gsc_url(site))
+        if rows is None:
+            raise RuntimeError("fetch_search_analytics_by_page failed — see server logs")
+        database.upsert_gsc_page_rows(site["id"], run_date, rows)
+        for row in rows[:20]:
+            _log_to_sheet(
+                "Page CTR Tracker",
+                [run_date.isoformat(), site["name"], row.page, row.clicks, row.impressions, row.ctr, row.position],
+            )
+
+    return _run_job(state, "gsc_pages_pull", work)
+
+
+def index_check_node(state: SeoAgentState) -> dict:
+    """Indexing Status & Crawl Monitoring, automated: inspects a capped
+    batch of this site's sitemap URLs via the URL Inspection API and
+    compares each one's coverage_state against what was stored on the
+    PREVIOUS inspection (agent.database.get_index_status, read before this
+    run's upsert overwrites it). A URL that was 'Submitted and indexed'
+    and no longer is gets an instant Slack notification — this is the one
+    alert in this module that doesn't wait for the daily digest, since a
+    page silently falling out of the index is worth knowing about the
+    moment it's detected, not hours later in a summary."""
+    def work(site: dict, run_date):
+        site_url = _effective_gsc_url(site)
+        urls = fetch_sitemap_urls(site["base_url"])[: settings.SEO_INDEX_CHECK_MAX_URLS]
+        if not urls:
+            raise RuntimeError("no sitemap URLs found to inspect")
+
+        for url in urls:
+            previous = database.get_index_status(site["id"], url)
+            result = fetch_url_inspection(url, site_url=site_url)
+            if result is None:
+                logger.warning("index_check: inspection failed for %s — skipping", url)
+                continue
+
+            was_indexed = previous is not None and previous["coverage_state"] == "Submitted and indexed"
+            is_indexed = result.coverage_state == "Submitted and indexed"
+            if was_indexed and not is_indexed:
+                send_slack_message(
+                    f"*Index alert — {site['name']}*\n"
+                    f"`{url}` has dropped out of Google's index.\n"
+                    f"New status: {result.coverage_state or 'unknown'}"
+                )
+                _log_to_sheet(
+                    "Index Alerts",
+                    [run_date.isoformat(), site["name"], url, "Submitted and indexed", result.coverage_state],
+                )
+
+            database.upsert_index_status(site["id"], url, result)
+
+    return _run_job(state, "index_check", work)
 
 
 def ga4_pull_node(state: SeoAgentState) -> dict:
@@ -203,8 +304,60 @@ def pagespeed_node(state: SeoAgentState) -> dict:
             fcp_ms=result.fcp_ms,
             raw_json=json.dumps(result.raw),
         )
+        _log_to_sheet(
+            "CWV Monitor",
+            [run_date.isoformat(), site["name"], result.url, result.performance_score, result.lcp_ms, result.cls, result.inp_ms],
+        )
 
     return _run_job(state, "pagespeed_check", work)
+
+
+def meta_opportunity_node(state: SeoAgentState) -> dict:
+    """CTR-opportunity detection: pages with real search demand
+    (impressions >= SEO_CTR_OPPORTUNITY_MIN_IMPRESSIONS) but a snippet
+    that isn't converting it (CTR <= SEO_CTR_OPPORTUNITY_MAX_CTR) get an
+    AI-drafted title/description rewrite and land in the
+    seo_meta_rewrite_queue for human review — never auto-applied to a
+    live site (see ai/seo/meta_rewrite_generator.py and
+    agent.database.upsert_meta_rewrite_candidate for why: this queue is a
+    draft, same review-before-publish convention as every other
+    AI-generated SEO artifact in this codebase)."""
+    def work(site: dict, run_date):
+        pages = database.list_gsc_pages_for_date(site["id"], run_date)
+        candidates = [
+            p for p in pages
+            if p["impressions"] >= settings.SEO_CTR_OPPORTUNITY_MIN_IMPRESSIONS
+            and p["ctr"] is not None
+            and p["ctr"] <= settings.SEO_CTR_OPPORTUNITY_MAX_CTR
+        ]
+        candidates.sort(key=lambda p: p["impressions"], reverse=True)
+
+        new_drafts = 0
+        for page in candidates:
+            existing = database.get_meta_rewrite_candidate(site["id"], page["page"])
+            suggested_title, suggested_description = None, None
+
+            if existing is None and new_drafts < settings.SEO_CTR_OPPORTUNITY_MAX_NEW_PER_DAY:
+                page_title = fetch_page_title(page["page"])
+                rewrite = generate_meta_rewrite(
+                    page["page"], page_title, page["impressions"], page["clicks"],
+                    page["ctr"], page["position"], site_id=site["id"],
+                )
+                if rewrite is not None:
+                    suggested_title, suggested_description = rewrite.title, rewrite.description
+                new_drafts += 1
+
+            database.upsert_meta_rewrite_candidate(
+                site["id"], page["page"], run_date, page["impressions"], page["clicks"],
+                page["ctr"], page["position"], suggested_title, suggested_description,
+            )
+            if existing is None:
+                _log_to_sheet(
+                    "Meta Rewrite Queue",
+                    [run_date.isoformat(), site["name"], page["page"], page["impressions"], page["clicks"], page["ctr"]],
+                )
+
+    return _run_job(state, "meta_opportunity", work)
 
 
 def digest_node(state: SeoAgentState) -> dict:
@@ -218,10 +371,14 @@ def digest_node(state: SeoAgentState) -> dict:
                 "top_gsc_queries": digest.stats.top_gsc_queries,
                 "top_ga4_pages": digest.stats.top_ga4_pages,
                 "recent_job_failures": digest.stats.recent_job_failures,
+                "rank_drops": digest.stats.rank_drops,
+                "rank_movers": digest.stats.rank_movers,
+                "meta_opportunities_queued": digest.stats.meta_opportunities_queued,
             }
         )
         slack_delivered = send_slack_message(f"*SEO Digest — {site['name']}*\n{digest.narrative}")
         database.save_daily_digest(site["id"], run_date, digest.narrative, stats_json, slack_delivered)
+        _log_to_sheet("Daily Digest Archive", [run_date.isoformat(), site["name"], digest.narrative])
 
     return _run_job(state, "daily_digest", work)
 
@@ -268,17 +425,23 @@ def build_graph():
     graph.add_node("planning", planning_node)
     graph.add_node("technical_audit", technical_audit_node)
     graph.add_node("gsc_pull", gsc_pull_node)
+    graph.add_node("gsc_pages_pull", gsc_pages_pull_node)
+    graph.add_node("index_check", index_check_node)
     graph.add_node("ga4_pull", ga4_pull_node)
     graph.add_node("pagespeed_check", pagespeed_node)
+    graph.add_node("meta_opportunity", meta_opportunity_node)
     graph.add_node("daily_digest", digest_node)
     graph.add_node("completion_compiler", completion_compiler_node)
 
     graph.add_edge(START, "planning")
     graph.add_edge("planning", "technical_audit")
     graph.add_edge("technical_audit", "gsc_pull")
-    graph.add_edge("gsc_pull", "ga4_pull")
+    graph.add_edge("gsc_pull", "gsc_pages_pull")
+    graph.add_edge("gsc_pages_pull", "index_check")
+    graph.add_edge("index_check", "ga4_pull")
     graph.add_edge("ga4_pull", "pagespeed_check")
-    graph.add_edge("pagespeed_check", "daily_digest")
+    graph.add_edge("pagespeed_check", "meta_opportunity")
+    graph.add_edge("meta_opportunity", "daily_digest")
     graph.add_edge("daily_digest", "completion_compiler")
     graph.add_edge("completion_compiler", END)
     return graph.compile()

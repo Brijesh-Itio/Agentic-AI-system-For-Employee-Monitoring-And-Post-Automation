@@ -32,6 +32,8 @@ reads the live page (to have real content to react to) and calls the
 LLM factory — it makes no write of its own.
 """
 import logging
+import re
+import urllib.parse
 from dataclasses import dataclass
 from typing import Optional
 
@@ -46,10 +48,21 @@ logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT_SECONDS = 15
 
-# The only issue types where a "correct" replacement value is even
-# knowable from a page's own content — everything else technical_audit.py
-# detects is structural/cross-page/file-level and stays manual-fix-only.
+# Rules where a "correct" replacement value is knowable from a page's own
+# content or is a real live re-check of the page itself, AND this module
+# has a real CMS write path for it (automation/seo/issue_applier.py) —
+# these get the "Apply to website" one-click action.
 REMEDIABLE_RULES = ("duplicate_title", "missing_meta_description", "missing_canonical")
+
+# Rules where an exact, ready-to-paste fix value is knowable WITHOUT any
+# LLM guess — pure string/URL normalization, so there's no "catastrophic
+# misapplication" risk in generating it — but WordPress has no single REST
+# field these map to (a URL slug change breaks existing links without a
+# redirect, an <html> attribute lives inside post content, not postmeta),
+# so unlike REMEDIABLE_RULES there is no "Apply to website" button for
+# these: the value is shown for the human to paste into the CMS/theme
+# themselves, then close out via /resolve once they've done it.
+DETERMINISTIC_FIX_RULES = ("url_structure", "unsafe_target_blank", "missing_meta_viewport", "missing_hsts")
 
 
 @dataclass
@@ -74,11 +87,38 @@ def _fetch_page_context(url: str) -> Optional[tuple]:
     return current_title, plain_text[:2000]
 
 
+def _clean_url_for_structure(url: str) -> str:
+    """Pure normalization, no guessing: lowercase the path and swap
+    underscores for hyphens — the two url_structure complaints that have
+    one unambiguous correct answer. Query-parameter count and raw length
+    don't get a "corrected" value here since trimming either one is a
+    judgment call about which parameters/segments are actually needed."""
+    parsed = urllib.parse.urlsplit(url)
+    clean_path = parsed.path.replace("_", "-").lower()
+    clean_path = re.sub(r"-{2,}", "-", clean_path)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, clean_path, parsed.query, ""))
+
+
 def generate_fix_value(rule: str, url: str, message: str, *, site_id: Optional[int] = None) -> FixValueResult:
     """Never raises — returns FixValueResult(value=None, error=...) on
     any failure, matching this codebase's graceful-degrade convention."""
-    if rule not in REMEDIABLE_RULES:
+    if rule not in REMEDIABLE_RULES and rule not in DETERMINISTIC_FIX_RULES:
         return FixValueResult(value=None, error=f"{rule!r} is a structural issue — no auto-generatable fix exists")
+
+    if rule == "url_structure":
+        cleaned = _clean_url_for_structure(url)
+        if cleaned == url:
+            return FixValueResult(value=None, error="Could not derive a cleaner URL automatically for this issue")
+        return FixValueResult(value=cleaned)
+
+    if rule == "unsafe_target_blank":
+        return FixValueResult(value='rel="noopener noreferrer"')
+
+    if rule == "missing_meta_viewport":
+        return FixValueResult(value='<meta name="viewport" content="width=device-width, initial-scale=1">')
+
+    if rule == "missing_hsts":
+        return FixValueResult(value="Strict-Transport-Security: max-age=31536000; includeSubDomains")
 
     if rule == "missing_canonical":
         # No LLM needed — absent any other signal, a page's own canonical
@@ -123,3 +163,43 @@ def generate_fix_value(rule: str, url: str, message: str, *, site_id: Optional[i
         return FixValueResult(value=value)
 
     return FixValueResult(value=None, error=f"No generator implemented for {rule!r}")
+
+
+def generate_ai_suggestion(rule: str, url: str, message: str, *, site_id: Optional[int] = None) -> FixValueResult:
+    """Module 41 — an advisory-only Ollama suggestion for ANY issue rule,
+    not just the REMEDIABLE_RULES above. Unlike generate_fix_value, this
+    never produces a value anything writes to the live site — nothing in
+    this codebase applies ai_suggestion automatically (see
+    api/routes/seo.py's /ai-suggestion route and
+    automation/seo/issue_applier.py, which only ever consumes fix_value).
+    That's a deliberate, narrower scope than "fix": most of what
+    technical_audit.py finds is structural (a redirect chain, a crawl-
+    depth problem, a robots.txt conflict) and can't be reduced to a
+    single field value at all — but a human reviewer can still benefit
+    from a concrete, page-aware explanation of what to actually do,
+    which is what this generates. Never raises — returns
+    FixValueResult(value=None, error=...) on any failure."""
+    context = _fetch_page_context(url)
+    excerpt = context[1] if context else ""
+    page_note = f"\n\nRELEVANT PAGE CONTENT (may be empty if the page couldn't be fetched):\n{excerpt}" if excerpt else ""
+
+    prompt = (
+        "You are a technical SEO expert reviewing one specific issue found on a real website. "
+        f"Rule: {rule}\nPage URL: {url}\nWhat was found: {message}\n"
+        "Write a short, concrete, actionable explanation (3-6 sentences) of exactly what to do to fix "
+        "this specific issue on this specific page — reference the actual URL/content where useful. "
+        "No headings, no markdown, no generic SEO advice unrelated to this exact issue."
+        f"{page_note}"
+    )
+    # fast=True (short timeout, phi3:mini) is tuned for single-word/short-
+    # phrase classification, not a 3-6 sentence explanation — verified live
+    # that fast=True times out here even at its 120s budget. This is a real
+    # generation task, so it uses the same slower/larger-model path as the
+    # DAR narrative generator, with its longer timeout budget.
+    result = get_provider(task="issue_ai_suggestion", site_id=site_id).generate(prompt, fast=False)
+    if not result.ok:
+        return FixValueResult(value=None, error=result.error)
+    value = strip_leaked_prompt_markers(result.text.strip(), prompt=prompt)
+    if not value:
+        return FixValueResult(value=None, error="Generated output was empty after removing a leaked prompt fragment")
+    return FixValueResult(value=value)

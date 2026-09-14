@@ -3,8 +3,8 @@ MODULE 27.1 — Image provider factory.
 
 Same pattern as ai/llm/factory.py: resolves which provider a given task
 uses via IMAGE_PROVIDER_<TASK> env override -> settings.IMAGE_PROVIDER_DEFAULT
--> "fastsd". Local FastSD CPU is the zero-cost default; pointing a task
-at Pexels (free stock) or Stability (paid) is a config change, not a
+-> "fastsd". Pointing a task at Pexels (free stock), Stability (paid), or
+Puter (free, user-pays-with-own-account) is a config change, not a
 pipeline code change.
 """
 import logging
@@ -32,6 +32,10 @@ def _build_provider(provider_name: str) -> ImageProvider:
         from ai.images.providers.stability_provider import StabilityProvider
 
         return StabilityProvider()
+    if provider_name == "puter":
+        from ai.images.providers.puter_provider import PuterProvider
+
+        return PuterProvider()
 
     logger.warning("Unknown image provider %r requested, falling back to fastsd", provider_name)
     return FastSdProvider()

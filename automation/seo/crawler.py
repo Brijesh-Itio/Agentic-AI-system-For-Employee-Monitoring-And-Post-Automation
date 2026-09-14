@@ -162,3 +162,25 @@ def fetch_sitemap_urls(base_url: str) -> List[str]:
     import re
 
     return re.findall(r"<loc>\s*(.*?)\s*</loc>", response.text, re.IGNORECASE)
+
+
+def fetch_page_title(url: str) -> Optional[str]:
+    """A single-page fetch for callers that need one page's <title>/body
+    text without running a full crawl — e.g. ai/seo_master_agent.py's
+    meta_opportunity_node, drafting a rewrite for one GSC-flagged URL at a
+    time, not every page on the site. Never raises — returns None on any
+    failure (unreachable, non-HTML, no <title>), same graceful-degrade
+    convention as fetch_sitemap_urls above."""
+    try:
+        assert_public_url(url)
+        response = requests.get(url, timeout=TIMEOUT_SECONDS, headers={"User-Agent": USER_AGENT})
+        response.raise_for_status()
+    except (requests.RequestException, UnsafeUrlError) as exc:
+        logger.info("fetch_page_title: could not fetch %s (%s)", url, exc)
+        return None
+
+    if "text/html" not in response.headers.get("Content-Type", ""):
+        return None
+    soup = BeautifulSoup(response.text, "html.parser")
+    title_tag = soup.find("title")
+    return title_tag.get_text(strip=True) if title_tag else None

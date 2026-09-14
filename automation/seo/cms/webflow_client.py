@@ -92,6 +92,20 @@ class WebflowClient(CmsClient):
         # this collection has, so there's nothing additional here.
         return []
 
+    def find_post_by_url(self, url: str) -> Optional[CmsPost]:
+        # No verified Webflow slug-filter query param to build against —
+        # matches client-side over list_posts() instead of guessing one,
+        # same "don't guess an unverified shape" rule as everywhere else
+        # in this codebase. Fine at this collection's scale; a very
+        # large collection would need real pagination here.
+        slug = url.rstrip("/").rsplit("/", 1)[-1]
+        if not slug:
+            return None
+        for post in self.list_posts(status=None, per_page=100):
+            if post.slug == slug:
+                return post
+        return None
+
     def get_post(self, post_id: str, *, kind: str = "post") -> Optional[CmsPost]:
         if not self._credentials_configured():
             logger.error(
@@ -110,6 +124,12 @@ class WebflowClient(CmsClient):
             logger.exception("Webflow get_post(%s) failed (collection_id=%s)", post_id, self._collection_id)
             return None
 
+    def get_post_raw_content(self, post_id: str, *, kind: str = "post") -> Optional[str]:
+        # No separate raw/rendered distinction on Webflow — fieldData's
+        # content field already is the one true stored value.
+        post = self.get_post(post_id, kind=kind)
+        return post.content if post else None
+
     def update_post(
         self,
         post_id: str,
@@ -119,9 +139,15 @@ class WebflowClient(CmsClient):
         content: Optional[str] = None,
         meta: Optional[dict] = None,
         kind: str = "post",
+        status: Optional[str] = None,
+        slug: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
     ) -> CmsResult:
         if not self._credentials_configured():
             return CmsResult(ok=False, detail="Webflow credentials not configured")
+        # tags/categories: see create_post's comment above — no generic
+        # Webflow equivalent, silently ignored.
         if meta is not None:
             # Webflow has no generic "meta" concept — SEO fields are
             # either real Webflow-native settings or plain fieldData
@@ -136,20 +162,30 @@ class WebflowClient(CmsClient):
             field_data[settings.WEBFLOW_FIELD_EXCERPT] = excerpt
         if content is not None:
             field_data[settings.WEBFLOW_FIELD_CONTENT] = content
-        if not field_data:
+        if slug is not None:
+            field_data["slug"] = slug
+        # Webflow has no WordPress-style "publish" status string — going
+        # live is isDraft: false on the item itself, separate from the
+        # site-wide publish queue Webflow's own UI also has (out of
+        # scope here, same as it was for create_post).
+        body: dict = {"fieldData": field_data} if field_data else {}
+        if status == "publish":
+            body["isDraft"] = False
+        if not body:
             return CmsResult(ok=False, detail="No fields to update")
 
         try:
             response = requests.patch(
                 f"{API_BASE}/collections/{self._collection_id}/items/{post_id}",
-                json={"fieldData": field_data},
+                json=body,
                 headers=self._headers(),
                 timeout=TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             post = self._parse_item(response.json())
-            logger.info("Webflow item %s updated: %s", post_id, list(field_data.keys()))
-            return CmsResult(ok=True, detail=f"Updated fields: {', '.join(field_data.keys())}", post=post)
+            updated_fields = list(field_data.keys()) + (["status"] if status else [])
+            logger.info("Webflow item %s updated: %s", post_id, updated_fields)
+            return CmsResult(ok=True, detail=f"Updated fields: {', '.join(updated_fields)}", post=post)
         except Exception as exc:
             logger.exception("Webflow update_post(%s) failed (collection_id=%s)", post_id, self._collection_id)
             return CmsResult(ok=False, detail=str(exc))
@@ -165,11 +201,28 @@ class WebflowClient(CmsClient):
         except Exception:
             return False
 
-    def create_post(self, *, title: str, content: str, excerpt: Optional[str] = None) -> CmsResult:
+    def create_post(
+        self,
+        *,
+        title: str,
+        content: str,
+        excerpt: Optional[str] = None,
+        slug: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
+    ) -> CmsResult:
         if not self._credentials_configured():
             return CmsResult(ok=False, detail="Webflow credentials not configured")
+        # tags/categories have no generic Webflow equivalent (a
+        # collection's schema is arbitrary, unlike WordPress's built-in
+        # taxonomies) — silently ignored, same as meta above, rather than
+        # guessing at a field mapping nothing here actually verified.
 
-        field_data = {settings.WEBFLOW_FIELD_TITLE: title, "slug": _slugify(title), settings.WEBFLOW_FIELD_CONTENT: content}
+        field_data = {
+            settings.WEBFLOW_FIELD_TITLE: title,
+            "slug": slug or _slugify(title),
+            settings.WEBFLOW_FIELD_CONTENT: content,
+        }
         if excerpt is not None:
             field_data[settings.WEBFLOW_FIELD_EXCERPT] = excerpt
 

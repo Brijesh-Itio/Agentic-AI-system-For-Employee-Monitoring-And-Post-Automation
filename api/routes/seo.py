@@ -11,7 +11,7 @@ from datetime import date as date_cls, datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
@@ -24,11 +24,14 @@ from api.database import (
     SeoBacklinkMention,
     SeoBlogPost,
     SeoDailyDigest,
+    SeoDigestRollup,
     SeoGa4Page,
+    SeoGscPage,
     SeoGscQuery,
     SeoIndexingSubmission,
     SeoIndexStatus,
     SeoJobRun,
+    SeoMetaRewrite,
     SeoOgTags,
     SeoPagespeedResult,
     SeoSemrushMetric,
@@ -42,27 +45,43 @@ from api.schemas import (
     BlogGenerateRequest,
     BlogPostOut,
     BlogPostUpdate,
+    BlogTaxonomyUpdate,
     CmsPostOut,
     CmsStatusOut,
     ContentAnalyzeRequest,
     DigestGenerateRequest,
     DigestOut,
+    DigestRollupOut,
     FaqPairOut,
     FaqRequest,
     Ga4PageRowOut,
     Ga4PullRequest,
+    GscPageRowOut,
     GscPullRequest,
     GscQueryRowOut,
     IndexingSubmissionOut,
     IndexingSubmitRequest,
     IndexStatusOut,
+    ImageGenerateRequest,
     InterlinkPage,
     InterlinkSuggestRequest,
     LlmUsageLogOut,
+    MetaRewriteOut,
     OgTagsGenerateRequest,
     OgTagsOut,
+    RankChangeOut,
+    KeywordDifficultyOut,
+    KeywordDifficultyRequest,
+    KeywordResearchRequest,
+    KeywordResearchRowOut,
     PageSpeedCheckRequest,
     PageSpeedOpportunityOut,
+    BulkConvertReportOut,
+    ContentBackupOut,
+    ContentBackupSummaryOut,
+    RapidApiKeywordCheckRequest,
+    WebpConvertRequest,
+    WebpConvertUrlRequest,
     PageSpeedResultOut,
     ResourceAuditReportOut,
     RelatedPageOut,
@@ -85,6 +104,9 @@ from api.schemas import (
     ServerFileContentOut,
     ServerFileRenameRequest,
     ServerFileWriteRequest,
+    SheetsAdoptRequest,
+    SheetsShareRequest,
+    SheetsStatusOut,
     SeoSiteCreate,
     SeoSiteCmsConfigUpdate,
     SeoSiteGoogleConfigUpdate,
@@ -102,15 +124,18 @@ from api.schemas import (
 from ai.seo.blog_content import generate_blog_post
 from ai.seo.content_structure import analyze_structure, generate_faq
 from ai.seo.daily_digest import generate_daily_digest
+from ai.seo.image_pipeline import generate_and_publish_image, upload_image_bytes
 from ai.seo.interlink_engine import find_related_pages, index_page
-from ai.seo.issue_remediation import generate_fix_value
+from ai.seo.issue_remediation import generate_ai_suggestion, generate_fix_value
 from ai.seo.outreach_drafter import draft_outreach_email
+from ai.seo.rank_alerts import compute_rank_changes, dropped_out_of_top_10, top_movers
+from ai.seo.rollup_digest import generate_rollup_digest
 from ai.seo.social_content import generate_social_post
 from automation.seo.backlinks.factory import get_provider as get_backlink_provider
 from automation.seo.cms.factory import get_cms_client
 from automation.seo.crawler import crawl_site, fetch_sitemap_urls
 from automation.seo.ga4_client import fetch_traffic_by_page
-from automation.seo.gsc_client import fetch_search_analytics
+from automation.seo.gsc_client import fetch_search_analytics, fetch_search_analytics_by_page
 from automation.seo.indexing_client import fetch_url_inspection, submit_url_for_indexing
 from automation.seo.issue_applier import apply_fix as apply_issue_fix
 from automation.seo.issue_applier import apply_fix_to_static_file
@@ -145,6 +170,21 @@ def _effective_ga4_property(site: SeoSite) -> Optional[str]:
     if site.ga4_property_id:
         return site.ga4_property_id
     return settings.GA4_PROPERTY_ID if database.count_active_seo_sites() <= 1 else None
+
+
+def _log_to_sheet_safe(sheet_name: str, row: list) -> None:
+    """Module 36 — best-effort write to the Google Sheets command
+    centre for actions triggered from a route (not the automated
+    pipeline — see ai/seo_master_agent.py's own copy of this same
+    pattern for that side). Never lets a Sheets failure affect the
+    route's actual response."""
+    try:
+        from automation.seo.sheets_client import append_row, get_or_create_spreadsheet
+
+        if get_or_create_spreadsheet():
+            append_row(sheet_name, row)
+    except Exception:
+        logger.exception("Sheets logging failed for %r", sheet_name)
 
 
 def _cms_client_for(site: SeoSite):
@@ -529,6 +569,64 @@ def semrush_backlink_gap(payload: SemrushBacklinkGapRequest, db: Session = Depen
     return fetch_semrush_backlink_gap(targets)
 
 
+@router.post("/keywords/rapidapi-check")
+def check_rapidapi_keywords(payload: RapidApiKeywordCheckRequest, db: Session = Depends(get_db)):
+    """Module 37 — a third-party RapidAPI keyword wrapper (NOT Semrush's
+    own official API, see automation/seo/rapidapi_keyword_client.py's
+    module docstring). Returns the provider's raw JSON response rather
+    than a typed model: every live test this session returned their own
+    generic error shape, not real data, so there's no verified success
+    shape to model against yet — the frontend shows this as raw JSON
+    until a real successful response has actually been observed."""
+    from automation.seo.rapidapi_keyword_client import fetch_keyword_analysis, is_configured
+
+    if not is_configured():
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_KEY is not set in .env")
+
+    site = _site_or_404(payload.site_id, db)
+    domain = urlparse(site.base_url).netloc or site.base_url
+    result = fetch_keyword_analysis(domain, country=payload.country)
+    if result is None:
+        raise HTTPException(status_code=502, detail="RapidAPI request failed — see server logs")
+    return result
+
+
+@router.post("/keywords/research", response_model=list[KeywordResearchRowOut])
+def keyword_research_route(payload: KeywordResearchRequest):
+    """Module 37 follow-up — a DIFFERENT RapidAPI product ("Semrush
+    Magic Tool", not the semrush-seo3 one above), verified live this
+    session returning real data: search volume, CPC, competition,
+    intent, and 12-month trends for hundreds of related keywords from
+    one seed keyword."""
+    from automation.seo.rapidapi_keyword_client import fetch_keyword_research, is_magic_tool_configured
+
+    if not is_magic_tool_configured():
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_MAGIC_KEY is not set in .env")
+
+    rows = fetch_keyword_research(payload.keyword, language=payload.language, country=payload.country)
+    if rows is None:
+        raise HTTPException(status_code=502, detail="Keyword research request failed — see server logs")
+    return rows
+
+
+@router.post("/keywords/difficulty", response_model=KeywordDifficultyOut)
+def keyword_difficulty_route(payload: KeywordDifficultyRequest):
+    """Module 37 follow-up — a THIRD distinct RapidAPI product/host
+    (semrush-seo10.p.rapidapi.com), same key/application as the Magic
+    Tool endpoint above. Verified live this session with real data for
+    two different keywords/countries: difficulty score, volume,
+    competition, CPC, and monthly trend."""
+    from automation.seo.rapidapi_keyword_client import fetch_keyword_difficulty, is_magic_tool_configured
+
+    if not is_magic_tool_configured():
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_MAGIC_KEY is not set in .env")
+
+    result = fetch_keyword_difficulty(payload.keyword, country=payload.country)
+    if result is None:
+        raise HTTPException(status_code=502, detail="Keyword difficulty request failed — see server logs")
+    return result
+
+
 @router.post("/pagespeed/check", response_model=PageSpeedResultOut, status_code=201)
 def check_pagespeed(payload: PageSpeedCheckRequest, db: Session = Depends(get_db)):
     site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
@@ -644,6 +742,93 @@ def list_gsc(site_id: int, limit: int = 100, db: Session = Depends(get_db)):
         .limit(limit)
         .all()
     )
+
+
+@router.get("/gsc/rank-alerts", response_model=list[RankChangeOut])
+def gsc_rank_alerts(site_id: int, only_drops: bool = False):
+    """Diffs today's query positions against the last pull before it —
+    see ai/seo/rank_alerts.py. Manual/on-demand read of the same
+    computation the daily digest already runs; only_drops=true narrows to
+    queries that fell out of the top 10, the specific alert the SEO
+    blueprint calls out by name."""
+    changes = compute_rank_changes(site_id)
+    if only_drops:
+        return dropped_out_of_top_10(changes)
+    return top_movers(changes, limit=50)
+
+
+@router.post("/gsc/pages/pull", response_model=list[GscPageRowOut], status_code=201)
+def pull_gsc_pages(payload: GscPullRequest, db: Session = Depends(get_db)):
+    """Page-dimension GSC pull ("CTR by page") — see /gsc/pull above for
+    the query-dimension equivalent this mirrors."""
+    site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
+
+    end_date = date_cls.today()
+    start_date = end_date - timedelta(days=payload.days_back)
+    rows = fetch_search_analytics_by_page(start_date, end_date, site_url=_effective_gsc_url(site))
+    if rows is None:
+        raise HTTPException(status_code=502, detail="GSC fetch failed — see server logs")
+
+    database.upsert_gsc_page_rows(payload.site_id, end_date, rows)
+
+    db.expire_all()
+    return (
+        db.query(SeoGscPage)
+        .filter(SeoGscPage.site_id == payload.site_id, SeoGscPage.run_date == end_date)
+        .order_by(SeoGscPage.impressions.desc())
+        .all()
+    )
+
+
+@router.get("/gsc/pages", response_model=list[GscPageRowOut])
+def list_gsc_pages(site_id: int, limit: int = 100, db: Session = Depends(get_db)):
+    return (
+        db.query(SeoGscPage)
+        .filter(SeoGscPage.site_id == site_id)
+        .order_by(SeoGscPage.run_date.desc(), SeoGscPage.impressions.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get("/meta-rewrites", response_model=list[MetaRewriteOut])
+def list_meta_rewrites(site_id: int, status: Optional[str] = None, limit: int = 100, db: Session = Depends(get_db)):
+    """The CTR-opportunity queue meta_opportunity_node fills — high-
+    impression/low-CTR pages with an AI-drafted title/description rewrite
+    waiting for human review (see ai/seo_master_agent.py's
+    meta_opportunity_node and ai/seo/meta_rewrite_generator.py)."""
+    query = db.query(SeoMetaRewrite).filter(SeoMetaRewrite.site_id == site_id)
+    if status is not None:
+        query = query.filter(SeoMetaRewrite.status == status)
+    return query.order_by(SeoMetaRewrite.impressions.desc()).limit(limit).all()
+
+
+@router.post("/meta-rewrites/{item_id}/approve", response_model=MetaRewriteOut)
+def approve_meta_rewrite_route(item_id: int, db: Session = Depends(get_db)):
+    """Marks a rewrite reviewed and approved. Deliberately doesn't push
+    anything to the live site — see agent.database.upsert_meta_rewrite_
+    candidate's docstring: WordPress's base REST API has no generic
+    meta-title/description field (that's normally an SEO plugin's custom
+    field, whose name varies per install), the same reason
+    seo_og_tags never auto-applies either. Approving here just records the
+    review decision so this item stops surfacing as a pending opportunity;
+    applying the suggested copy on the live site stays a manual step."""
+    ok = database.set_meta_rewrite_status(item_id, "approved")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No meta rewrite candidate {item_id}")
+    db.expire_all()
+    return db.query(SeoMetaRewrite).filter(SeoMetaRewrite.id == item_id).first()
+
+
+@router.post("/meta-rewrites/{item_id}/reject", response_model=MetaRewriteOut)
+def reject_meta_rewrite_route(item_id: int, db: Session = Depends(get_db)):
+    ok = database.set_meta_rewrite_status(item_id, "rejected")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No meta rewrite candidate {item_id}")
+    db.expire_all()
+    return db.query(SeoMetaRewrite).filter(SeoMetaRewrite.id == item_id).first()
 
 
 @router.post("/ga4/pull", response_model=list[Ga4PageRowOut], status_code=201)
@@ -903,6 +1088,20 @@ def reject_technical_issue_route(issue_id: int, payload: TechnicalIssueReview, d
     return db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
 
 
+@router.post("/technical/issues/{issue_id}/resolve", response_model=TechnicalIssueOut)
+def resolve_technical_issue_route(issue_id: int, payload: TechnicalIssueReview, db: Session = Depends(get_db)):
+    """Module 41 — closes out an issue the human fixed themselves, outside
+    this app (most technical-audit rules have no safe automatic CMS write
+    at all — see issue_applier.py's docstring). Purely a status change, no
+    live-site call: this is the app trusting a human's own confirmation,
+    the same way /approve and /reject already do."""
+    ok = database.set_technical_issue_status(issue_id, "resolved", payload.reviewed_by)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No technical issue {issue_id}")
+    db.expire_all()
+    return db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
+
+
 @router.post("/technical/issues/{issue_id}/generate-fix", response_model=TechnicalIssueOut)
 def generate_technical_issue_fix_route(issue_id: int, db: Session = Depends(get_db)):
     """Module 35 — produces a real, ready-to-use replacement value (not
@@ -919,6 +1118,27 @@ def generate_technical_issue_fix_route(issue_id: int, db: Session = Depends(get_
         raise HTTPException(status_code=422, detail=result.error or "Could not generate a fix for this issue")
 
     database.save_technical_issue_fix_value(issue_id, result.value)
+    db.expire_all()
+    return db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
+
+
+@router.post("/technical/issues/{issue_id}/ai-suggestion", response_model=TechnicalIssueOut)
+def generate_technical_issue_ai_suggestion_route(issue_id: int, db: Session = Depends(get_db)):
+    """Module 41 — an Ollama-generated, page-specific explanation of how
+    to fix this issue, available for EVERY rule (not gated by
+    REMEDIABLE_RULES like /generate-fix is). Advisory only: unlike
+    fix_value, nothing ever writes ai_suggestion to the live site — see
+    ai/seo/issue_remediation.py's generate_ai_suggestion docstring for
+    why that stays a human-only next step for structural issues."""
+    row = db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No technical issue {issue_id}")
+
+    result = generate_ai_suggestion(row.rule, row.url, row.message, site_id=row.site_id)
+    if result.value is None:
+        raise HTTPException(status_code=422, detail=result.error or "Could not generate a suggestion for this issue")
+
+    database.save_technical_issue_ai_suggestion(issue_id, result.value)
     db.expire_all()
     return db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
 
@@ -1005,6 +1225,116 @@ def list_digests_route(site_id: int, limit: int = 30, db: Session = Depends(get_
     )
 
 
+@router.post("/digest/rollup/{period}", response_model=DigestRollupOut, status_code=201)
+def generate_digest_rollup_route(period: str, site_id: int, send_to_slack: bool = True, db: Session = Depends(get_db)):
+    """Module 36 — the "every Monday, full week summary" / "monthly
+    board report" the blueprint described but nothing ever generated.
+    Same manual-trigger-plus-scheduled-cron pattern as /jobs/run-daily-
+    cycle: api/main.py's scheduler calls this same function on its own
+    schedule, and this lets it be run on demand too."""
+    if period not in ("weekly", "monthly"):
+        raise HTTPException(status_code=400, detail="period must be 'weekly' or 'monthly'")
+    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+
+    report = generate_rollup_digest(site_id, site.name, period)
+    slack_delivered = False
+    if send_to_slack:
+        slack_delivered = send_slack_message(f"*SEO {period.capitalize()} Roll-Up — {site.name}*\n{report.narrative}")
+
+    database.save_digest_rollup(
+        site_id, period, date_cls.fromisoformat(report.period_start), date_cls.fromisoformat(report.period_end),
+        report.narrative, report.stats_json, slack_delivered,
+    )
+
+    db.expire_all()
+    return (
+        db.query(SeoDigestRollup)
+        .filter(
+            SeoDigestRollup.site_id == site_id,
+            SeoDigestRollup.period == period,
+            SeoDigestRollup.period_start == date_cls.fromisoformat(report.period_start),
+        )
+        .first()
+    )
+
+
+@router.get("/digest/rollups", response_model=list[DigestRollupOut])
+def list_digest_rollups_route(site_id: int, period: Optional[str] = None, limit: int = 20, db: Session = Depends(get_db)):
+    query = db.query(SeoDigestRollup).filter(SeoDigestRollup.site_id == site_id)
+    if period is not None:
+        query = query.filter(SeoDigestRollup.period == period)
+    return query.order_by(SeoDigestRollup.period_start.desc()).limit(limit).all()
+
+
+@router.get("/sheets", response_model=SheetsStatusOut)
+def get_sheets_status_route():
+    """Creates the Google Sheets command-centre spreadsheet on first
+    call (idempotent after that — see sheets_client.get_or_create_
+    spreadsheet), shared with settings.SEO_SHEETS_SHARE_EMAIL if set.
+    configured=False with an error message is the honest, expected
+    result until the Sheets + Drive APIs are enabled for the Google
+    Cloud project the service account belongs to."""
+    from automation.seo.sheets_client import get_or_create_spreadsheet
+
+    spreadsheet_id = get_or_create_spreadsheet()
+    if spreadsheet_id is None:
+        return SheetsStatusOut(
+            configured=False,
+            error="Could not create the spreadsheet — enable the Google Sheets API and Google Drive API "
+            "for this project in Google Cloud Console, then retry. See server logs for the exact error.",
+        )
+    return SheetsStatusOut(
+        configured=True,
+        spreadsheet_id=spreadsheet_id,
+        url=f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit",
+    )
+
+
+@router.post("/sheets/share", response_model=SheetsStatusOut)
+def share_sheets_route(payload: SheetsShareRequest):
+    from automation.seo.sheets_client import get_or_create_spreadsheet, share_spreadsheet
+
+    spreadsheet_id = get_or_create_spreadsheet()
+    if spreadsheet_id is None:
+        return SheetsStatusOut(configured=False, error="Spreadsheet doesn't exist yet and couldn't be created.")
+
+    ok = share_spreadsheet(spreadsheet_id, payload.email)
+    return SheetsStatusOut(
+        configured=ok,
+        spreadsheet_id=spreadsheet_id,
+        url=f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit",
+        error=None if ok else f"Could not share with {payload.email} — see server logs",
+    )
+
+
+@router.post("/sheets/adopt", response_model=SheetsStatusOut)
+def adopt_sheets_route(payload: SheetsAdoptRequest):
+    """Module 36 follow-up — service accounts created after April 2025
+    have zero Drive storage quota, so spreadsheets.create (the /sheets
+    GET route's fallback) is permanently rejected for accounts like this
+    one, verified live. The real path: a human creates a normal Google
+    Sheet in their own Drive and shares it with the service account as
+    Editor, then gives the app that sheet's id/URL here — writing to an
+    existing shared file needs no quota, only creating a new one does."""
+    import re
+
+    from automation.seo.sheets_client import adopt_existing_spreadsheet
+
+    match = re.search(r"/d/([a-zA-Z0-9_-]+)", payload.spreadsheet_id_or_url)
+    spreadsheet_id = match.group(1) if match else payload.spreadsheet_id_or_url.strip()
+
+    ok = adopt_existing_spreadsheet(spreadsheet_id)
+    return SheetsStatusOut(
+        configured=ok,
+        spreadsheet_id=spreadsheet_id if ok else None,
+        url=f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit" if ok else None,
+        error=None if ok else "Could not read/write this spreadsheet — make sure it's shared with "
+        "workpulse-seo-agent@workpulse-ai-506706.iam.gserviceaccount.com as Editor, and the id/URL is correct.",
+    )
+
+
 @router.post("/social/generate", response_model=list[SocialPostOut], status_code=201)
 def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = Depends(get_db)):
     site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
@@ -1026,6 +1356,52 @@ def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = De
 
     db.expire_all()
     return db.query(SeoSocialPost).filter(SeoSocialPost.id.in_(created_ids)).all()
+
+
+@router.post("/social/{post_id}/image/generate", response_model=SocialPostOut)
+def generate_social_post_image_route(post_id: int, payload: ImageGenerateRequest, db: Session = Depends(get_db)):
+    """Same image pipeline as the blog route above — Instagram in
+    particular has no text-only post type, so this is what actually lets
+    an Instagram draft become publishable."""
+    row = db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No social post {post_id}")
+    site = db.query(SeoSite).filter(SeoSite.id == row.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
+
+    prompt = payload.prompt or row.content[:200]
+    result = generate_and_publish_image(site, prompt, task=f"social_{row.platform}")
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+
+    database.set_social_post_image(post_id, result.url)
+    db.expire_all()
+    return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+
+
+@router.post("/social/{post_id}/image/upload", response_model=SocialPostOut)
+async def upload_social_post_image_route(post_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Module 38 — manual image upload counterpart to .../image/generate
+    above, same reasoning."""
+    row = db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No social post {post_id}")
+    site = db.query(SeoSite).filter(SeoSite.id == row.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
+
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    result = upload_image_bytes(site, image_bytes, file.filename or row.platform)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+
+    database.set_social_post_image(post_id, result.url)
+    db.expire_all()
+    return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
 
 
 @router.get("/social", response_model=list[SocialPostOut])
@@ -1085,6 +1461,11 @@ def pull_backlinks_route(payload: BacklinkPullRequest, db: Session = Depends(get
     provider = get_backlink_provider()
     mentions = provider.fetch_mentions()
     database.upsert_backlink_mentions(payload.site_id, mentions)
+    for mention in mentions[:20]:
+        _log_to_sheet_safe(
+            "Link Monitor",
+            [date_cls.today().isoformat(), site.name, mention.source_url, mention.anchor_text or "", "new"],
+        )
 
     db.expire_all()
     return (
@@ -1156,9 +1537,10 @@ def trigger_job(payload: SeoJobRunTrigger, db: Session = Depends(get_db)):
 
 @router.post("/jobs/run-daily-cycle")
 def run_daily_cycle_now():
-    """Module 33's real automated pipeline (technical audit -> GSC ->
-    GA4 -> PageSpeed -> digest, per active site) normally fires on its
-    own once a day via api/main.py's BackgroundScheduler. This lets it
+    """Module 33's real automated pipeline (technical audit -> GSC query
+    pull -> GSC page pull -> index check -> GA4 -> PageSpeed -> meta
+    rewrite opportunities -> digest, per active site) normally fires on
+    its own once a day via api/main.py's BackgroundScheduler. This lets it
     be run on demand — for testing, or to force today's cycle again
     without waiting for the scheduled hour — calling the exact same
     function the scheduler calls, so there's no separate code path to
@@ -1179,6 +1561,77 @@ def run_daily_cycle_now():
         }
         for state in results
     ]
+
+
+# Module 39 — a process-local guard against double-triggering the bulk
+# WebP job for the same site (e.g. an impatient double-click) while a
+# real (non-dry-run) run is already in flight. Not a durable/distributed
+# lock — this app runs as one process, which is all that's needed here.
+_webp_convert_running: set = set()
+
+
+@router.post("/webp-convert", response_model=BulkConvertReportOut)
+def webp_convert_route(payload: WebpConvertRequest, db: Session = Depends(get_db)):
+    """Module 39 — scans every published post/page for JPG/PNG <img>
+    references, converts each to WebP, uploads it alongside the
+    original (nothing is deleted), and rewrites the post to point at
+    the new file — see automation/seo/webp_bulk_converter.py's module
+    docstring for the full design (caching, backups, dry-run). dry_run
+    defaults to True: call it once to see exactly what would happen,
+    call it again with dry_run=False once you're satisfied."""
+    from automation.seo.webp_bulk_converter import scan_site_images
+
+    site = _site_or_404(payload.site_id, db)
+
+    if not payload.dry_run:
+        if payload.site_id in _webp_convert_running:
+            raise HTTPException(status_code=409, detail="A conversion run is already in progress for this site")
+        _webp_convert_running.add(payload.site_id)
+
+    try:
+        client = _cms_client_for(site)
+        report = scan_site_images(site, client, dry_run=payload.dry_run)
+    finally:
+        _webp_convert_running.discard(payload.site_id)
+
+    return report
+
+
+@router.post("/webp-convert/url", response_model=BulkConvertReportOut)
+def webp_convert_url_route(payload: WebpConvertUrlRequest, db: Session = Depends(get_db)):
+    """Module 39 follow-up — converts images on one specific page
+    (resolved by URL) instead of scanning the whole site. Same
+    dry_run/backup/caching behaviour as /webp-convert, same double-
+    trigger guard, just for a single CmsClient.find_post_by_url match."""
+    from automation.seo.webp_bulk_converter import convert_url_images
+
+    site = _site_or_404(payload.site_id, db)
+
+    if not payload.dry_run:
+        if payload.site_id in _webp_convert_running:
+            raise HTTPException(status_code=409, detail="A conversion run is already in progress for this site")
+        _webp_convert_running.add(payload.site_id)
+
+    try:
+        client = _cms_client_for(site)
+        report = convert_url_images(site, client, payload.url, dry_run=payload.dry_run)
+    finally:
+        _webp_convert_running.discard(payload.site_id)
+
+    return report
+
+
+@router.get("/webp-convert/backups", response_model=list[ContentBackupSummaryOut])
+def list_content_backups_route(site_id: int, cms_post_id: Optional[str] = None, limit: int = 50):
+    return [dict(row) for row in database.list_content_backups(site_id, cms_post_id, limit)]
+
+
+@router.get("/webp-convert/backups/{backup_id}", response_model=ContentBackupOut)
+def get_content_backup_route(backup_id: int):
+    row = database.get_content_backup(backup_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No content backup {backup_id}")
+    return dict(row)
 
 
 @router.post("/blog/generate", response_model=BlogPostOut, status_code=201)
@@ -1216,7 +1669,62 @@ def generate_blog_post_route(payload: BlogGenerateRequest, db: Session = Depends
         structure.passed,
         structure_issues_json,
     )
+    _log_to_sheet_safe(
+        "Content Pipeline",
+        [date_cls.today().isoformat(), site.name, payload.topic, draft.title, "draft", structure.passed],
+    )
 
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/{post_id}/image/generate", response_model=BlogPostOut)
+def generate_blog_post_image_route(post_id: int, payload: ImageGenerateRequest, db: Session = Depends(get_db)):
+    """Module 36 — generates a featured image (via ai/images/factory.py),
+    converts it to WebP, and uploads it to the site's own server via
+    Server Access, then attaches the resulting URL to the post. 404s if
+    the post doesn't exist; a provider/upload failure comes back as a
+    502 with the specific reason (unconfigured image provider, no
+    server access, etc.) rather than silently doing nothing."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+    site = db.query(SeoSite).filter(SeoSite.id == row.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
+
+    prompt = payload.prompt or row.title
+    result = generate_and_publish_image(site, prompt, task="blog_post")
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+
+    database.set_blog_post_image(post_id, result.url)
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/{post_id}/image/upload", response_model=BlogPostOut)
+async def upload_blog_post_image_route(post_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Module 38 — manual image upload: same WebP-conversion-then-
+    upload-to-the-site pipeline as .../image/generate, just for a file a
+    human picked themselves instead of one the AI generated. Same
+    Server Access requirement, same failure-reason surfacing."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+    site = db.query(SeoSite).filter(SeoSite.id == row.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
+
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    result = upload_image_bytes(site, image_bytes, file.filename or row.title)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+
+    database.set_blog_post_image(post_id, result.url)
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
 
@@ -1236,20 +1744,50 @@ def update_blog_post_route(post_id: int, payload: BlogPostUpdate, db: Session = 
     on whatever the LLM produced. Re-runs the same structure checker
     generate_blog_post_route does, so the issue badges reflect the edit
     immediately rather than showing stale findings from the original
-    draft. Only while still 'draft': once approved/published the content
-    is either about to go out or already has, so this doesn't quietly
-    rewrite it after the fact."""
+    draft. Allowed while 'draft', 'approved', or 'failed' — once it's
+    actually 'published'/'live' the content already exists in the CMS,
+    so editing here wouldn't be reflected there and would just be
+    misleading; 'approved'/'failed' still only exist locally."""
     row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
-    if row.status != "draft":
-        raise HTTPException(status_code=409, detail=f"Only a draft post can be edited (current status: {row.status})")
+    if row.status not in ("draft", "approved", "failed"):
+        raise HTTPException(
+            status_code=409, detail=f"Can't edit a post that's already in the CMS (current status: {row.status})"
+        )
 
     structure = analyze_structure(payload.content, primary_keyword=row.primary_keyword)
     structure_issues_json = json.dumps(
         [{"rule": i.rule, "severity": i.severity, "message": i.message} for i in structure.issues]
     )
     database.update_blog_post(post_id, payload.title, payload.excerpt, payload.content, structure.passed, structure_issues_json)
+
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.patch("/blog/{post_id}/taxonomy", response_model=BlogPostOut)
+def update_blog_post_taxonomy_route(post_id: int, payload: BlogTaxonomyUpdate, db: Session = Depends(get_db)):
+    """Module 38 — slug/tags/categories, set before Publish so
+    publish_blog_post_route (below) can pass them through to the CMS at
+    create_post time. Same widened restriction as content editing above
+    ('draft', 'approved', or 'failed') — these become the actual
+    WordPress taxonomy/slug the moment the post is created there, so
+    once it's actually 'published'/'live' this no longer applies."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+    if row.status not in ("draft", "approved", "failed"):
+        raise HTTPException(
+            status_code=409, detail=f"Can't edit a post that's already in the CMS (current status: {row.status})"
+        )
+
+    database.set_blog_post_taxonomy(
+        post_id,
+        payload.slug,
+        json.dumps(payload.tags) if payload.tags is not None else None,
+        json.dumps(payload.categories) if payload.categories is not None else None,
+    )
 
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
@@ -1273,12 +1811,71 @@ def reject_blog_post_route(post_id: int, db: Session = Depends(get_db)):
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
 
 
+def _inject_interlinks(site_id: int, post_id: int, title: str, content_html: str) -> str:
+    """Module 36 — closes the "no on-publish automation" gap for
+    interlinking: queries the vector index (ai/seo/interlink_engine.py)
+    for semantically related already-published pages and appends a real
+    "Related Reading" section with live links, rather than leaving
+    interlink_engine's /interlinks/suggest endpoint as something nobody
+    ever calls. Never raises — logs and returns content_html unchanged
+    on any failure, since a missing related-reading section is not a
+    reason to block publishing."""
+    try:
+        related = find_related_pages(site_id, f"blog-draft:{post_id}", title, content_html, n_results=5)
+    except Exception:
+        logger.exception("Interlink lookup failed for blog post %s — publishing without it", post_id)
+        return content_html
+    if not related:
+        return content_html
+    items = "".join(f'<li><a href="{p.url}">{p.title}</a></li>' for p in related)
+    return f"{content_html}\n<h2>Related Reading</h2>\n<ul>\n{items}\n</ul>"
+
+
+def _run_post_publish_automation(site, post_id: int, title: str, excerpt: Optional[str], live_url: Optional[str]) -> None:
+    """Module 36 — the "when a post is published, the agent also..."
+    steps the blueprint described but nothing in this codebase actually
+    triggered: OG tags, indexing this page for future interlink
+    suggestions, and submitting the live URL to GSC for faster
+    (re)crawl. Runs AFTER the CMS publish already succeeded, so a
+    failure in any one of these three never affects whether the post
+    itself got published — each is independently try/excepted and only
+    logged on failure, same graceful-degrade convention as every other
+    automated step in this codebase."""
+    if not live_url:
+        return
+
+    try:
+        tags = generate_og_tags(title, excerpt or title, site_id=site.id)
+        if tags:
+            database.upsert_og_tags(site.id, live_url, title, tags.og_title, tags.og_description)
+    except Exception:
+        logger.exception("Auto OG-tag generation failed for post %s — publish itself already succeeded", post_id)
+
+    try:
+        index_page(site.id, live_url, title, excerpt or title)
+    except Exception:
+        logger.exception("Interlink indexing failed for post %s — publish itself already succeeded", post_id)
+
+    try:
+        submit_url_for_indexing(live_url, "URL_UPDATED")
+    except Exception:
+        logger.exception("GSC indexing submission failed for post %s — publish itself already succeeded", post_id)
+
+
 @router.post("/blog/{post_id}/publish", response_model=BlogPostOut)
 def publish_blog_post_route(post_id: int, db: Session = Depends(get_db)):
     """'Publish' means "create it as a draft in the CMS" — see
     automation/seo/cms/base.py's create_post docstring for why this
     deliberately never puts a page live on its own; a human still has to
-    hit Publish inside WordPress/Webflow itself."""
+    hit Publish inside WordPress/Webflow itself.
+
+    Module 36 — before pushing to the CMS, auto-attaches a featured
+    image (if one hasn't already been generated/set) and injects a
+    Related Reading section; after a successful publish, auto-generates
+    OG tags, indexes the page for future interlinking, and submits the
+    URL to GSC. All of this graceful-degrades — a site with no image
+    provider or no server access configured still publishes normally,
+    just without those extras."""
     row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
@@ -1293,13 +1890,70 @@ def publish_blog_post_route(post_id: int, db: Session = Depends(get_db)):
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
 
+    image_url = row.image_url
+    if not image_url:
+        try:
+            image_result = generate_and_publish_image(site, row.title, task="blog_post")
+            if image_result.ok:
+                image_url = image_result.url
+                database.set_blog_post_image(post_id, image_url)
+        except Exception:
+            logger.exception("Auto image generation failed for post %s — publishing without one", post_id)
+
+    content = row.content
+    if image_url:
+        content = f'<img src="{image_url}" alt="{row.title}" />\n{content}'
+    content = _inject_interlinks(row.site_id, post_id, row.title, content)
+
     client = _cms_client_for(site)
-    result = client.create_post(title=row.title, content=row.content, excerpt=row.excerpt)
+    result = client.create_post(
+        title=row.title,
+        content=content,
+        excerpt=row.excerpt,
+        slug=row.slug,
+        tags=json.loads(row.tags) if row.tags else None,
+        categories=json.loads(row.categories) if row.categories else None,
+    )
     if result.ok:
         link = result.post.link if result.post else None
         database.mark_blog_post_published(post_id, result.post.id if result.post else None, link)
+        _run_post_publish_automation(site, post_id, row.title, row.excerpt, link)
     else:
         database.mark_blog_post_failed(post_id, result.detail)
+
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/{post_id}/go-live", response_model=BlogPostOut)
+def go_live_blog_post_route(post_id: int, db: Session = Depends(get_db)):
+    """Module 38 — the explicit, separate 'actually make it public'
+    action /blog/{post_id}/publish's own docstring says has always
+    needed a human: /publish only ever created a CMS draft. This is
+    that human action, callable from the dashboard instead of requiring
+    a trip into WordPress/Webflow's own admin — sets status='publish'
+    (WordPress) / isDraft=false (Webflow) on the already-created post."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+    if row.status != "published":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Post must be created in the CMS first via Publish (current status: {row.status})",
+        )
+    if not row.cms_post_id:
+        raise HTTPException(status_code=409, detail="No CMS post id on record — publish it again first")
+
+    site = db.query(SeoSite).filter(SeoSite.id == row.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
+
+    client = _cms_client_for(site)
+    result = client.update_post(row.cms_post_id, status="publish")
+    if result.ok:
+        database.mark_blog_post_live(post_id)
+    else:
+        database.mark_blog_post_go_live_failed(post_id, result.detail)
 
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()

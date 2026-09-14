@@ -69,6 +69,34 @@ def _run_server_file_backup_cleanup() -> None:
         logger.info("Server file backup cleanup: removed %d backup row(s) older than 15 days", removed)
 
 
+def _run_digest_rollup(period: str) -> None:
+    """Module 36 — the scheduled half of the weekly/monthly roll-up
+    feature; /api/seo/digest/rollup/{period} is the on-demand half. Runs
+    for every active site, same graceful-degrade-per-site convention as
+    run_daily_cycle_for_all_sites — one site's LLM/Slack failure doesn't
+    stop the rest."""
+    from datetime import date
+
+    from agent.database import get_active_seo_sites, save_digest_rollup
+    from ai.seo.rollup_digest import generate_rollup_digest
+    from automation.seo.slack_notifier import send_slack_message
+
+    sites = get_active_seo_sites()
+    logger.info("SEO %s digest roll-up starting for %d active site(s)", period, len(sites))
+    for site in sites:
+        try:
+            report = generate_rollup_digest(site["id"], site["name"], period)
+            slack_delivered = send_slack_message(
+                f"*SEO {period.capitalize()} Roll-Up — {site['name']}*\n{report.narrative}"
+            )
+            save_digest_rollup(
+                site["id"], period, date.fromisoformat(report.period_start), date.fromisoformat(report.period_end),
+                report.narrative, report.stats_json, slack_delivered,
+            )
+        except Exception:
+            logger.exception("SEO %s digest roll-up failed for site %s — continuing to next site", period, site["id"])
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -82,6 +110,34 @@ async def lifespan(app: FastAPI):
         hour=3,
         minute=30,
         id="server_file_backup_cleanup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # Module 36 — weekly (every Monday) and monthly (1st of month) digest
+    # roll-ups, same housekeeping tier as the backup cleanup above: not
+    # gated behind SEO_AUTOMATION_ENABLED, since these summarise
+    # whatever daily digests already exist rather than running the SEO
+    # pipeline themselves.
+    seo_scheduler.add_job(
+        _run_digest_rollup,
+        args=["weekly"],
+        trigger="cron",
+        day_of_week="mon",
+        hour=7,
+        minute=30,
+        id="seo_weekly_rollup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    seo_scheduler.add_job(
+        _run_digest_rollup,
+        args=["monthly"],
+        trigger="cron",
+        day=1,
+        hour=7,
+        minute=45,
+        id="seo_monthly_rollup",
         replace_existing=True,
         misfire_grace_time=3600,
     )

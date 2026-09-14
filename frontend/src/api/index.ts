@@ -960,14 +960,80 @@ export interface Ga4PageRow {
 export const getGa4Pages = (siteId: number, limit = 10) =>
   api.get<Ga4PageRow[]>("/api/seo/ga4", { params: { site_id: siteId, limit } }).then((r) => r.data);
 
-export type TechnicalIssueSeverity = "critical" | "warning" | "info";
-export type TechnicalIssueStatus = "pending" | "approved" | "rejected";
+export interface GscPageRow {
+  id: number;
+  site_id: number;
+  run_date: string;
+  page: string;
+  clicks: number;
+  impressions: number;
+  ctr: number | null;
+  position: number | null;
+}
 
-// Rules where a real, ready-to-use replacement value is knowable at all
-// (see ai/seo/issue_remediation.py's REMEDIABLE_RULES) — everything else
-// technical_audit.py detects is structural/cross-page and stays manual-
-// fix-only, with no "Generate fix" action offered for it.
+export const getGscPages = (siteId: number, limit = 10) =>
+  api.get<GscPageRow[]>("/api/seo/gsc/pages", { params: { site_id: siteId, limit } }).then((r) => r.data);
+
+export const pullGscPages = (siteId: number, daysBack = 28) =>
+  api
+    .post<GscPageRow[]>("/api/seo/gsc/pages/pull", { site_id: siteId, days_back: daysBack })
+    .then((r) => r.data);
+
+export interface RankChange {
+  query: string;
+  previous_position: number;
+  current_position: number;
+  delta: number;
+}
+
+export const getRankAlerts = (siteId: number, onlyDrops = false) =>
+  api
+    .get<RankChange[]>("/api/seo/gsc/rank-alerts", { params: { site_id: siteId, only_drops: onlyDrops } })
+    .then((r) => r.data);
+
+export type MetaRewriteStatus = "queued" | "approved" | "rejected";
+
+export interface MetaRewrite {
+  id: number;
+  site_id: number;
+  url: string;
+  run_date: string;
+  impressions: number;
+  clicks: number;
+  ctr: number | null;
+  position: number | null;
+  suggested_title: string | null;
+  suggested_description: string | null;
+  status: MetaRewriteStatus;
+  created_at: string | null;
+  reviewed_at: string | null;
+}
+
+export const getMetaRewrites = (siteId: number, status?: string, limit = 50) =>
+  api
+    .get<MetaRewrite[]>("/api/seo/meta-rewrites", { params: { site_id: siteId, status, limit } })
+    .then((r) => r.data);
+
+export const approveMetaRewrite = (itemId: number) =>
+  api.post<MetaRewrite>(`/api/seo/meta-rewrites/${itemId}/approve`, {}).then((r) => r.data);
+
+export const rejectMetaRewrite = (itemId: number) =>
+  api.post<MetaRewrite>(`/api/seo/meta-rewrites/${itemId}/reject`, {}).then((r) => r.data);
+
+export type TechnicalIssueSeverity = "critical" | "warning" | "info";
+export type TechnicalIssueStatus = "pending" | "approved" | "rejected" | "resolved";
+
+// Rules where a real, ready-to-use replacement value is knowable AND this
+// app has a real CMS write path for it (see ai/seo/issue_remediation.py's
+// REMEDIABLE_RULES) — these get the one-click "Apply to website" button.
 export const REMEDIABLE_RULES = ["duplicate_title", "missing_meta_description", "missing_canonical"];
+
+// Rules with an exact, ready-to-paste fix value that's pure string/URL
+// normalization (no LLM, no guessing) but no CMS field to write it to —
+// see ai/seo/issue_remediation.py's DETERMINISTIC_FIX_RULES. Shown with
+// the exact value but no "Apply to website" button; the human pastes it
+// in themselves, then closes the issue out via "Mark as fixed".
+export const DETERMINISTIC_FIX_RULES = ["url_structure", "unsafe_target_blank", "missing_meta_viewport", "missing_hsts"];
 
 export interface TechnicalIssue {
   id: number;
@@ -985,6 +1051,7 @@ export interface TechnicalIssue {
   fix_value: string | null;
   fix_applied: boolean;
   fix_error: string | null;
+  ai_suggestion: string | null;
 }
 
 export const getTechnicalIssues = (siteId: number, status?: string) =>
@@ -1009,6 +1076,12 @@ export const approveTechnicalIssue = (issueId: number) =>
 export const rejectTechnicalIssue = (issueId: number) =>
   api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/reject`, {}).then((r) => r.data);
 
+// Closes out an issue the human fixed themselves outside the app (most
+// technical-audit rules have no safe automatic CMS write at all) — a
+// pure status change, no live-site call.
+export const resolveTechnicalIssue = (issueId: number) =>
+  api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/resolve`, {}).then((r) => r.data);
+
 // Read-only against the live page + one LLM call — no write happens here.
 export const generateTechnicalIssueFix = (issueId: number) =>
   api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/generate-fix`, {}, { timeout: 30_000 }).then((r) => r.data);
@@ -1018,6 +1091,12 @@ export const generateTechnicalIssueFix = (issueId: number) =>
 // both, this is just the call).
 export const applyTechnicalIssueFix = (issueId: number) =>
   api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/apply-fix`, {}, { timeout: 30_000 }).then((r) => r.data);
+
+// Advisory-only Ollama suggestion, available for EVERY rule (not just
+// REMEDIABLE_RULES) — nothing writes this to the live site, unlike
+// generate-fix/apply-fix above.
+export const generateTechnicalIssueAiSuggestion = (issueId: number) =>
+  api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/ai-suggestion`, {}, { timeout: 30_000 }).then((r) => r.data);
 
 export interface SeoDigest {
   id: number;
@@ -1042,6 +1121,58 @@ export const generateSeoDigest = (siteId: number, sendToSlack = true) =>
       { timeout: 120_000 }
     )
     .then((r) => r.data);
+
+export interface DigestRollup {
+  id: number;
+  site_id: number;
+  period: "weekly" | "monthly";
+  period_start: string;
+  period_end: string;
+  narrative: string;
+  stats_json: string;
+  slack_delivered: boolean;
+  created_at: string | null;
+}
+
+export const getDigestRollups = (siteId: number, period?: "weekly" | "monthly") =>
+  api.get<DigestRollup[]>("/api/seo/digest/rollups", { params: { site_id: siteId, period } }).then((r) => r.data);
+
+// Also runs on a schedule (Monday 07:30 weekly, 1st-of-month 07:45
+// monthly) — this is the same on-demand trigger, useful for testing or
+// forcing a fresh one without waiting.
+export const generateDigestRollup = (siteId: number, period: "weekly" | "monthly", sendToSlack = true) =>
+  api
+    .post<DigestRollup>(`/api/seo/digest/rollup/${period}`, null, {
+      params: { site_id: siteId, send_to_slack: sendToSlack },
+      timeout: 120_000,
+    })
+    .then((r) => r.data);
+
+export interface SheetsStatus {
+  configured: boolean;
+  spreadsheet_id: string | null;
+  url: string | null;
+  error: string | null;
+}
+
+// Creates the Sheets command-centre spreadsheet on first call
+// (idempotent after that), sharing it with SEO_SHEETS_SHARE_EMAIL if
+// set in .env. configured=false with an error is the honest result
+// until the Sheets + Drive APIs are enabled for the Google Cloud
+// project — see api/config.py's SEO_SHEETS_SHARE_EMAIL comment.
+export const getSheetsStatus = () => api.get<SheetsStatus>("/api/seo/sheets").then((r) => r.data);
+
+export const shareSheets = (email: string) =>
+  api.post<SheetsStatus>("/api/seo/sheets/share", { email }).then((r) => r.data);
+
+// Service accounts created after April 2025 have zero Drive storage
+// quota and can't create a new spreadsheet on their own (see api/routes
+// /seo.py's adopt_sheets_route) — this is the real path: a human
+// creates a normal Google Sheet in their own Drive, shares it with the
+// service account as Editor, then hands the app that sheet's URL/id
+// here. Accepts either a bare id or a full Google Sheets URL.
+export const adoptSheets = (spreadsheetIdOrUrl: string) =>
+  api.post<SheetsStatus>("/api/seo/sheets/adopt", { spreadsheet_id_or_url: spreadsheetIdOrUrl }).then((r) => r.data);
 
 export type SocialPlatform = "linkedin" | "twitter" | "instagram" | "facebook";
 export type SocialPostStatus = "draft" | "approved" | "rejected" | "posted" | "failed";
@@ -1182,6 +1313,65 @@ export const getSemrushBacklinkGap = (siteId: number, competitorDomains: string[
     )
     .then((r) => r.data);
 
+// Module 37 — a third-party RapidAPI keyword wrapper (NOT Semrush's own
+// official API — see automation/seo/rapidapi_keyword_client.py). Every
+// live test this session returned the provider's own generic error
+// shape rather than real data, so this returns the raw response as-is
+// (unknown/unverified shape) rather than a typed model.
+export const checkRapidApiKeywords = (siteId: number, country = "us") =>
+  api
+    .post<Record<string, unknown>>("/api/seo/keywords/rapidapi-check", { site_id: siteId, country }, { timeout: 90_000 })
+    .then((r) => r.data);
+
+// A DIFFERENT RapidAPI product ("Semrush Magic Tool", not the one
+// above) — verified live returning real data: search volume, CPC,
+// competition, intent, and 12-month trends for hundreds of related
+// keywords from one seed keyword.
+export interface MonthlySearches {
+  month: string;
+  year: number;
+  searches: number;
+}
+
+export interface KeywordResearchRow {
+  keyword: string;
+  avg_monthly_searches: number | null;
+  low_cpc: string | null;
+  high_cpc: string | null;
+  competition_index: number | null;
+  competition_value: string | null;
+  intent: string[];
+  intent_confidence: number | null;
+  advice: string[];
+  content_gap_score: number | null;
+  estimated_ctr: number | null;
+  keyword_freshness: number | null;
+  serp_feature_type: string | null;
+  monetization_score: number | null;
+  monthly_search_volumes: MonthlySearches[];
+}
+
+export const researchKeywords = (keyword: string, language = "en", country = "us") =>
+  api
+    .post<KeywordResearchRow[]>("/api/seo/keywords/research", { keyword, language, country }, { timeout: 90_000 })
+    .then((r) => r.data);
+
+// A THIRD distinct RapidAPI product/host (semrush-seo10), same
+// application/key as researchKeywords above — verified live returning
+// real difficulty score, volume, competition, CPC, and monthly trend.
+export interface KeywordDifficulty {
+  keyword: string;
+  keyword_difficulty: number | null;
+  volume: number | null;
+  competition: number | null;
+  cpc_dollars: number | null;
+  monthly_volumes: Record<string, number>;
+  search_intent: number[] | null;
+}
+
+export const checkKeywordDifficulty = (keyword: string, country = "us") =>
+  api.post<KeywordDifficulty>("/api/seo/keywords/difficulty", { keyword, country }, { timeout: 30_000 }).then((r) => r.data);
+
 // ── Module 32 — PageSpeed resource audit + Indexing Status ──
 
 export type PageSpeedStrategy = "mobile" | "desktop";
@@ -1281,7 +1471,7 @@ export const getIndexingSubmissions = (siteId: number) =>
   api.get<IndexingSubmission[]>("/api/seo/indexing/submissions", { params: { site_id: siteId } }).then((r) => r.data);
 
 // ── Module 34: Blog post generation + CMS draft publishing ──
-export type BlogPostStatus = "draft" | "approved" | "rejected" | "published" | "failed";
+export type BlogPostStatus = "draft" | "approved" | "rejected" | "published" | "live" | "failed";
 
 export interface StructureIssue {
   rule: string;
@@ -1300,6 +1490,12 @@ export interface BlogPost {
   structure_passed: boolean | null;
   structure_issues_json: string | null;
   status: BlogPostStatus;
+  image_url: string | null;
+  slug: string | null;
+  // JSON-encoded arrays of plain names — JSON.parse before use, same
+  // convention as structure_issues_json above.
+  tags: string | null;
+  categories: string | null;
   cms_post_id: string | null;
   cms_post_link: string | null;
   error: string | null;
@@ -1321,6 +1517,11 @@ export const getBlogPosts = (siteId: number, status?: string) =>
 export const updateBlogPost = (postId: number, payload: { title: string; excerpt?: string; content: string }) =>
   api.patch<BlogPost>(`/api/seo/blog/${postId}`, payload).then((r) => r.data);
 
+// Only while status is still 'draft' — these become the actual
+// WordPress slug/tags/categories the moment Publish creates the post.
+export const updateBlogPostTaxonomy = (postId: number, payload: { slug?: string; tags?: string[]; categories?: string[] }) =>
+  api.patch<BlogPost>(`/api/seo/blog/${postId}/taxonomy`, payload).then((r) => r.data);
+
 export const approveBlogPost = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/approve`, {}).then((r) => r.data);
 
@@ -1331,3 +1532,160 @@ export const rejectBlogPost = (postId: number) =>
 // its own, see automation/seo/cms/base.py's create_post docstring.
 export const publishBlogPost = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/publish`, {}, { timeout: 30_000 }).then((r) => r.data);
+
+// The explicit, separate "actually make it public" step — Publish only
+// ever creates a CMS draft (see publishBlogPost's own comment above);
+// this is what a human clicking "Go Live" triggers instead of having to
+// open WordPress/Webflow's own admin to hit Publish there.
+export const goLiveBlogPost = (postId: number) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/go-live`, {}, { timeout: 30_000 }).then((r) => r.data);
+
+// Generates a featured image (via the app's image provider factory),
+// converts it to WebP, uploads it to the site's own server (Server
+// Access must be configured), and attaches the resulting URL to the
+// post. A 502 means no image provider or no server access is
+// configured yet — see api/routes/seo.py's generate_blog_post_image_route.
+export const generateBlogPostImage = (postId: number, prompt?: string) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/image/generate`, { prompt }, { timeout: 60_000 }).then((r) => r.data);
+
+export const generateSocialPostImage = (postId: number, prompt?: string) =>
+  api.post<SocialPost>(`/api/seo/social/${postId}/image/generate`, { prompt }, { timeout: 60_000 }).then((r) => r.data);
+
+// Manual image upload — same WebP-conversion-then-upload-to-the-site
+// pipeline as the generate endpoints above, for a file picked from the
+// user's own computer instead of one the AI generated.
+export const uploadBlogPostImage = (postId: number, file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api
+    .post<BlogPost>(`/api/seo/blog/${postId}/image/upload`, form, { timeout: 60_000 })
+    .then((r) => r.data);
+};
+
+export const uploadSocialPostImage = (postId: number, file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api
+    .post<SocialPost>(`/api/seo/social/${postId}/image/upload`, form, { timeout: 60_000 })
+    .then((r) => r.data);
+};
+
+export interface OgTags {
+  id: number;
+  site_id: number;
+  page_url: string;
+  page_title: string;
+  og_title: string;
+  og_description: string;
+  generated_at: string | null;
+}
+
+export const generateOgTags = (payload: { site_id: number; page_url: string; page_title: string; content_excerpt: string }) =>
+  api.post<OgTags>("/api/seo/og-tags/generate", payload).then((r) => r.data);
+
+export interface RelatedPage {
+  url: string;
+  title: string;
+  distance: number;
+}
+
+export const suggestInterlinks = (payload: { site_id: number; url: string; title: string; content: string; n_results?: number }) =>
+  api.post<RelatedPage[]>("/api/seo/interlinks/suggest", payload).then((r) => r.data);
+
+// Embeds this page's content into the interlink vector index so FUTURE
+// posts' suggestInterlinks calls can find it — call after publishing or
+// materially editing a page. The blog publish flow already does this
+// automatically for posts it publishes itself; this is for anything
+// edited directly in the CMS.
+export const indexPageForInterlinks = (payload: { site_id: number; url: string; title: string; content: string }) =>
+  api.post<{ indexed: boolean; url: string }>("/api/seo/interlinks/index", payload).then((r) => r.data);
+
+export interface StructureReport {
+  word_count: number;
+  h1_count: number;
+  h2_count: number;
+  h3_count: number;
+  passed: boolean;
+  issues: StructureIssue[];
+}
+
+export const analyzeContentStructure = (payload: { content_html: string; primary_keyword?: string; min_words?: number; max_words?: number }) =>
+  api.post<StructureReport>("/api/seo/content/analyze", payload).then((r) => r.data);
+
+export interface FaqPair {
+  question: string;
+  answer: string;
+}
+
+// Seeds the FAQ with this site's own real GSC search queries server-side
+// — only site_id/page_title/max_pairs need to be supplied here.
+export const generateFaq = (payload: { site_id: number; page_title: string; max_pairs?: number }) =>
+  api.post<FaqPair[]>("/api/seo/content/faq", payload, { timeout: 60_000 }).then((r) => r.data);
+
+// Module 39 — bulk CMS image-to-WebP conversion. Scans every published
+// post/page for JPG/PNG <img src>/<img srcset> references, converts
+// each to WebP, uploads it alongside the original (nothing deleted),
+// and rewrites the post to point at the new file. dry_run (default
+// true) reports exactly what would happen without changing anything —
+// always run that first. A content backup is saved automatically
+// before every real rewrite (see getContentBackups/getContentBackup).
+export interface PostConversionDetail {
+  post_id: string;
+  kind: string;
+  title: string;
+  image_urls_found: string[];
+  images_converted: number;
+  images_cached: number;
+  images_failed: number;
+  content_changed: boolean;
+  updated: boolean;
+  backup_id: number | null;
+  error: string | null;
+}
+
+export interface BulkConvertReport {
+  dry_run: boolean;
+  posts_scanned: number;
+  posts_with_images: number;
+  posts_updated: number;
+  images_found: number;
+  images_converted: number;
+  images_cached: number;
+  images_failed: number;
+  error: string | null;
+  details: PostConversionDetail[];
+}
+
+export const runWebpBulkConvert = (siteId: number, dryRun: boolean) =>
+  api
+    .post<BulkConvertReport>("/api/seo/webp-convert", { site_id: siteId, dry_run: dryRun }, { timeout: 300_000 })
+    .then((r) => r.data);
+
+// Per-URL alternative — converts images on one specific page instead of
+// scanning the whole site. Resolves the URL to its actual CMS post
+// first (by ?p=id or by slug), then runs the same conversion logic.
+export const runWebpConvertUrl = (siteId: number, url: string, dryRun: boolean) =>
+  api
+    .post<BulkConvertReport>("/api/seo/webp-convert/url", { site_id: siteId, url, dry_run: dryRun }, { timeout: 120_000 })
+    .then((r) => r.data);
+
+export interface ContentBackupSummary {
+  id: number;
+  site_id: number;
+  cms_post_id: string;
+  kind: string;
+  reason: string;
+  created_at: string | null;
+}
+
+export interface ContentBackup extends ContentBackupSummary {
+  original_content: string;
+}
+
+export const getContentBackups = (siteId: number, cmsPostId?: string) =>
+  api
+    .get<ContentBackupSummary[]>("/api/seo/webp-convert/backups", { params: { site_id: siteId, cms_post_id: cmsPostId } })
+    .then((r) => r.data);
+
+export const getContentBackup = (backupId: number) =>
+  api.get<ContentBackup>(`/api/seo/webp-convert/backups/${backupId}`).then((r) => r.data);

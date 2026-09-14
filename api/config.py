@@ -172,6 +172,29 @@ class Settings(BaseSettings):
     SEMRUSH_API_KEY: str = ""
     SEMRUSH_DATABASE: str = "us"  # regional database code, e.g. "us", "uk", "in"
 
+    # Module 37 — a third-party RapidAPI wrapper around Semrush-style
+    # keyword data (host semrush-seo3.p.rapidapi.com), NOT Semrush's own
+    # official API — a separate product from a separate seller, chosen
+    # as a cheaper alternative after the official Semrush Advanced plan
+    # ($455+/mo plus separately-priced API units) was judged too costly
+    # for keyword research alone. Verified live this session that the
+    # gateway/subscription layer works correctly; the provider's own
+    # backend was returning a generic "API Error" for every input
+    # (including example.com) at the time of testing — this may be a
+    # transient outage on their side, not a config problem here. Blank
+    # key = off, same convention as every other optional integration.
+    RAPIDAPI_SEMRUSH_KEY: str = ""
+
+    # Module 37 follow-up — "Semrush Magic Tool" on RapidAPI (host
+    # semrush-magic-tool.p.rapidapi.com), a DIFFERENT third-party
+    # product from RAPIDAPI_SEMRUSH_KEY's provider above (also not
+    # Semrush's own official API). Unlike that one, this was verified
+    # live this session with a real 200 OK returning genuine keyword
+    # data (673 related-keyword rows for one seed keyword, including
+    # search volume, CPC, competition, intent, monthly trends) — see
+    # automation/seo/rapidapi_keyword_client.py's fetch_keyword_research.
+    RAPIDAPI_SEMRUSH_MAGIC_KEY: str = ""
+
     # Instagram Graph API (Content Publishing) — see
     # automation/instagram/poster.py. Needs a Business/Creator Instagram
     # account, a Meta developer app, and a long-lived access token with
@@ -181,16 +204,61 @@ class Settings(BaseSettings):
     INSTAGRAM_ACCESS_TOKEN: str = ""
     INSTAGRAM_BUSINESS_ACCOUNT_ID: str = ""
 
+    # X/Twitter API v2 (POST /2/tweets) — see automation/twitter/poster.py.
+    # OAuth 1.0a user-context credentials (all four required together),
+    # verified against docs.x.com's current manage-Posts quickstart this
+    # session. Blank = "No automated posting exists for this platform"
+    # stays the real, honest state until real keys are provided.
+    TWITTER_API_KEY: str = ""
+    TWITTER_API_SECRET: str = ""
+    TWITTER_ACCESS_TOKEN: str = ""
+    TWITTER_ACCESS_TOKEN_SECRET: str = ""
+
+    # Facebook Graph API (POST /{page-id}/feed) — see
+    # automation/facebook/poster.py. Needs a Page access token with
+    # pages_manage_posts scope, verified against Meta's current Pages
+    # API docs this session. Blank = stays off, same convention as
+    # every other optional integration here.
+    FACEBOOK_PAGE_ACCESS_TOKEN: str = ""
+    FACEBOOK_PAGE_ID: str = ""
+
+    # Google Sheets "SEO Command Centre" (module 36) — see
+    # automation/seo/sheets_client.py. The spreadsheet is created and
+    # owned by the Google service account, which has no normal Drive of
+    # its own, so it's shared with this email the moment it's created.
+    # A real, deliverable Google account — not this app's own identity
+    # email. Blank = the spreadsheet is created but never shared, so it
+    # stays invisible until this is set (or /api/seo/sheets/share is
+    # called manually with an email).
+    SEO_SHEETS_SHARE_EMAIL: str = ""
+
     # ── SEO Agentic AI: generic image provider layer (module 27) ──
-    # "fastsd" (the default) keeps every SEO image task on the zero-cost
-    # local stack (module 18.3's FastSD CPU server) with no config
-    # changes. Per-task overrides read IMAGE_PROVIDER_<TASK> from the
-    # environment directly, same as SEO_LLM_PROVIDER_<TASK> — see
-    # ai/images/factory.py.
+    # Per-task overrides read IMAGE_PROVIDER_<TASK> from the environment
+    # directly, same as SEO_LLM_PROVIDER_<TASK> — see ai/images/factory.py.
+    # Back on "fastsd" (zero-cost local stack, module 18.3): verified live
+    # on 2026-09-14 that this account's Puter API token gets a real 402
+    # "subscription_required" (code, plan="user_free") on chat/completions
+    # and a flat 404 (route not implemented at all) on images/generations
+    # via api.puter.com's OpenAI-compatible proxy — Puter's "free
+    # unlimited" AI marketing does not extend to headless/API-token
+    # access on the free plan. ai/images/providers/puter_provider.py is
+    # still wired and selectable (IMAGE_PROVIDER_DEFAULT=puter or a
+    # per-task override) for if/when this account gets a Puter
+    # subscription or Puter ships the images route.
     IMAGE_PROVIDER_DEFAULT: str = "fastsd"
     # Blank = stays off; ai/images/providers/stability_provider.py fails
     # closed with a clear error rather than silently falling back.
     STABILITY_API_KEY: str = ""
+
+    # ── Puter image generation (free, user-pays-with-own-account) ──
+    # Server-side use needs an auth token, not an API key: sign in at
+    # https://puter.com/dashboard#account -> "API token" -> "Create
+    # token". Treat it like a password — whoever holds it can act as that
+    # Puter account. Blank = ai/images/providers/puter_provider.py fails
+    # closed with a clear error. Calls go through Puter's plain
+    # OpenAI-compatible REST endpoint (api.puter.com/puterai/openai/v1/),
+    # no SDK or Node.js needed.
+    PUTER_AUTH_TOKEN: str = ""
 
     # ── SEO Agentic AI: autonomous daily scheduling (module 33) ──
     # Runs the full per-site pipeline (technical audit, GSC/GA4 pulls,
@@ -205,6 +273,29 @@ class Settings(BaseSettings):
     # it runs against overnight-settled analytics data before anyone's
     # working day starts, and well clear of any manual testing.
     SEO_AUTOMATION_HOUR: int = 6
+
+    # Indexing Status & Crawl Monitoring — how many URLs the daily cycle's
+    # index_check_node inspects per site per day via the URL Inspection
+    # API (automation/seo/indexing_client.py). Kept small and capped
+    # rather than inspecting every sitemap URL daily: Google enforces its
+    # own per-property inspection quota (documented as roughly 2000/day),
+    # and this app is sharing that quota across whatever else uses the
+    # same property/service account — a low default leaves headroom.
+    SEO_INDEX_CHECK_MAX_URLS: int = 20
+
+    # CTR-opportunity detection (meta_opportunity_node) — a page qualifies
+    # for the meta-rewrite queue when it has real search demand
+    # (impressions >= this) but a snippet that isn't converting that
+    # demand into clicks (CTR <= this). 500 impressions/28 days and a 2%
+    # CTR are deliberately conservative defaults (real, not just
+    # theoretical, underperformance) to keep the queue from filling with
+    # low-signal noise on small sites.
+    SEO_CTR_OPPORTUNITY_MIN_IMPRESSIONS: int = 500
+    SEO_CTR_OPPORTUNITY_MAX_CTR: float = 0.02
+    # Caps how many new candidates get an AI-drafted rewrite per site per
+    # day — each draft is an LLM call, and a page already queued keeps its
+    # existing draft (see agent.database.upsert_meta_rewrite_candidate).
+    SEO_CTR_OPPORTUNITY_MAX_NEW_PER_DAY: int = 10
 
     # ── Server ──
     API_HOST: str = "0.0.0.0"

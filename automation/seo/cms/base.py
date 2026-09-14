@@ -76,6 +76,38 @@ class CmsClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_post_raw_content(self, post_id: str, *, kind: str = "post") -> Optional[str]:
+        """Module 39 — the actual editable content, not get_post's
+        rendered HTML. WordPress's REST API returns two different
+        strings for a post's content: `content.rendered` (shortcodes
+        and Gutenberg blocks already processed into plain HTML — what
+        get_post returns) and `content.raw` (the real stored value,
+        block comments and all, only visible with edit-context auth).
+        Writing rendered HTML back via update_post would silently
+        convert a block-editor post into a classic-HTML one — a real,
+        surprising side effect for something meant to just swap image
+        URLs. Bulk HTML rewriting (webp_bulk_converter.py) always reads
+        and writes through this raw path, never get_post's. Webflow has
+        no separate raw/rendered distinction — its content field is
+        already the one true value, so its implementation is just
+        get_post's content. Never raises — returns None on failure."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def find_post_by_url(self, url: str) -> Optional[CmsPost]:
+        """Module 39 follow-up — resolves an arbitrary live page URL
+        (e.g. one pasted from the site itself) to the actual CMS post/
+        page it corresponds to, so a caller can then get_post_raw_
+        content/update_post against it without already knowing its
+        internal id/kind. WordPress: a "?p=123" query param names the
+        id directly; otherwise the last path segment is the slug,
+        looked up against both posts and pages via the REST API's own
+        ?slug= filter. Webflow: same idea against the collection's slug
+        field. Never raises — returns None if nothing matches or the
+        URL isn't even on this site's domain."""
+        raise NotImplementedError
+
+    @abstractmethod
     def update_post(
         self,
         post_id: str,
@@ -85,6 +117,10 @@ class CmsClient(ABC):
         content: Optional[str] = None,
         meta: Optional[dict] = None,
         kind: str = "post",
+        status: Optional[str] = None,
+        slug: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
     ) -> CmsResult:
         """Updates only the fields actually passed (None = leave
         untouched). meta is a generic passthrough to whatever custom-
@@ -96,8 +132,18 @@ class CmsClient(ABC):
         WordPress post_id resolves against ("post" -> /wp/v2/posts,
         "page" -> /wp/v2/pages) — pass through whatever CmsPost.kind the
         post/page came from list_posts()/list_pages(); meaningless for
-        Webflow, which has only one content type. Never raises —
-        failures come back as CmsResult(ok=False, detail=...)."""
+        Webflow, which has only one content type. status is the one
+        field that actually takes a page live (WordPress's "publish"
+        value; Webflow's WebflowClient maps it onto isDraft) — None
+        leaves the status untouched. create_post below never sets this
+        itself; going live has always needed an explicit, separate
+        human (or human-triggered) action, and this parameter is that
+        action. tags/categories are plain human-readable names, not
+        term IDs — WordPress's own implementation resolves each name to
+        an existing term or creates a new one (see WordPressClient's
+        _resolve_or_create_terms); Webflow has no generic equivalent
+        taxonomy concept, so its implementation ignores them. Never
+        raises — failures come back as CmsResult(ok=False, detail=...)."""
         raise NotImplementedError
 
     @abstractmethod
@@ -105,10 +151,21 @@ class CmsClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def create_post(self, *, title: str, content: str, excerpt: Optional[str] = None) -> CmsResult:
+    def create_post(
+        self,
+        *,
+        title: str,
+        content: str,
+        excerpt: Optional[str] = None,
+        slug: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
+    ) -> CmsResult:
         """Module 34 — creates a genuinely new post, always as a draft
         (never published outright): WordPress gets `status: "draft"`,
         Webflow gets `isDraft: true`. A human still has to hit Publish in
         the CMS itself — this method never puts a page live on its own.
-        Never raises — failures come back as CmsResult(ok=False, ...)."""
+        tags/categories are plain names (see update_post's docstring for
+        how WordPress resolves/creates them; ignored on Webflow). Never
+        raises — failures come back as CmsResult(ok=False, ...)."""
         raise NotImplementedError

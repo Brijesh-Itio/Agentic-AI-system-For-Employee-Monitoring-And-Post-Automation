@@ -784,6 +784,56 @@ class SemrushMetricsCheckRequest(BaseModel):
     site_id: int
 
 
+class RapidApiKeywordCheckRequest(BaseModel):
+    site_id: int
+    country: str = "us"
+
+
+class KeywordResearchRequest(BaseModel):
+    keyword: str
+    language: str = "en"
+    country: str = "us"
+
+
+class MonthlySearchesOut(BaseModel):
+    month: str
+    year: int
+    searches: int
+
+
+class KeywordResearchRowOut(BaseModel):
+    keyword: str
+    avg_monthly_searches: Optional[int] = None
+    low_cpc: Optional[str] = None
+    high_cpc: Optional[str] = None
+    competition_index: Optional[int] = None
+    competition_value: Optional[str] = None
+    intent: list[str] = []
+    intent_confidence: Optional[float] = None
+    advice: list[str] = []
+    content_gap_score: Optional[float] = None
+    estimated_ctr: Optional[float] = None
+    keyword_freshness: Optional[float] = None
+    serp_feature_type: Optional[str] = None
+    monetization_score: Optional[float] = None
+    monthly_search_volumes: list[MonthlySearchesOut] = []
+
+
+class KeywordDifficultyRequest(BaseModel):
+    keyword: str
+    country: str = "us"
+
+
+class KeywordDifficultyOut(BaseModel):
+    keyword: str
+    keyword_difficulty: Optional[int] = None
+    volume: Optional[int] = None
+    competition: Optional[float] = None
+    cpc_dollars: Optional[float] = None
+    monthly_volumes: dict = {}
+    search_intent: Optional[list] = None
+
+
 class SemrushMetricsOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -893,6 +943,47 @@ class GscQueryRowOut(BaseModel):
     ctr: Optional[float] = None
     position: Optional[float] = None
     created_at: Optional[datetime] = None
+
+
+class GscPageRowOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    run_date: date_type
+    page: str
+    clicks: int
+    impressions: int
+    ctr: Optional[float] = None
+    position: Optional[float] = None
+    created_at: Optional[datetime] = None
+
+
+class RankChangeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    query: str
+    previous_position: float
+    current_position: float
+    delta: float
+
+
+class MetaRewriteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    url: str
+    run_date: date_type
+    impressions: int
+    clicks: int
+    ctr: Optional[float] = None
+    position: Optional[float] = None
+    suggested_title: Optional[str] = None
+    suggested_description: Optional[str] = None
+    status: str
+    created_at: Optional[datetime] = None
+    reviewed_at: Optional[datetime] = None
 
 
 class Ga4PullRequest(BaseModel):
@@ -1006,6 +1097,7 @@ class TechnicalIssueOut(BaseModel):
     fix_value: Optional[str] = None
     fix_applied: bool = False
     fix_error: Optional[str] = None
+    ai_suggestion: Optional[str] = None
 
 
 class TechnicalIssueReview(BaseModel):
@@ -1023,6 +1115,20 @@ class DigestOut(BaseModel):
     id: int
     site_id: int
     run_date: date_type
+    narrative: str
+    stats_json: str
+    slack_delivered: bool
+    created_at: Optional[datetime] = None
+
+
+class DigestRollupOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    period: str
+    period_start: date_type
+    period_end: date_type
     narrative: str
     stats_json: str
     slack_delivered: bool
@@ -1146,10 +1252,41 @@ class BlogGenerateRequest(BaseModel):
     min_words: int = 600
 
 
+class ImageGenerateRequest(BaseModel):
+    # If omitted, the route derives a prompt from the post's own
+    # title/topic — an explicit prompt lets a human steer the image
+    # (e.g. "a hand holding a phone" instead of the raw post title).
+    prompt: Optional[str] = None
+
+
+class SheetsShareRequest(BaseModel):
+    email: str
+
+
+class SheetsAdoptRequest(BaseModel):
+    # Accepts either the bare spreadsheet id or a full Google Sheets URL
+    # containing it — the route extracts the id either way.
+    spreadsheet_id_or_url: str
+
+
+class SheetsStatusOut(BaseModel):
+    configured: bool
+    spreadsheet_id: Optional[str] = None
+    url: Optional[str] = None
+    error: Optional[str] = None
+
+
 class BlogPostUpdate(BaseModel):
     title: str
     excerpt: Optional[str] = None
     content: str
+
+
+class BlogTaxonomyUpdate(BaseModel):
+    # None = leave that field untouched; [] clears tags/categories.
+    slug: Optional[str] = None
+    tags: Optional[list[str]] = None
+    categories: Optional[list[str]] = None
 
 
 class BlogPostOut(BaseModel):
@@ -1165,8 +1302,67 @@ class BlogPostOut(BaseModel):
     structure_passed: Optional[bool] = None
     structure_issues_json: Optional[str] = None
     status: str
+    image_url: Optional[str] = None
+    slug: Optional[str] = None
+    # JSON-encoded arrays of plain names, same convention as
+    # structure_issues_json above — the frontend JSON.parses these.
+    tags: Optional[str] = None
+    categories: Optional[str] = None
     cms_post_id: Optional[str] = None
     cms_post_link: Optional[str] = None
     error: Optional[str] = None
     created_at: Optional[datetime] = None
     published_at: Optional[datetime] = None
+
+
+class WebpConvertRequest(BaseModel):
+    site_id: int
+    dry_run: bool = True
+
+
+class WebpConvertUrlRequest(BaseModel):
+    site_id: int
+    url: str
+    dry_run: bool = True
+
+
+class PostConversionDetailOut(BaseModel):
+    post_id: str
+    kind: str
+    title: str
+    image_urls_found: list[str] = []
+    images_converted: int = 0
+    images_cached: int = 0
+    images_failed: int = 0
+    content_changed: bool = False
+    updated: bool = False
+    backup_id: Optional[int] = None
+    error: Optional[str] = None
+
+
+class BulkConvertReportOut(BaseModel):
+    dry_run: bool
+    posts_scanned: int = 0
+    posts_with_images: int = 0
+    posts_updated: int = 0
+    images_found: int = 0
+    images_converted: int = 0
+    images_cached: int = 0
+    images_failed: int = 0
+    error: Optional[str] = None
+    details: list[PostConversionDetailOut] = []
+
+
+class ContentBackupSummaryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    cms_post_id: str
+    kind: str
+    reason: str
+    created_at: Optional[datetime] = None
+
+
+class ContentBackupOut(ContentBackupSummaryOut):
+    original_content: str

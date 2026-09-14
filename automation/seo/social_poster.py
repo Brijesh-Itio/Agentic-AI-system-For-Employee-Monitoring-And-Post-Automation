@@ -15,16 +15,22 @@ selectors against without risking it getting flagged. Needs an image URL
 .env; blank credentials degrade to the same "not configured" result as
 every other optional integration in this codebase, not a crash.
 
-Twitter/X, Facebook: no automation exists for these platforms anywhere
-in this codebase, and building untested browser automation against two
-more platforms — each with its own login flow, composer UI, and anti-
-automation defenses, none of it verifiable without a real account to
-test against — is out of scope here. publish_social_post() for these
-platforms deliberately does not pretend to post; it returns a clear
-"manual posting required" result so the approved content stays exactly
-what it is: text a human copies into the platform themselves. This
-matches the blueprint's own "human hits send" pattern for anything
-relationship/account-sensitive.
+Twitter/X: automation/twitter/poster.py, the official API v2 (POST
+/2/tweets) with OAuth 1.0a — real, verified-against-current-docs
+endpoint shape, but needs real credentials (TWITTER_API_KEY/SECRET/
+ACCESS_TOKEN/ACCESS_TOKEN_SECRET) in .env before it can post; blank
+credentials degrade to the same "not configured" result as Instagram.
+
+Facebook: automation/facebook/poster.py, the official Graph API (POST
+/{page-id}/feed) — same pattern, needs FACEBOOK_PAGE_ACCESS_TOKEN/
+FACEBOOK_PAGE_ID in .env.
+
+Both Twitter and Facebook are listed in AUTOMATED_PLATFORMS because the
+real API integration code exists and is correct against current docs —
+"automated" here means "this codebase can post for you once you supply
+credentials," not "credentials are already configured." Missing
+credentials surface as a clear PublishResult(ok=False, detail=...)
+identical in shape to any other failure, not a crash.
 """
 import logging
 from dataclasses import dataclass
@@ -32,8 +38,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Platforms this module can actually publish to automatically.
-AUTOMATED_PLATFORMS = ("linkedin", "instagram")
+# Platforms this module can actually publish to automatically once
+# credentials are configured (see module docstring above).
+AUTOMATED_PLATFORMS = ("linkedin", "instagram", "twitter", "facebook")
 
 
 @dataclass
@@ -56,6 +63,18 @@ def publish_social_post(platform: str, content: str, image_url: Optional[str] = 
         from automation.instagram.poster import post_to_instagram
 
         result = post_to_instagram(caption=content, image_url=image_url or "")
+        return PublishResult(ok=result.ok, detail=result.detail, external_post_id=result.external_post_id)
+
+    if platform == "twitter":
+        from automation.twitter.poster import post_to_twitter
+
+        result = post_to_twitter(content)
+        return PublishResult(ok=result.ok, detail=result.detail, external_post_id=result.external_post_id)
+
+    if platform == "facebook":
+        from automation.facebook.poster import post_to_facebook
+
+        result = post_to_facebook(content, image_url=image_url)
         return PublishResult(ok=result.ok, detail=result.detail, external_post_id=result.external_post_id)
 
     return PublishResult(

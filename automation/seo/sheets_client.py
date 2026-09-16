@@ -23,6 +23,7 @@ so repeated calls reuse the same sheet rather than creating a new one
 every time.
 """
 import logging
+import urllib.parse
 from typing import Optional
 
 import requests
@@ -63,6 +64,11 @@ TABS = [
     "Page CTR Tracker",
     "Index Alerts",
     "Meta Rewrite Queue",
+    # Module 45 — one row per page audited (whole-site or single-page),
+    # the flat tag-value export requested on top of the pending-issue
+    # queue: what a page's own <head> tags actually say right now, not
+    # just which ones are broken.
+    "Meta Tag Audit",
 ]
 
 # Each tab's header row, written once when the tab is created — matches
@@ -77,6 +83,23 @@ TAB_HEADERS = {
     "Page CTR Tracker": ["Date", "Site", "Page", "Clicks", "Impressions", "CTR", "Position"],
     "Index Alerts": ["Date", "Site", "URL", "Previous Status", "New Status"],
     "Meta Rewrite Queue": ["Date", "Site", "Page", "Impressions", "Clicks", "CTR"],
+    "Meta Tag Audit": [
+        "Date",
+        "Site",
+        "URL",
+        "Title",
+        "Description",
+        "Keywords",
+        "Author",
+        "Publisher",
+        "Copyright",
+        "Subject",
+        "Robots",
+        "Canonical",
+        "OG Tags",
+        "Hreflang x-default",
+        "JSON-LD Types",
+    ],
 }
 
 
@@ -84,16 +107,110 @@ def _headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
+def _ensure_tab_headers(spreadsheet_id: str, token: str) -> list:
+    """Ensures every tab in TABS has its correct header row at row 1 —
+    self-healing, not just "write it once when the tab is first added."
+    Verified live that a real gap existed here: adopt_existing_spreadsheet
+    only ever wrote a header for a tab _add_missing_tabs newly created;
+    a tab that already existed at adoption time (or in one real case, a
+    tab that existed but had a data row appended to it before its header
+    write ever ran) was silently left with no header at all, forever,
+    since nothing ever re-checked it. This checks row 1 of every tab
+    against TAB_HEADERS and fixes whatever doesn't match:
+      - row 1 empty or wrong → not holding real data → header written
+        directly into it.
+      - row 1 already holds real data (the actual case found live: an
+        audit row had landed in A1 because no header write had ever
+        succeeded for that tab) → a fresh row is inserted above it first
+        via batchUpdate, so the header is added without destroying that
+        data.
+    Never raises — logs and skips whatever tab it can't fix, so one bad
+    tab doesn't block the others. Returns the list of tab names actually
+    changed."""
+    def _do_get():
+        response = requests.get(f"{SHEETS_BASE_URL}/{spreadsheet_id}", headers=_headers(token), timeout=TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response
+
+    try:
+        meta = with_retry(_do_get, max_attempts=3, retry_on=(requests.RequestException,)).json()
+    except Exception:
+        logger.exception("_ensure_tab_headers: could not read spreadsheet %s metadata", spreadsheet_id)
+        return []
+
+    sheet_props_by_title = {s["properties"]["title"]: s["properties"] for s in meta.get("sheets", [])}
+
+    fixed = []
+    for tab_name, header in TAB_HEADERS.items():
+        props = sheet_props_by_title.get(tab_name)
+        if props is None:
+            continue  # doesn't exist yet — the caller creates it separately
+
+        last_col = chr(ord("A") + len(header) - 1)
+        quoted_range = urllib.parse.quote(f"'{tab_name}'!A1:{last_col}1", safe="")
+
+        try:
+            row1_response = requests.get(
+                f"{SHEETS_BASE_URL}/{spreadsheet_id}/values/{quoted_range}", headers=_headers(token), timeout=TIMEOUT_SECONDS
+            )
+            row1_response.raise_for_status()
+            current_row1 = (row1_response.json().get("values") or [[]])[0]
+        except Exception:
+            logger.exception("_ensure_tab_headers: could not read row 1 of %r", tab_name)
+            continue
+
+        if current_row1 == header:
+            continue
+
+        if current_row1:
+            try:
+                insert_response = requests.post(
+                    f"{SHEETS_BASE_URL}/{spreadsheet_id}:batchUpdate",
+                    json={
+                        "requests": [
+                            {
+                                "insertDimension": {
+                                    "range": {"sheetId": props["sheetId"], "dimension": "ROWS", "startIndex": 0, "endIndex": 1}
+                                }
+                            }
+                        ]
+                    },
+                    headers=_headers(token),
+                    timeout=TIMEOUT_SECONDS,
+                )
+                insert_response.raise_for_status()
+            except Exception:
+                logger.exception("_ensure_tab_headers: could not insert a header row for %r", tab_name)
+                continue
+
+        try:
+            update_response = requests.put(
+                f"{SHEETS_BASE_URL}/{spreadsheet_id}/values/{quoted_range}",
+                params={"valueInputOption": "RAW"},
+                json={"values": [header]},
+                headers=_headers(token),
+                timeout=TIMEOUT_SECONDS,
+            )
+            update_response.raise_for_status()
+            fixed.append(tab_name)
+        except Exception:
+            logger.exception("_ensure_tab_headers: could not write header for %r", tab_name)
+
+    return fixed
+
+
 def _add_missing_tabs(spreadsheet_id: str, token: str) -> list:
     """Reads the spreadsheet's current tabs, adds whichever of TABS isn't
-    already there, and writes each new tab's header row. Shared by
+    already there, then ensures EVERY tab (newly added or already
+    existing) has its correct header via _ensure_tab_headers. Shared by
     get_or_create_spreadsheet's self-heal path (a spreadsheet created
     before TABS grew a new entry) and adopt_existing_spreadsheet (a
     human-created sheet that never had any of TABS to begin with). Raises
-    on failure — callers decide how to degrade (get_or_create_spreadsheet
-    treats it as non-fatal and returns the id anyway; the pipeline still
-    functions, just without the new tabs until this succeeds on a later
-    call)."""
+    on the tab-creation step — callers decide how to degrade
+    (get_or_create_spreadsheet treats it as non-fatal and returns the id
+    anyway; the pipeline still functions, just without the new tabs until
+    this succeeds on a later call). Header-writing never raises — see
+    _ensure_tab_headers."""
     def _do_get():
         response = requests.get(f"{SHEETS_BASE_URL}/{spreadsheet_id}", headers=_headers(token), timeout=TIMEOUT_SECONDS)
         response.raise_for_status()
@@ -118,10 +235,37 @@ def _add_missing_tabs(spreadsheet_id: str, token: str) -> list:
 
         with_retry(_do_batch_update, max_attempts=3, retry_on=(requests.RequestException,))
 
-        for tab_name in missing:
-            append_row(tab_name, TAB_HEADERS[tab_name])
+    _ensure_tab_headers(spreadsheet_id, token)
 
     return missing
+
+
+def get_tab_url(spreadsheet_id: str, tab_name: str) -> Optional[str]:
+    """A deep link straight into one specific tab (…#gid=<id>), not just
+    the spreadsheet root. Real, observed reason this matters: opening the
+    bare spreadsheet URL lands on whatever tab the browser last had
+    active — for a first-time visitor that's index-0 ("Sheet1", a human's
+    own pre-existing blank tab in the adopt-an-existing-sheet flow), which
+    made a spreadsheet with real data on "Meta Tag Audit" look completely
+    empty. Never raises — returns None on any failure (network, tab not
+    found), in which case a caller should fall back to the bare
+    spreadsheet URL rather than break the link entirely."""
+    token = get_access_token(SCOPES)
+    if token is None:
+        return None
+    try:
+        response = requests.get(f"{SHEETS_BASE_URL}/{spreadsheet_id}", headers=_headers(token), timeout=TIMEOUT_SECONDS)
+        response.raise_for_status()
+        meta = response.json()
+    except Exception:
+        logger.exception("get_tab_url: could not read spreadsheet %s metadata", spreadsheet_id)
+        return None
+
+    for sheet in meta.get("sheets", []):
+        props = sheet.get("properties", {})
+        if props.get("title") == tab_name:
+            return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid={props['sheetId']}"
+    return None
 
 
 def get_or_create_spreadsheet(share_with_email: Optional[str] = None) -> Optional[str]:
@@ -259,14 +403,21 @@ def share_spreadsheet(spreadsheet_id: str, email: str) -> bool:
         return False
 
 
-def append_row(sheet_name: str, row: list) -> bool:
-    """Appends one row to the named tab. Never raises — returns False on
-    any failure (spreadsheet not yet created, tab doesn't exist, auth
+def append_rows(sheet_name: str, rows: list) -> bool:
+    """Appends multiple rows to the named tab in ONE API call — used
+    wherever many rows need writing at once (e.g. one row per page from
+    a whole-site audit) so logging a 30-page crawl doesn't cost 30
+    sequential HTTP round-trips. Never raises — returns False on any
+    failure (spreadsheet not yet created, tab doesn't exist, auth
     failure), so a caller can log/skip rather than let a Sheets hiccup
-    break the pipeline step that's trying to log to it."""
+    break the pipeline step that's trying to log to it. rows=[] is a
+    no-op success, not a failure — nothing to write isn't an error."""
+    if not rows:
+        return True
+
     spreadsheet_id = database.get_app_setting(SPREADSHEET_ID_SETTING_KEY)
     if not spreadsheet_id:
-        logger.warning("append_row(%s): no spreadsheet created yet — call get_or_create_spreadsheet() first", sheet_name)
+        logger.warning("append_rows(%s): no spreadsheet created yet — call get_or_create_spreadsheet() first", sheet_name)
         return False
 
     token = get_access_token(SCOPES)
@@ -279,7 +430,7 @@ def append_row(sheet_name: str, row: list) -> bool:
         response = requests.post(
             url,
             params={"valueInputOption": "USER_ENTERED"},
-            json={"values": [[str(cell) for cell in row]]},
+            json={"values": [[str(cell) for cell in row] for row in rows]},
             headers=_headers(token),
             timeout=TIMEOUT_SECONDS,
         )
@@ -290,5 +441,11 @@ def append_row(sheet_name: str, row: list) -> bool:
         with_retry(_do_append, max_attempts=3, retry_on=(requests.RequestException,))
         return True
     except Exception:
-        logger.exception("Failed to append a row to %r", sheet_name)
+        logger.exception("Failed to append %d row(s) to %r", len(rows), sheet_name)
         return False
+
+
+def append_row(sheet_name: str, row: list) -> bool:
+    """Appends one row to the named tab — see append_rows for the
+    multi-row version this delegates to."""
+    return append_rows(sheet_name, [row])

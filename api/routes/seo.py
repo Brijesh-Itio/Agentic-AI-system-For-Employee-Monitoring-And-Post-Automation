@@ -11,6 +11,7 @@ from datetime import date as date_cls, datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse
 
+from bs4 import BeautifulSoup
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import case
 from sqlalchemy.orm import Session
@@ -70,11 +71,28 @@ from api.schemas import (
     OgTagsGenerateRequest,
     OgTagsOut,
     RankChangeOut,
+    BacklinkRowOut,
+    BulkDomainAuthorityRequest,
+    DomainAuthorityOut,
+    DomainAuthorityRequest,
+    GscDimensionRequest,
+    GscDimensionRowOut,
+    SitemapActionOut,
+    SitemapActionRequest,
+    SitemapInfoOut,
+    SitemapListRequest,
+    VerifiedSiteOut,
     KeywordDifficultyOut,
     KeywordDifficultyRequest,
+    KeywordInsightOut,
+    KeywordInsightRequest,
+    TopBacklinksRequest,
+    WebsiteTrafficOut,
+    WebsiteTrafficRequest,
     KeywordResearchRequest,
     KeywordResearchRowOut,
     PageSpeedCheckRequest,
+    PageSpeedOpportunityItemOut,
     PageSpeedOpportunityOut,
     BulkConvertReportOut,
     ContentBackupOut,
@@ -117,6 +135,10 @@ from api.schemas import (
     SocialPostOut,
     StructureReportOut,
     TechnicalAuditRequest,
+    PageTagAuditOut,
+    PageTagAuditRequest,
+    PageTagFindingOut,
+    TechnicalIssueEditTargetOut,
     TechnicalIssueOut,
     TechnicalIssueReview,
     UrlInspectRequest,
@@ -139,6 +161,8 @@ from automation.seo.gsc_client import fetch_search_analytics, fetch_search_analy
 from automation.seo.indexing_client import fetch_url_inspection, submit_url_for_indexing
 from automation.seo.issue_applier import apply_fix as apply_issue_fix
 from automation.seo.issue_applier import apply_fix_to_static_file
+from automation.seo.issue_applier import find_post_by_url as find_cms_post_by_url
+from automation.seo.issue_applier import remote_path_for_url
 from automation.seo.pagespeed_client import extract_resource_report, fetch_page_speed
 from automation.seo.semrush_client import (
     fetch_backlink_gap as fetch_semrush_backlink_gap,
@@ -149,6 +173,8 @@ from automation.seo.semrush_client import (
 from automation.seo.server_access import client_for_site as sftp_client_for_site
 from automation.seo.slack_notifier import send_slack_message
 from automation.seo.social_poster import publish_social_post
+from automation.seo.page_tag_audit import extract_tag_values as extract_page_tag_values
+from automation.seo.page_tag_audit import run_page_tag_audit
 from automation.seo.technical_audit import run_all_detectors
 from automation.seo.url_safety import UnsafeUrlError, assert_public_url
 
@@ -183,6 +209,19 @@ def _log_to_sheet_safe(sheet_name: str, row: list) -> None:
 
         if get_or_create_spreadsheet():
             append_row(sheet_name, row)
+    except Exception:
+        logger.exception("Sheets logging failed for %r", sheet_name)
+
+
+def _log_rows_to_sheet_safe(sheet_name: str, rows: list) -> None:
+    """Module 45 — same best-effort contract as _log_to_sheet_safe, but
+    for many rows in one call (e.g. one row per page from a whole-site
+    audit) so this doesn't cost one HTTP round-trip per page."""
+    try:
+        from automation.seo.sheets_client import append_rows, get_or_create_spreadsheet
+
+        if get_or_create_spreadsheet():
+            append_rows(sheet_name, rows)
     except Exception:
         logger.exception("Sheets logging failed for %r", sheet_name)
 
@@ -627,6 +666,100 @@ def keyword_difficulty_route(payload: KeywordDifficultyRequest):
     return result
 
 
+@router.post("/backlinks/top", response_model=list[BacklinkRowOut])
+def top_backlinks_route(payload: TopBacklinksRequest, db: Session = Depends(get_db)):
+    """Module 47 — real, page-level backlink detail (source URL, anchor
+    text, follow/nofollow, spam score) from the semrush-seo3 RapidAPI
+    product's /backlink.php, verified live this session against
+    webpays.com and rapidapi.com. Distinct from SemrushLinkExplorer above
+    (the official Semrush API, scoped to this site's own domain only) —
+    this endpoint works for any domain, including a competitor's."""
+    from automation.seo.rapidapi_domain_client import fetch_top_backlinks, is_configured
+
+    if not is_configured():
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_MAGIC_KEY is not set in .env")
+    _site_or_404(payload.site_id, db)
+
+    rows = fetch_top_backlinks(payload.website)
+    if rows is None:
+        raise HTTPException(status_code=502, detail="Top backlinks request failed — see server logs")
+    return rows
+
+
+@router.post("/backlinks/domain-authority", response_model=DomainAuthorityOut)
+def domain_authority_route(payload: DomainAuthorityRequest, db: Session = Depends(get_db)):
+    """Module 47 — Domain/Page Authority, spam score, Domain Rating, and
+    estimated organic traffic for one domain (semrush-seo3's /dapa.php),
+    verified live this session."""
+    from automation.seo.rapidapi_domain_client import fetch_domain_authority, is_configured
+
+    if not is_configured():
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_MAGIC_KEY is not set in .env")
+    _site_or_404(payload.site_id, db)
+
+    result = fetch_domain_authority(payload.website)
+    if result is None:
+        raise HTTPException(status_code=502, detail="Domain authority request failed — see server logs")
+    return result
+
+
+@router.post("/backlinks/domain-authority/bulk", response_model=list[DomainAuthorityOut])
+def bulk_domain_authority_route(payload: BulkDomainAuthorityRequest, db: Session = Depends(get_db)):
+    """Module 47 — same metrics as /backlinks/domain-authority, for
+    several domains in one call (semrush-seo3's /bulk-dapa.php),
+    verified live this session with two real domains returning distinct,
+    genuine values each."""
+    from automation.seo.rapidapi_domain_client import fetch_bulk_domain_authority, is_configured
+
+    if not is_configured():
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_MAGIC_KEY is not set in .env")
+    _site_or_404(payload.site_id, db)
+
+    domains = [d.strip() for d in payload.domains if d.strip()]
+    if not domains:
+        raise HTTPException(status_code=400, detail="At least one domain is required")
+
+    rows = fetch_bulk_domain_authority(domains)
+    if rows is None:
+        raise HTTPException(status_code=502, detail="Bulk domain authority request failed — see server logs")
+    return rows
+
+
+@router.post("/keywords/insights", response_model=KeywordInsightOut)
+def keyword_insights_route(payload: KeywordInsightRequest):
+    """Module 47 — search volume/CPC/competition/intent for one keyword
+    (semrush-seo3's /keyword-tool.php), verified live this session; the
+    numbers matched exactly against the same keyword's Keyword Difficulty
+    result, confirming both are reading real, consistent underlying data."""
+    from automation.seo.rapidapi_domain_client import fetch_keyword_insights, is_configured
+
+    if not is_configured():
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_MAGIC_KEY is not set in .env")
+
+    result = fetch_keyword_insights(payload.keyword, country=payload.country)
+    if result is None:
+        raise HTTPException(status_code=502, detail="Keyword insights request failed — see server logs")
+    return result
+
+
+@router.post("/backlinks/website-traffic", response_model=WebsiteTrafficOut)
+def website_traffic_route(payload: WebsiteTrafficRequest, db: Session = Depends(get_db)):
+    """Module 47 — estimated organic traffic, ranked-keyword count,
+    position distribution, and real sample ranking keywords for one
+    domain (semrush-seo3's /webtraffic.php), verified live this session
+    against webpays.com: 824 ranked keywords with real per-page URLs."""
+    from automation.seo.rapidapi_domain_client import fetch_website_traffic, is_configured
+
+    if not is_configured():
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_MAGIC_KEY is not set in .env")
+    _site_or_404(payload.site_id, db)
+
+    result = fetch_website_traffic(payload.website)
+    if result is None:
+        raise HTTPException(status_code=502, detail="Website traffic request failed — see server logs")
+    return result
+
+
 @router.post("/pagespeed/check", response_model=PageSpeedResultOut, status_code=201)
 def check_pagespeed(payload: PageSpeedCheckRequest, db: Session = Depends(get_db)):
     site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
@@ -704,6 +837,15 @@ def pagespeed_opportunities(result_id: int, db: Session = Depends(get_db)):
                 description=o.description,
                 savings_ms=o.savings_ms,
                 savings_bytes=o.savings_bytes,
+                items=[
+                    PageSpeedOpportunityItemOut(
+                        url=item.url,
+                        wasted_bytes=item.wasted_bytes,
+                        wasted_ms=item.wasted_ms,
+                        total_bytes=item.total_bytes,
+                    )
+                    for item in o.items
+                ],
             )
             for o in report.opportunities
         ],
@@ -791,6 +933,119 @@ def list_gsc_pages(site_id: int, limit: int = 100, db: Session = Depends(get_db)
         .limit(limit)
         .all()
     )
+
+
+def _gsc_dimension_route(payload: GscDimensionRequest, db: Session, fetch_fn):
+    site = _site_or_404(payload.site_id, db)
+    end_date = date_cls.today()
+    start_date = end_date - timedelta(days=payload.days_back)
+    rows = fetch_fn(start_date, end_date, row_limit=payload.row_limit, site_url=_effective_gsc_url(site))
+    if rows is None:
+        raise HTTPException(status_code=502, detail="GSC fetch failed — see server logs")
+    return rows
+
+
+@router.post("/gsc/country", response_model=list[GscDimensionRowOut])
+def gsc_by_country_route(payload: GscDimensionRequest, db: Session = Depends(get_db)):
+    """Module 48 — country-dimension breakdown, live (stateless, no local
+    table — this data is cheap to re-fetch and isn't fed into any
+    existing pipeline the way query/page dimensions are)."""
+    from automation.seo.gsc_client import fetch_search_analytics_by_country
+
+    return _gsc_dimension_route(payload, db, fetch_search_analytics_by_country)
+
+
+@router.post("/gsc/device", response_model=list[GscDimensionRowOut])
+def gsc_by_device_route(payload: GscDimensionRequest, db: Session = Depends(get_db)):
+    """Module 48 — device-dimension breakdown (DESKTOP/MOBILE/TABLET)."""
+    from automation.seo.gsc_client import fetch_search_analytics_by_device
+
+    return _gsc_dimension_route(payload, db, fetch_search_analytics_by_device)
+
+
+@router.post("/gsc/search-appearance", response_model=list[GscDimensionRowOut])
+def gsc_by_search_appearance_route(payload: GscDimensionRequest, db: Session = Depends(get_db)):
+    """Module 48 — search-appearance-dimension breakdown (which SERP
+    feature type impressions came from)."""
+    from automation.seo.gsc_client import fetch_search_analytics_by_search_appearance
+
+    return _gsc_dimension_route(payload, db, fetch_search_analytics_by_search_appearance)
+
+
+@router.post("/sitemaps", response_model=list[SitemapInfoOut])
+def list_sitemaps_route(payload: SitemapListRequest, db: Session = Depends(get_db)):
+    """Module 48 — real Search Console Sitemaps list for this property.
+    An empty list is a genuine result (no sitemap submitted yet), not a
+    failure; a 502 means the actual Google API call failed (commonly:
+    the service account isn't a Search Console user on this property —
+    the same permission gap every other GSC feature in this app hits for
+    a not-yet-shared property)."""
+    from automation.seo.sitemap_client import list_sitemaps
+
+    site = _site_or_404(payload.site_id, db)
+    site_url = _effective_gsc_url(site)
+    if not site_url:
+        raise HTTPException(status_code=400, detail="No GSC property configured for this site")
+
+    sitemaps = list_sitemaps(site_url)
+    if sitemaps is None:
+        raise HTTPException(status_code=502, detail="Sitemaps request failed — see server logs")
+    return sitemaps
+
+
+@router.post("/sitemaps/submit", response_model=SitemapActionOut)
+def submit_sitemap_route(payload: SitemapActionRequest, db: Session = Depends(get_db)):
+    """Module 48 — registers a sitemap with Search Console. Needs the
+    broader read-write "webmasters" scope, which needs the service
+    account to be a Full user or Owner on this property in Search
+    Console — a Restricted/read-only user (enough for every other GSC
+    feature in this app) gets a real 403 here, surfaced as ok=false
+    rather than a generic error."""
+    from automation.seo.sitemap_client import submit_sitemap
+
+    site = _site_or_404(payload.site_id, db)
+    site_url = _effective_gsc_url(site)
+    if not site_url:
+        raise HTTPException(status_code=400, detail="No GSC property configured for this site")
+    return submit_sitemap(site_url, payload.feedpath)
+
+
+@router.post("/sitemaps/delete", response_model=SitemapActionOut)
+def delete_sitemap_route(payload: SitemapActionRequest, db: Session = Depends(get_db)):
+    """Module 48 — same permission requirement as /sitemaps/submit above."""
+    from automation.seo.sitemap_client import delete_sitemap
+
+    site = _site_or_404(payload.site_id, db)
+    site_url = _effective_gsc_url(site)
+    if not site_url:
+        raise HTTPException(status_code=400, detail="No GSC property configured for this site")
+    return delete_sitemap(site_url, payload.feedpath)
+
+
+@router.get("/site-verification", response_model=list[VerifiedSiteOut])
+def list_verified_sites_route():
+    """Module 49 — properties this service account has itself verified
+    ownership of via the Site Verification API — a genuinely separate
+    Google permission system from "added as a Search Console user" (see
+    automation/seo/site_verification_client.py's module docstring). Live-
+    verified this session that this specific API call needs more than a
+    bare service-account JWT can provide (Google returned
+    ACCESS_TOKEN_SCOPE_INSUFFICIENT even with the correct scope
+    requested) — surfaced as a real 502 rather than silently returning an
+    empty list, so this honestly shows as broken instead of looking like
+    "zero verified sites."""
+    from automation.seo.site_verification_client import list_verified_sites
+
+    sites = list_verified_sites()
+    if sites is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Site Verification API call failed — Google rejected the service account's credentials for "
+            "this specific API (verified live: ACCESS_TOKEN_SCOPE_INSUFFICIENT). This API generally requires "
+            "Google Workspace domain-wide delegation for service-account access, not just enabling the API — "
+            "see server logs for the exact error.",
+        )
+    return sites
 
 
 @router.get("/meta-rewrites", response_model=list[MetaRewriteOut])
@@ -1042,12 +1297,92 @@ def run_technical_audit_route(payload: TechnicalAuditRequest, db: Session = Depe
     run_date = date_cls.today()
     database.upsert_technical_issues(payload.site_id, run_date, issues)
 
+    # Module 45 — one Meta Tag Audit row per successfully-fetched page,
+    # reusing the HTML this crawl already downloaded (no second fetch per
+    # page) and one batched Sheets write for the whole set (no per-page
+    # HTTP round-trip).
+    tag_rows = []
+    for page in pages:
+        if not page.html or page.status_code != 200:
+            continue
+        tv = extract_page_tag_values(BeautifulSoup(page.html, "html.parser"))
+        tag_rows.append(
+            [
+                run_date.isoformat(),
+                site.name,
+                page.url,
+                tv.get("title", ""),
+                tv.get("description", ""),
+                tv.get("keywords", ""),
+                tv.get("author", ""),
+                tv.get("publisher", ""),
+                tv.get("copyright", ""),
+                tv.get("subject", ""),
+                tv.get("robots", ""),
+                tv.get("canonical", ""),
+                tv.get("og_tags", ""),
+                tv.get("hreflang_x_default", ""),
+                tv.get("json_ld", ""),
+            ]
+        )
+    _log_rows_to_sheet_safe("Meta Tag Audit", tag_rows)
+
     db.expire_all()
     return (
         db.query(SeoTechnicalIssue)
         .filter(SeoTechnicalIssue.site_id == payload.site_id)
         .order_by(SeoTechnicalIssue.severity.asc(), SeoTechnicalIssue.created_at.desc())
         .all()
+    )
+
+
+@router.post("/technical/audit/page", response_model=PageTagAuditOut)
+def run_page_tag_audit_route(payload: PageTagAuditRequest, db: Session = Depends(get_db)):
+    """Module 44 — the single-page counterpart to /technical/audit above:
+    one live fetch, classified into missing/existing/duplicate/invalid
+    tags, instead of a full site crawl feeding the issue-approval queue.
+    Stateless by design (nothing is written to seo_technical_issues) —
+    this is a one-off "what does this page's <head> look like right now"
+    check, not a recurring backlog item."""
+    site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
+
+    report = run_page_tag_audit(payload.url)
+    if report.fetch_error:
+        raise HTTPException(status_code=502, detail=f"Could not fetch {payload.url}: {report.fetch_error}")
+
+    tv = report.tag_values
+    _log_to_sheet_safe(
+        "Meta Tag Audit",
+        [
+            date_cls.today().isoformat(),
+            site.name,
+            report.url,
+            tv.get("title", ""),
+            tv.get("description", ""),
+            tv.get("keywords", ""),
+            tv.get("author", ""),
+            tv.get("publisher", ""),
+            tv.get("copyright", ""),
+            tv.get("subject", ""),
+            tv.get("robots", ""),
+            tv.get("canonical", ""),
+            tv.get("og_tags", ""),
+            tv.get("hreflang_x_default", ""),
+            tv.get("json_ld", ""),
+        ],
+    )
+
+    def _out(findings):
+        return [PageTagFindingOut(tag=f.tag, detail=f.detail, values=f.values) for f in findings]
+
+    return PageTagAuditOut(
+        url=report.url,
+        missing_tags=_out(report.missing_tags),
+        existing_tags=_out(report.existing_tags),
+        duplicate_tags=_out(report.duplicate_tags),
+        invalid_tags=_out(report.invalid_tags),
     )
 
 
@@ -1100,6 +1435,78 @@ def resolve_technical_issue_route(issue_id: int, payload: TechnicalIssueReview, 
         raise HTTPException(status_code=404, detail=f"No technical issue {issue_id}")
     db.expire_all()
     return db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
+
+
+def _resolve_edit_target(site: SeoSite, url: str) -> TechnicalIssueEditTargetOut:
+    """Module 42 — resolves ANY url on a site to somewhere a human can
+    actually go fix it. Shared by the technical-issue edit-target route
+    below and the PageSpeed opportunity one (module 43) — same two real
+    cases, tried in order: (1) a CMS post/page backs this URL
+    (find_post_by_url — the same resolver /apply-fix already trusts) —
+    return the real CMS admin edit screen for it. (2) no CMS post, but
+    this site's Server Access connection can actually read a file at the
+    URL's own path (a real, verified case: webpays.com's landing pages,
+    and any external .css/.js asset PageSpeed points at, are static
+    files with no CMS behind them at all) — return that exact path, only
+    after confirming the read succeeds so this never sends someone to a
+    file that isn't there. Otherwise says plainly that neither resolved,
+    rather than guessing."""
+    client = _cms_client_for(site)
+    if client is not None:
+        post = find_cms_post_by_url(client, url)
+        if post is not None:
+            edit_url = client.admin_edit_url(post.id, kind=post.kind)
+            if edit_url:
+                return TechnicalIssueEditTargetOut(
+                    kind="cms",
+                    edit_url=edit_url,
+                    detail=f"Opens the real {client.name} editor for this {post.kind}.",
+                )
+
+    server_client = sftp_client_for_site(site)
+    if server_client is not None:
+        candidate_path = remote_path_for_url(url)
+        try:
+            server_client.read_file(candidate_path)
+        except Exception:
+            pass
+        else:
+            return TechnicalIssueEditTargetOut(
+                kind="static_file",
+                file_path=candidate_path,
+                detail="Not a CMS post — this is a static file on your server.",
+            )
+
+    return TechnicalIssueEditTargetOut(
+        kind="unavailable",
+        detail="Couldn't find a CMS post or a matching file on the server for this URL.",
+    )
+
+
+@router.get("/technical/issues/{issue_id}/edit-target", response_model=TechnicalIssueEditTargetOut)
+def get_technical_issue_edit_target_route(issue_id: int, db: Session = Depends(get_db)):
+    """So "Mark as fixed manually" isn't a dead end — see
+    _resolve_edit_target's docstring for how this resolves."""
+    row = db.query(SeoTechnicalIssue).filter(SeoTechnicalIssue.id == issue_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No technical issue {issue_id}")
+    site = db.query(SeoSite).filter(SeoSite.id == row.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
+    return _resolve_edit_target(site, row.url)
+
+
+@router.get("/edit-target", response_model=TechnicalIssueEditTargetOut)
+def get_url_edit_target_route(site_id: int, url: str, db: Session = Depends(get_db)):
+    """Module 43 — the same edit-target resolution, but for an arbitrary
+    URL rather than a stored technical-issue row: PageSpeed's fix list
+    points at specific resource files (a particular .css/.js Lighthouse
+    measured wasted bytes on) that never went through the technical
+    audit at all, so there's no issue id to key off of here."""
+    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+    return _resolve_edit_target(site, url)
 
 
 @router.post("/technical/issues/{issue_id}/generate-fix", response_model=TechnicalIssueOut)
@@ -1268,6 +1675,18 @@ def list_digest_rollups_route(site_id: int, period: Optional[str] = None, limit:
     return query.order_by(SeoDigestRollup.period_start.desc()).limit(limit).all()
 
 
+def _sheet_open_url(spreadsheet_id: str) -> str:
+    """The bare spreadsheet edit URL opens whatever tab the browser last
+    had active — for a first-time visitor that's index-0, a human's own
+    pre-existing "Sheet1", not any of this app's own tabs. Deep-links
+    straight into "Meta Tag Audit" instead (the tab most people click
+    "Open spreadsheet" to actually check), falling back to the bare URL
+    if the gid lookup itself fails for any reason."""
+    from automation.seo.sheets_client import get_tab_url
+
+    return get_tab_url(spreadsheet_id, "Meta Tag Audit") or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+
+
 @router.get("/sheets", response_model=SheetsStatusOut)
 def get_sheets_status_route():
     """Creates the Google Sheets command-centre spreadsheet on first
@@ -1288,7 +1707,7 @@ def get_sheets_status_route():
     return SheetsStatusOut(
         configured=True,
         spreadsheet_id=spreadsheet_id,
-        url=f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit",
+        url=_sheet_open_url(spreadsheet_id),
     )
 
 
@@ -1304,7 +1723,7 @@ def share_sheets_route(payload: SheetsShareRequest):
     return SheetsStatusOut(
         configured=ok,
         spreadsheet_id=spreadsheet_id,
-        url=f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit",
+        url=_sheet_open_url(spreadsheet_id),
         error=None if ok else f"Could not share with {payload.email} — see server logs",
     )
 
@@ -1329,7 +1748,7 @@ def adopt_sheets_route(payload: SheetsAdoptRequest):
     return SheetsStatusOut(
         configured=ok,
         spreadsheet_id=spreadsheet_id if ok else None,
-        url=f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit" if ok else None,
+        url=_sheet_open_url(spreadsheet_id) if ok else None,
         error=None if ok else "Could not read/write this spreadsheet — make sure it's shared with "
         "workpulse-seo-agent@workpulse-ai-506706.iam.gserviceaccount.com as Editor, and the id/URL is correct.",
     )

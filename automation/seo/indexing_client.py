@@ -59,6 +59,13 @@ class UrlInspectionResult:
     google_canonical: Optional[str]
     user_canonical: Optional[str]
     sitemap: List[str]
+    # Google's response carries this as a genuinely separate top-level
+    # result object (mobileUsabilityResult), not part of indexStatusResult
+    # — verified live this session that the real API response includes it
+    # even though this field previously went unparsed. "VERDICT_UNSPECIFIED"
+    # is Google's own value when it hasn't run a mobile-usability check for
+    # this URL yet, not a failure of this call.
+    mobile_usability_verdict: Optional[str] = None
 
 
 @dataclass
@@ -115,7 +122,9 @@ def fetch_url_inspection(url: str, site_url: Optional[str] = None) -> Optional[U
         logger.exception("URL Inspection API failed (url=%s)", url)
         return None
 
-    index_result = (data.get("inspectionResult") or {}).get("indexStatusResult") or {}
+    inspection_result = data.get("inspectionResult") or {}
+    index_result = inspection_result.get("indexStatusResult") or {}
+    mobile_result = inspection_result.get("mobileUsabilityResult") or {}
     return UrlInspectionResult(
         url=url,
         verdict=index_result.get("verdict"),
@@ -127,6 +136,7 @@ def fetch_url_inspection(url: str, site_url: Optional[str] = None) -> Optional[U
         google_canonical=index_result.get("googleCanonical"),
         user_canonical=index_result.get("userCanonical"),
         sitemap=index_result.get("sitemap") or [],
+        mobile_usability_verdict=mobile_result.get("verdict"),
     )
 
 

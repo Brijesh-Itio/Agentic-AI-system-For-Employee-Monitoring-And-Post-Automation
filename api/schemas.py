@@ -834,6 +834,95 @@ class KeywordDifficultyOut(BaseModel):
     search_intent: Optional[list] = None
 
 
+# Module 47 — RapidAPI "SEMrush SEO" domain-analysis wrapper
+# (automation/seo/rapidapi_domain_client.py). site_id is required on the
+# domain/website-lookup requests purely for site-existence validation
+# consistency with the rest of this API, not because the lookup itself is
+# scoped to that site — checking a competitor's domain is the whole point.
+
+class TopBacklinksRequest(BaseModel):
+    site_id: int
+    website: str
+
+
+class BacklinkRowOut(BaseModel):
+    url_from: str
+    url_to: str
+    title: str
+    anchor: str
+    nofollow: bool
+    # This provider's numeric fields aren't reliably integers — verified
+    # live that "dr" on DomainAuthorityOut below came back as 0.3 for a
+    # real domain (inquid.com), breaking response validation under a
+    # strict int type. Every numeric field sourced from this same
+    # provider (automation/seo/rapidapi_domain_client.py) is float here
+    # defensively, not just the one field that happened to break first.
+    inlink_rank: Optional[float] = None
+    domain_inlink_rank: Optional[float] = None
+    first_seen: str
+    last_visited: str
+    date_lost: str
+    spam_score: Optional[float] = None
+
+
+class DomainAuthorityRequest(BaseModel):
+    site_id: int
+    website: str
+
+
+class BulkDomainAuthorityRequest(BaseModel):
+    site_id: int
+    domains: list[str]
+
+
+class DomainAuthorityOut(BaseModel):
+    domain: str
+    da: Optional[float] = None
+    pa: Optional[float] = None
+    spam_score: Optional[float] = None
+    dr: Optional[float] = None
+    org_traffic: Optional[float] = None
+
+
+class KeywordInsightRequest(BaseModel):
+    keyword: str
+    country: str = "us"
+
+
+class KeywordInsightOut(BaseModel):
+    keyword: str
+    volume: Optional[float] = None
+    competition: Optional[float] = None
+    cpc_dollars: Optional[float] = None
+    sd: Optional[float] = None
+    monthly_volumes: dict = {}
+    search_intent: Optional[list] = None
+
+
+class WebsiteTrafficRequest(BaseModel):
+    site_id: int
+    website: str
+
+
+class SampleKeywordOut(BaseModel):
+    keyword: str
+    position: Optional[float] = None
+    search_volume: Optional[float] = None
+    etv: Optional[float] = None
+    cpc: Optional[float] = None
+    url: str
+
+
+class WebsiteTrafficOut(BaseModel):
+    domain: str
+    organic_etv: Optional[float] = None
+    organic_keywords: Optional[float] = None
+    ranked_keywords_total: Optional[float] = None
+    estimated_paid_traffic_cost: Optional[float] = None
+    position_distribution: dict = {}
+    sample_keywords: list[SampleKeywordOut] = []
+
+
 class SemrushMetricsOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -909,12 +998,20 @@ class PageSpeedResultOut(BaseModel):
     created_at: Optional[datetime] = None
 
 
+class PageSpeedOpportunityItemOut(BaseModel):
+    url: Optional[str] = None
+    wasted_bytes: Optional[float] = None
+    wasted_ms: Optional[float] = None
+    total_bytes: Optional[float] = None
+
+
 class PageSpeedOpportunityOut(BaseModel):
     audit_id: str
     title: str
     description: str
     savings_ms: Optional[float] = None
     savings_bytes: Optional[float] = None
+    items: list[PageSpeedOpportunityItemOut] = []
 
 
 class ResourceAuditReportOut(BaseModel):
@@ -1104,6 +1201,32 @@ class TechnicalIssueReview(BaseModel):
     reviewed_by: Optional[str] = None
 
 
+class TechnicalIssueEditTargetOut(BaseModel):
+    kind: str  # "cms" | "static_file" | "unavailable"
+    edit_url: Optional[str] = None
+    file_path: Optional[str] = None
+    detail: str
+
+
+class PageTagAuditRequest(BaseModel):
+    site_id: int
+    url: str
+
+
+class PageTagFindingOut(BaseModel):
+    tag: str
+    detail: str
+    values: list[str] = []
+
+
+class PageTagAuditOut(BaseModel):
+    url: str
+    missing_tags: list[PageTagFindingOut]
+    existing_tags: list[PageTagFindingOut]
+    duplicate_tags: list[PageTagFindingOut]
+    invalid_tags: list[PageTagFindingOut]
+
+
 class DigestGenerateRequest(BaseModel):
     site_id: int
     send_to_slack: bool = True
@@ -1207,7 +1330,65 @@ class IndexStatusOut(BaseModel):
     last_crawl_time: Optional[str] = None
     google_canonical: Optional[str] = None
     user_canonical: Optional[str] = None
+    mobile_usability_verdict: Optional[str] = None
     checked_at: Optional[datetime] = None
+
+
+# Module 48/49 — GSC dimension filtering, Sitemaps management, Site
+# Verification. Stateless (no local persistence) — this data lives in
+# Google's own system and is cheap enough to re-fetch live each time.
+
+class GscDimensionRequest(BaseModel):
+    site_id: int
+    days_back: int = 7
+    row_limit: int = 100
+
+
+class GscDimensionRowOut(BaseModel):
+    key: str
+    clicks: int
+    impressions: int
+    ctr: float
+    position: float
+
+
+class SitemapListRequest(BaseModel):
+    site_id: int
+
+
+class SitemapContentTypeOut(BaseModel):
+    type: str
+    submitted: Optional[int] = None
+    indexed: Optional[int] = None
+
+
+class SitemapInfoOut(BaseModel):
+    path: str
+    last_submitted: Optional[str] = None
+    is_pending: Optional[bool] = None
+    is_sitemaps_index: Optional[bool] = None
+    type: Optional[str] = None
+    last_downloaded: Optional[str] = None
+    warnings: Optional[int] = None
+    errors: Optional[int] = None
+    contents: list[SitemapContentTypeOut] = []
+
+
+class SitemapActionRequest(BaseModel):
+    site_id: int
+    feedpath: str
+
+
+class SitemapActionOut(BaseModel):
+    ok: bool
+    detail: str
+
+
+class VerifiedSiteOut(BaseModel):
+    id: str
+    type: Optional[str] = None
+    identifier: Optional[str] = None
+    owners: list[str] = []
 
 
 class IndexingSubmitRequest(BaseModel):

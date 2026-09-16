@@ -151,6 +151,19 @@ class CmsClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def admin_edit_url(self, post_id: str, *, kind: str = "post") -> Optional[str]:
+        """Module 42 — a real link into this CMS's own edit screen for
+        one specific post/page, so a human fixing a technical-audit issue
+        (missing alt text, a duplicate title, ...) lands exactly where
+        the content actually lives instead of having to find it
+        themselves. Pure URL construction, no network call. Returns None
+        when no such deep link is knowable (e.g. Webflow, whose designer
+        URLs need a site id/slug this interface doesn't have) — a caller
+        must treat None as "not available," never fall back to guessing
+        one."""
+        raise NotImplementedError
+
+    @abstractmethod
     def create_post(
         self,
         *,

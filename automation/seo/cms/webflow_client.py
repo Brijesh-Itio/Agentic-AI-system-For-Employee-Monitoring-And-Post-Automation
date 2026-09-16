@@ -201,6 +201,14 @@ class WebflowClient(CmsClient):
         except Exception:
             return False
 
+    def admin_edit_url(self, post_id: str, *, kind: str = "post") -> Optional[str]:
+        # Webflow's Designer/CMS editor URLs are keyed by the site's own
+        # workspace slug (webflow.com/dashboard/sites/<site-slug>/...),
+        # which this client is never given — only a collection id and an
+        # API token. Guessing a URL that's wrong is worse than admitting
+        # there's no deep link available.
+        return None
+
     def create_post(
         self,
         *,

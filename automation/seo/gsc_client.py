@@ -43,6 +43,20 @@ class GscPageRow:
     position: float
 
 
+@dataclass
+class GscDimensionRow:
+    """Shared row shape for the three single-value dimensions below
+    (country, device, searchAppearance) — unlike query/page, none of
+    these need a semantically distinct field name; `key` is whatever
+    that dimension's value is (a country code, "MOBILE"/"DESKTOP"/
+    "TABLET", or a search-appearance type like "AMP_BLUE_LINK")."""
+    key: str
+    clicks: int
+    impressions: int
+    ctr: float
+    position: float
+
+
 def _query_search_analytics(
     start_date: date_cls, end_date: date_cls, dimension: str, row_limit: int, site_url: Optional[str]
 ) -> Optional[list]:
@@ -135,3 +149,48 @@ def fetch_search_analytics_by_page(
         )
         for row in rows
     ]
+
+
+def _fetch_by_dimension(
+    dimension: str, start_date: date_cls, end_date: date_cls, row_limit: int, site_url: Optional[str]
+) -> Optional[List[GscDimensionRow]]:
+    rows = _query_search_analytics(start_date, end_date, dimension, row_limit, site_url)
+    if rows is None:
+        return None
+    return [
+        GscDimensionRow(
+            key=(row.get("keys") or [""])[0],
+            clicks=int(row.get("clicks", 0)),
+            impressions=int(row.get("impressions", 0)),
+            ctr=float(row.get("ctr", 0.0)),
+            position=float(row.get("position", 0.0)),
+        )
+        for row in rows
+    ]
+
+
+def fetch_search_analytics_by_country(
+    start_date: date_cls, end_date: date_cls, row_limit: int = 100, site_url: Optional[str] = None
+) -> Optional[List[GscDimensionRow]]:
+    """Country-dimension pull (ISO 3166-1 alpha-3 codes, Google's own
+    convention for this field — e.g. "usa", "gbr", not "US"/"GB")."""
+    return _fetch_by_dimension("country", start_date, end_date, row_limit, site_url)
+
+
+def fetch_search_analytics_by_device(
+    start_date: date_cls, end_date: date_cls, row_limit: int = 100, site_url: Optional[str] = None
+) -> Optional[List[GscDimensionRow]]:
+    """Device-dimension pull — Google's own values are "DESKTOP",
+    "MOBILE", "TABLET"."""
+    return _fetch_by_dimension("device", start_date, end_date, row_limit, site_url)
+
+
+def fetch_search_analytics_by_search_appearance(
+    start_date: date_cls, end_date: date_cls, row_limit: int = 100, site_url: Optional[str] = None
+) -> Optional[List[GscDimensionRow]]:
+    """Search-appearance-dimension pull — which rich-result/SERP feature
+    type each impression came from (e.g. "AMP_BLUE_LINK", "RICHCARD",
+    "VIDEO"). Returns an empty list (not an error) for a property with no
+    rows using any non-default search appearance — a real, common,
+    honest outcome, not a failure."""
+    return _fetch_by_dimension("searchAppearance", start_date, end_date, row_limit, site_url)

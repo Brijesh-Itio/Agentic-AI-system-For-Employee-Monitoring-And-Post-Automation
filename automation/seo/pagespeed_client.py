@@ -90,12 +90,27 @@ def fetch_page_speed(url: str, strategy: str = "mobile") -> Optional[PageSpeedRe
 
 
 @dataclass
+class OpportunityResourceItem:
+    """One row of a Lighthouse opportunity audit's own details.items —
+    the actual file Lighthouse measured, not just the audit's aggregate
+    total. url is the real asset (a specific .css/.js file, or the
+    tested page itself for a page-level entry) worth pointing a human
+    at directly instead of leaving "reduce unused CSS" as an instruction
+    with nothing to click on."""
+    url: Optional[str]
+    wasted_bytes: Optional[float]
+    wasted_ms: Optional[float]
+    total_bytes: Optional[float]
+
+
+@dataclass
 class PageSpeedOpportunity:
     audit_id: str
     title: str
     description: str
     savings_ms: Optional[float]
     savings_bytes: Optional[float]
+    items: List[OpportunityResourceItem]
 
 
 @dataclass
@@ -143,6 +158,22 @@ def extract_resource_report(raw: dict) -> ResourceAuditReport:
         details = audit.get("details") or {}
         if details.get("type") != "opportunity":
             continue
+        # Lighthouse's item shape varies by audit (byte-based audits like
+        # unused-css-rules carry wastedBytes/totalBytes; time-based ones
+        # like render-blocking-resources carry wastedMs instead) — pull
+        # whichever fields exist rather than assuming one shape. A row
+        # with no "url" at all (a rare, non-resource-specific item) is
+        # skipped since there'd be nothing to point a human at.
+        items = [
+            OpportunityResourceItem(
+                url=item.get("url"),
+                wasted_bytes=item.get("wastedBytes"),
+                wasted_ms=item.get("wastedMs"),
+                total_bytes=item.get("totalBytes"),
+            )
+            for item in (details.get("items") or [])
+            if item.get("url")
+        ]
         opportunities.append(
             PageSpeedOpportunity(
                 audit_id=audit_id,
@@ -150,6 +181,7 @@ def extract_resource_report(raw: dict) -> ResourceAuditReport:
                 description=audit.get("description", ""),
                 savings_ms=details.get("overallSavingsMs"),
                 savings_bytes=details.get("overallSavingsBytes"),
+                items=items,
             )
         )
     opportunities.sort(key=lambda o: (o.savings_ms or 0, o.savings_bytes or 0), reverse=True)

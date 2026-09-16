@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 ROBOTS_TXT_TIMEOUT_SECONDS = 15
 # ISO 639 language[-ISO 3166 region] (e.g. "en", "en-US", "zh-Hans") or the
 # special "x-default" value — the actual legal shape of an hreflang attribute.
-_HREFLANG_RE = re.compile(r"^([a-zA-Z]{2,3}(-[a-zA-Z]{2,4})?(-[a-zA-Z]{2})?|x-default)$")
+HREFLANG_RE = re.compile(r"^([a-zA-Z]{2,3}(-[a-zA-Z]{2,4})?(-[a-zA-Z]{2})?|x-default)$")
 # Pages more than this many clicks from the homepage are considered buried
 # — the common SEO guideline (important content should be crawlable/
 # discoverable within a few clicks of the homepage).
@@ -136,6 +136,33 @@ def detect_missing_meta_description(pages: List[CrawledPage]) -> List[TechnicalI
                     url=page.url,
                     message="No meta description found (or it's empty)",
                     suggested_fix=f'Add <meta name="description" content="..."> to the <head> of {page.url}.',
+                )
+            )
+    return issues
+
+
+def detect_missing_meta_keywords(pages: List[CrawledPage]) -> List[TechnicalIssue]:
+    """Module 46 — <meta name="keywords"> presence check. Severity is
+    "info", not "warning": modern search engines (Google confirmed this
+    publicly back in 2009) don't use this tag for ranking at all, so its
+    absence isn't a real ranking problem the way a missing title or
+    meta description is — this exists so the audit's tag inventory stays
+    complete and honest about that, not because filling it in moves the
+    needle on rankings."""
+    issues = []
+    for page in pages:
+        if not page.html or page.status_code != 200:
+            continue
+        soup = BeautifulSoup(page.html, "html.parser")
+        meta = soup.find("meta", attrs={"name": "keywords"})
+        if meta is None or not (meta.get("content") or "").strip():
+            issues.append(
+                TechnicalIssue(
+                    rule="missing_meta_keywords",
+                    severity="info",
+                    url=page.url,
+                    message="No meta keywords found (or it's empty) — note modern search engines don't use this tag for ranking",
+                    suggested_fix=f'Add <meta name="keywords" content="..."> to the <head> of {page.url} if you want the tag present for completeness; it has no known effect on Google/Bing rankings.',
                 )
             )
     return issues
@@ -280,7 +307,7 @@ def detect_hreflang_errors(pages: List[CrawledPage]) -> List[TechnicalIssue]:
             continue
         problems: List[str] = []
         for hreflang, href in entries:
-            if not _HREFLANG_RE.match(hreflang):
+            if not HREFLANG_RE.match(hreflang):
                 problems.append(f'invalid hreflang value "{hreflang}"')
             elif href and href in all_page_entries:
                 reciprocal = any(target_href == url for _, target_href in all_page_entries[href])
@@ -809,7 +836,7 @@ def detect_ssl_certificate(pages: List[CrawledPage]) -> List[TechnicalIssue]:
     ]
 
 
-def _json_ld_nodes(data) -> List[dict]:
+def json_ld_nodes(data) -> List[dict]:
     """A "@graph"-wrapped block (the common Yoast/RankMath pattern seen
     live on a real WordPress site this session) declares @context ONCE
     on the wrapper and lists several typed nodes underneath that inherit
@@ -856,7 +883,7 @@ def detect_invalid_schema(pages: List[CrawledPage]) -> List[TechnicalIssue]:
             )
             if not has_context:
                 problems.append(f"block {i + 1} has no @context")
-            nodes = _json_ld_nodes(data)
+            nodes = json_ld_nodes(data)
             if not nodes:
                 problems.append(f"block {i + 1} does not contain a recognizable JSON-LD object")
             else:
@@ -952,6 +979,7 @@ _ALL_DETECTORS = (
     detect_missing_canonical,
     detect_duplicate_titles,
     detect_missing_meta_description,
+    detect_missing_meta_keywords,
     detect_missing_schema,
     detect_redirect_chains,
     detect_crawl_depth,

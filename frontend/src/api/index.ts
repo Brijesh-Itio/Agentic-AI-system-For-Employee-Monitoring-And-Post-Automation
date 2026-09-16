@@ -1070,6 +1070,28 @@ export const runTechnicalAudit = (siteId: number, maxPages = 30) =>
     )
     .then((r) => r.data);
 
+export interface PageTagFinding {
+  tag: string;
+  detail: string;
+  values: string[];
+}
+
+export interface PageTagAuditReport {
+  url: string;
+  missing_tags: PageTagFinding[];
+  existing_tags: PageTagFinding[];
+  duplicate_tags: PageTagFinding[];
+  invalid_tags: PageTagFinding[];
+}
+
+// A single live fetch + classification, not a crawl — fast, but the
+// target page's own server response time still applies, so a slightly
+// longer-than-default timeout.
+export const runPageTagAudit = (siteId: number, url: string) =>
+  api
+    .post<PageTagAuditReport>("/api/seo/technical/audit/page", { site_id: siteId, url }, { timeout: 30_000 })
+    .then((r) => r.data);
+
 export const approveTechnicalIssue = (issueId: number) =>
   api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/approve`, {}).then((r) => r.data);
 
@@ -1081,6 +1103,27 @@ export const rejectTechnicalIssue = (issueId: number) =>
 // pure status change, no live-site call.
 export const resolveTechnicalIssue = (issueId: number) =>
   api.post<TechnicalIssue>(`/api/seo/technical/issues/${issueId}/resolve`, {}).then((r) => r.data);
+
+export interface TechnicalIssueEditTarget {
+  kind: "cms" | "static_file" | "unavailable";
+  edit_url: string | null;
+  file_path: string | null;
+  detail: string;
+}
+
+// Resolves an issue's URL to somewhere to actually go fix it — a real
+// WordPress edit screen for the CMS post behind it, or the exact file
+// path on the server for a static page with no CMS post at all.
+export const getTechnicalIssueEditTarget = (issueId: number) =>
+  api.get<TechnicalIssueEditTarget>(`/api/seo/technical/issues/${issueId}/edit-target`, { timeout: 20_000 }).then((r) => r.data);
+
+// Same resolution as above, but for an arbitrary URL (e.g. a specific
+// .css/.js file PageSpeed's fix list points at) rather than a stored
+// technical-issue row.
+export const getUrlEditTarget = (siteId: number, url: string) =>
+  api
+    .get<TechnicalIssueEditTarget>("/api/seo/edit-target", { params: { site_id: siteId, url }, timeout: 20_000 })
+    .then((r) => r.data);
 
 // Read-only against the live page + one LLM call — no write happens here.
 export const generateTechnicalIssueFix = (issueId: number) =>
@@ -1372,6 +1415,86 @@ export interface KeywordDifficulty {
 export const checkKeywordDifficulty = (keyword: string, country = "us") =>
   api.post<KeywordDifficulty>("/api/seo/keywords/difficulty", { keyword, country }, { timeout: 30_000 }).then((r) => r.data);
 
+// ── Module 47 — RapidAPI "SEMrush SEO" domain-analysis wrapper
+// (semrush-seo3.p.rapidapi.com). Live-verified this session; Competitor
+// Analysis on this same host is deliberately not included here — every
+// live test returned the provider's own "Missing or invalid session
+// credential" 401, a server-side bug on their end, not a request-shape
+// problem this app could work around. ──
+
+export interface BacklinkRow {
+  url_from: string;
+  url_to: string;
+  title: string;
+  anchor: string;
+  nofollow: boolean;
+  inlink_rank: number | null;
+  domain_inlink_rank: number | null;
+  first_seen: string;
+  last_visited: string;
+  date_lost: string;
+  spam_score: number | null;
+}
+
+export const getTopBacklinks = (siteId: number, website: string) =>
+  api.post<BacklinkRow[]>("/api/seo/backlinks/top", { site_id: siteId, website }, { timeout: 45_000 }).then((r) => r.data);
+
+export interface DomainAuthority {
+  domain: string;
+  da: number | null;
+  pa: number | null;
+  spam_score: number | null;
+  dr: number | null;
+  org_traffic: number | null;
+}
+
+export const getDomainAuthority = (siteId: number, website: string) =>
+  api
+    .post<DomainAuthority>("/api/seo/backlinks/domain-authority", { site_id: siteId, website }, { timeout: 45_000 })
+    .then((r) => r.data);
+
+export const getBulkDomainAuthority = (siteId: number, domains: string[]) =>
+  api
+    .post<DomainAuthority[]>("/api/seo/backlinks/domain-authority/bulk", { site_id: siteId, domains }, { timeout: 45_000 })
+    .then((r) => r.data);
+
+export interface KeywordInsight {
+  keyword: string;
+  volume: number | null;
+  competition: number | null;
+  cpc_dollars: number | null;
+  sd: number | null;
+  monthly_volumes: Record<string, number>;
+  search_intent: number[] | null;
+}
+
+export const getKeywordInsights = (keyword: string, country = "us") =>
+  api.post<KeywordInsight>("/api/seo/keywords/insights", { keyword, country }, { timeout: 30_000 }).then((r) => r.data);
+
+export interface SampleKeyword {
+  keyword: string;
+  position: number | null;
+  search_volume: number | null;
+  etv: number | null;
+  cpc: number | null;
+  url: string;
+}
+
+export interface WebsiteTraffic {
+  domain: string;
+  organic_etv: number | null;
+  organic_keywords: number | null;
+  ranked_keywords_total: number | null;
+  estimated_paid_traffic_cost: number | null;
+  position_distribution: Record<string, number>;
+  sample_keywords: SampleKeyword[];
+}
+
+export const getWebsiteTraffic = (siteId: number, website: string) =>
+  api
+    .post<WebsiteTraffic>("/api/seo/backlinks/website-traffic", { site_id: siteId, website }, { timeout: 45_000 })
+    .then((r) => r.data);
+
 // ── Module 32 — PageSpeed resource audit + Indexing Status ──
 
 export type PageSpeedStrategy = "mobile" | "desktop";
@@ -1402,12 +1525,20 @@ export const checkPageSpeed = (siteId: number, url: string, strategy: PageSpeedS
 export const getPageSpeedResults = (siteId: number, limit?: number) =>
   api.get<PageSpeedResult[]>("/api/seo/pagespeed", { params: { site_id: siteId, limit } }).then((r) => r.data);
 
+export interface PageSpeedOpportunityItem {
+  url: string | null;
+  wasted_bytes: number | null;
+  wasted_ms: number | null;
+  total_bytes: number | null;
+}
+
 export interface PageSpeedOpportunity {
   audit_id: string;
   title: string;
   description: string;
   savings_ms: number | null;
   savings_bytes: number | null;
+  items: PageSpeedOpportunityItem[];
 }
 
 export interface ResourceAuditReport {
@@ -1435,6 +1566,7 @@ export interface IndexStatus {
   last_crawl_time: string | null;
   google_canonical: string | null;
   user_canonical: string | null;
+  mobile_usability_verdict: string | null;
   checked_at: string | null;
 }
 
@@ -1466,6 +1598,71 @@ export const submitForIndexing = (siteId: number, url: string, notificationType:
       { timeout: 30_000 }
     )
     .then((r) => r.data);
+
+// ── Module 48/49 — GSC dimension filtering, Sitemaps management, Site
+// Verification. Stateless — re-fetched live each time, no local table. ──
+
+export interface GscDimensionRow {
+  key: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+}
+
+const fetchGscDimension = (path: string, siteId: number, daysBack: number) =>
+  api.post<GscDimensionRow[]>(path, { site_id: siteId, days_back: daysBack }, { timeout: 30_000 }).then((r) => r.data);
+
+export const getGscByCountry = (siteId: number, daysBack = 30) => fetchGscDimension("/api/seo/gsc/country", siteId, daysBack);
+export const getGscByDevice = (siteId: number, daysBack = 30) => fetchGscDimension("/api/seo/gsc/device", siteId, daysBack);
+export const getGscBySearchAppearance = (siteId: number, daysBack = 30) =>
+  fetchGscDimension("/api/seo/gsc/search-appearance", siteId, daysBack);
+
+export interface SitemapContentType {
+  type: string;
+  submitted: number | null;
+  indexed: number | null;
+}
+
+export interface SitemapInfo {
+  path: string;
+  last_submitted: string | null;
+  is_pending: boolean | null;
+  is_sitemaps_index: boolean | null;
+  type: string | null;
+  last_downloaded: string | null;
+  warnings: number | null;
+  errors: number | null;
+  contents: SitemapContentType[];
+}
+
+export const getSitemaps = (siteId: number) =>
+  api.post<SitemapInfo[]>("/api/seo/sitemaps", { site_id: siteId }, { timeout: 30_000 }).then((r) => r.data);
+
+export interface SitemapActionResult {
+  ok: boolean;
+  detail: string;
+}
+
+export const submitSitemap = (siteId: number, feedpath: string) =>
+  api
+    .post<SitemapActionResult>("/api/seo/sitemaps/submit", { site_id: siteId, feedpath }, { timeout: 30_000 })
+    .then((r) => r.data);
+
+export const deleteSitemap = (siteId: number, feedpath: string) =>
+  api
+    .post<SitemapActionResult>("/api/seo/sitemaps/delete", { site_id: siteId, feedpath }, { timeout: 30_000 })
+    .then((r) => r.data);
+
+export interface VerifiedSite {
+  id: string;
+  type: string | null;
+  identifier: string | null;
+  owners: string[];
+}
+
+export const getVerifiedSites = () =>
+  api.get<VerifiedSite[]>("/api/seo/site-verification", { timeout: 30_000 }).then((r) => r.data);
 
 export const getIndexingSubmissions = (siteId: number) =>
   api.get<IndexingSubmission[]>("/api/seo/indexing/submissions", { params: { site_id: siteId } }).then((r) => r.data);

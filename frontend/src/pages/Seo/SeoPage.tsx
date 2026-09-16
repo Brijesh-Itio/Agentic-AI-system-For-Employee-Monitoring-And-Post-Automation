@@ -11,6 +11,7 @@ import {
   ChevronUp,
   ExternalLink,
   File,
+  FileSearch,
   FileText,
   Folder,
   Hash,
@@ -88,6 +89,11 @@ import {
   generateSocialPosts,
   generateTechnicalIssueAiSuggestion,
   generateTechnicalIssueFix,
+  getTechnicalIssueEditTarget,
+  getUrlEditTarget,
+  runPageTagAudit,
+  PageTagAuditReport,
+  PageTagFinding,
   getBacklinks,
   getBlogPosts,
   getGa4Pages,
@@ -103,6 +109,18 @@ import {
   checkKeywordDifficulty,
   checkRapidApiKeywords,
   checkSemrushMetrics,
+  getTopBacklinks,
+  getDomainAuthority,
+  getBulkDomainAuthority,
+  getKeywordInsights,
+  getWebsiteTraffic,
+  getGscByCountry,
+  getGscByDevice,
+  getGscBySearchAppearance,
+  getSitemaps,
+  submitSitemap,
+  deleteSitemap,
+  getVerifiedSites,
   KeywordDifficulty,
   KeywordResearchRow,
   createServerFileBackup,
@@ -163,7 +181,6 @@ import {
   SeoJobRun,
   SeoSite,
   shareSheets,
-  SheetsStatus,
   SocialPlatform,
   StructureIssue,
   StructureReport,
@@ -1005,7 +1022,18 @@ function ServerFileHistoryPanel({
   );
 }
 
-function ServerFileBrowser({ site }: { site: SeoSite }) {
+function ServerFileBrowser({
+  site,
+  jumpToPath,
+  onJumpHandled,
+}: {
+  site: SeoSite;
+  // Set by a "Mark as fixed manually" edit-target lookup elsewhere on
+  // this page (a static file with no CMS post behind it) — opens that
+  // exact file here instead of making the user navigate to it by hand.
+  jumpToPath?: string | null;
+  onJumpHandled?: () => void;
+}) {
   const queryClient = useQueryClient();
   const toast = useToast();
   const { theme } = useTheme();
@@ -1147,6 +1175,13 @@ function ServerFileBrowser({ site }: { site: SeoSite }) {
     onError: (err) => toast.error(serverErrorDetail(err, "Could not open this path as a directory or a file.")),
   });
 
+  useEffect(() => {
+    if (!jumpToPath) return;
+    goMutation.mutate(jumpToPath);
+    onJumpHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpToPath]);
+
   const saveMutation = useMutation({
     mutationFn: () => writeServerFile(site.id, openFile as string, fileContent),
     onSuccess: () => toast.success(`Saved ${openFile}`),
@@ -1213,7 +1248,7 @@ function ServerFileBrowser({ site }: { site: SeoSite }) {
   }
 
   return (
-    <Card>
+    <Card id="server-file-browser">
       <CardContent className="p-6">
         <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
           <Folder className="h-4 w-4 text-brand-500" />
@@ -1539,11 +1574,120 @@ function WebpBulkConvertCard({ siteId }: { siteId: number }) {
   );
 }
 
+const TAG_BUCKET_STYLE: Record<
+  "missing" | "existing" | "duplicate" | "invalid",
+  { label: string; badge: "outline" | "success" | "warning" | "destructive"; icon: ReactElement }
+> = {
+  missing: { label: "Missing Tags", badge: "outline", icon: <XCircle className="h-3.5 w-3.5" /> },
+  existing: { label: "Existing Tags", badge: "success", icon: <CheckCircle2 className="h-3.5 w-3.5" /> },
+  duplicate: { label: "Duplicate Tags", badge: "warning", icon: <AlertTriangle className="h-3.5 w-3.5" /> },
+  invalid: { label: "Incorrect / Invalid Tags", badge: "destructive", icon: <AlertTriangle className="h-3.5 w-3.5" /> },
+};
+
+function TagFindingGroup({
+  kind,
+  findings,
+}: {
+  kind: "missing" | "existing" | "duplicate" | "invalid";
+  findings: PageTagFinding[];
+}) {
+  const style = TAG_BUCKET_STYLE[kind];
+  return (
+    <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+      <div className="mb-2 flex items-center gap-2">
+        <Badge variant={style.badge}>
+          {style.icon}
+          {style.label}
+        </Badge>
+        <span className="text-theme-xs text-gray-400">{findings.length}</span>
+      </div>
+      {findings.length === 0 ? (
+        <p className="text-theme-xs text-gray-400">None.</p>
+      ) : (
+        <ul className="space-y-2">
+          {findings.map((f) => (
+            <li key={f.tag} className="text-theme-xs">
+              <span className="font-medium text-gray-700 dark:text-gray-300">{f.tag}</span>
+              <span className="text-gray-400"> — {f.detail}</span>
+              {f.values.length > 0 && (
+                <div className="mt-0.5 space-y-0.5">
+                  {f.values.map((v, i) => (
+                    <p key={i} className="break-all text-gray-500 dark:text-gray-400">
+                      {v || <em>(empty)</em>}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function PageTagAuditCard({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  const [url, setUrl] = useState("");
+  const [report, setReport] = useState<PageTagAuditReport | null>(null);
+
+  const auditMutation = useMutation({
+    mutationFn: () => runPageTagAudit(siteId, url.trim()),
+    onSuccess: (result) => {
+      setReport(result);
+      toast.success(`Tag audit complete for ${result.url}.`);
+    },
+    onError: (err) => {
+      const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
+      toast.error(detail || "Could not audit this page — see server logs.");
+    },
+  });
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <FileSearch className="h-4 w-4 text-brand-500" />
+          Run Technical Audit — Individual Page
+        </h2>
+        <p className="mb-4 text-theme-sm text-gray-500 dark:text-gray-400">
+          Check one page's own SEO tags — title, meta description, canonical, robots, viewport, Open Graph, Twitter
+          Card, structured data, H1 — and report which are missing, present, duplicated, or invalid.
+        </p>
+        <div className="flex flex-wrap items-end gap-2">
+          <Input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://yoursite.com/some-page/"
+            className="max-w-md"
+          />
+          <Button onClick={() => auditMutation.mutate()} disabled={auditMutation.isPending || !url.trim()}>
+            {auditMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSearch className="h-4 w-4" />}
+            Run Technical Audit (Page)
+          </Button>
+        </div>
+
+        {report && (
+          <div className="mt-4 space-y-3">
+            <p className="break-all text-theme-xs text-gray-400">{report.url}</p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <TagFindingGroup kind="missing" findings={report.missing_tags} />
+              <TagFindingGroup kind="existing" findings={report.existing_tags} />
+              <TagFindingGroup kind="duplicate" findings={report.duplicate_tags} />
+              <TagFindingGroup kind="invalid" findings={report.invalid_tags} />
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ReportingPanel({ siteId }: { siteId: number }) {
   const toast = useToast();
+  const queryClient = useQueryClient();
   const [rollupPeriod, setRollupPeriod] = useState<"weekly" | "monthly">("weekly");
   const [rollup, setRollup] = useState<DigestRollup | null>(null);
-  const [sheets, setSheets] = useState<SheetsStatus | null>(null);
   const [shareEmail, setShareEmail] = useState("");
   const [sheetUrl, setSheetUrl] = useState("");
 
@@ -1553,14 +1697,23 @@ function ReportingPanel({ siteId }: { siteId: number }) {
   });
   const latestSaved = rollupsQuery.data?.[0] ?? null;
 
-  const checkSheetsMutation = useMutation({
-    mutationFn: getSheetsStatus,
-    onSuccess: (data) => {
-      setSheets(data);
-      if (!data.configured) toast.error(data.error || "Sheets not configured yet.");
-    },
-    onError: (err) => toast.error(serverErrorDetail(err, "Could not reach the Sheets API.")),
+  // A useQuery, not a mutation fired only on button click — the
+  // connection is a real, server-persisted setting (app_settings), so it
+  // must survive a page refresh instead of resetting to "not connected"
+  // every time this component remounts. Silent on the automatic mount
+  // fetch (an unconfigured sheet isn't an error worth a toast on every
+  // page load); the explicit "Refresh" click below still reports it.
+  const sheetsQuery = useQuery({
+    queryKey: ["seo", "sheets-status"],
+    queryFn: getSheetsStatus,
+    retry: false,
   });
+  const sheets = sheetsQuery.data ?? null;
+
+  const refreshSheetsStatus = async () => {
+    const result = await queryClient.fetchQuery({ queryKey: ["seo", "sheets-status"], queryFn: getSheetsStatus });
+    if (!result.configured) toast.error(result.error || "Sheets not configured yet.");
+  };
 
   const rollupMutation = useMutation({
     mutationFn: () => generateDigestRollup(siteId, rollupPeriod),
@@ -1574,7 +1727,7 @@ function ReportingPanel({ siteId }: { siteId: number }) {
   const shareMutation = useMutation({
     mutationFn: () => shareSheets(shareEmail.trim()),
     onSuccess: (data) => {
-      setSheets(data);
+      queryClient.setQueryData(["seo", "sheets-status"], data);
       if (data.configured) toast.success(`Shared with ${shareEmail.trim()}.`);
       else toast.error(data.error || "Sharing failed.");
     },
@@ -1588,7 +1741,7 @@ function ReportingPanel({ siteId }: { siteId: number }) {
   const adoptMutation = useMutation({
     mutationFn: () => adoptSheets(sheetUrl.trim()),
     onSuccess: (data) => {
-      setSheets(data);
+      queryClient.setQueryData(["seo", "sheets-status"], data);
       if (data.configured) toast.success("Connected — tabs and headers set up.");
       else toast.error(data.error || "Could not connect to that sheet.");
     },
@@ -1623,8 +1776,8 @@ function ReportingPanel({ siteId }: { siteId: number }) {
               Connect
             </Button>
           </div>
-          <Button size="sm" variant="outline" onClick={() => checkSheetsMutation.mutate()} disabled={checkSheetsMutation.isPending}>
-            {checkSheetsMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          <Button size="sm" variant="outline" onClick={() => refreshSheetsStatus()} disabled={sheetsQuery.isFetching}>
+            {sheetsQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
             {sheets?.configured ? "Refresh" : "Check status"}
           </Button>
           {sheets?.configured && sheets.url && (
@@ -1695,7 +1848,22 @@ function ReportingPanel({ siteId }: { siteId: number }) {
   );
 }
 
-function OverviewTab({ site }: { site: SeoSite }) {
+function OverviewTab({
+  site,
+  serverJumpPath,
+  onServerJumpHandled,
+  onEditStaticFile,
+}: {
+  site: SeoSite;
+  // Set by the parent SeoPage when "Edit this page"/"Edit this file"
+  // (here, or from the PageSpeed tab) resolves to a static file with no
+  // CMS post behind it — jumps the Server Files browser further down
+  // this same page straight to that file instead of leaving the user to
+  // find it.
+  serverJumpPath: string | null;
+  onServerJumpHandled: () => void;
+  onEditStaticFile: (path: string) => void;
+}) {
   const siteId = site.id;
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -1772,6 +1940,24 @@ function OverviewTab({ site }: { site: SeoSite }) {
     onSuccess: () => {
       toast.success("Marked as fixed.");
       queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
+    },
+  });
+
+  const editTargetMutation = useMutation({
+    mutationFn: (issueId: number) => getTechnicalIssueEditTarget(issueId),
+    onSuccess: (target) => {
+      if (target.kind === "cms" && target.edit_url) {
+        window.open(target.edit_url, "_blank", "noopener,noreferrer");
+      } else if (target.kind === "static_file" && target.file_path) {
+        onEditStaticFile(target.file_path);
+        document.getElementById("server-file-browser")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else {
+        toast.error(target.detail);
+      }
+    },
+    onError: (err) => {
+      const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
+      toast.error(detail || "Could not resolve where to edit this issue.");
     },
   });
 
@@ -1862,6 +2048,8 @@ function OverviewTab({ site }: { site: SeoSite }) {
           Generate Digest
         </Button>
       </div>
+
+      <PageTagAuditCard siteId={siteId} />
 
       <Card>
         <CardContent className="p-6">
@@ -2076,19 +2264,34 @@ function OverviewTab({ site }: { site: SeoSite }) {
                       </>
                     )}
                     {(issue.status === "pending" || issue.status === "approved") && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => resolveMutation.mutate(issue.id)}
-                        disabled={resolveMutation.isPending}
-                      >
-                        {resolveMutation.isPending ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                        )}
-                        Mark as fixed manually
-                      </Button>
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => editTargetMutation.mutate(issue.id)}
+                          disabled={editTargetMutation.isPending}
+                        >
+                          {editTargetMutation.isPending ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <ExternalLink className="h-3.5 w-3.5" />
+                          )}
+                          Edit this page
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => resolveMutation.mutate(issue.id)}
+                          disabled={resolveMutation.isPending}
+                        >
+                          {resolveMutation.isPending ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                          )}
+                          Mark as fixed manually
+                        </Button>
+                      </>
                     )}
                   </div>
                 </div>
@@ -2101,7 +2304,7 @@ function OverviewTab({ site }: { site: SeoSite }) {
       <GoogleConfigCard site={site} />
       <CmsConfigCard site={site} />
       <ServerAccessConfigCard site={site} />
-      <ServerFileBrowser site={site} />
+      <ServerFileBrowser site={site} jumpToPath={serverJumpPath} onJumpHandled={onServerJumpHandled} />
     </>
   );
 }
@@ -2230,7 +2433,9 @@ function SearchConsolePanel({ siteId }: { siteId: number }) {
               <div key={row.id} className="flex items-center justify-between gap-3 text-theme-sm">
                 <span className="truncate text-gray-700 dark:text-gray-300">{row.query}</span>
                 <span className="shrink-0 text-theme-xs text-gray-400">
-                  {row.clicks} clicks · {row.impressions} impr.
+                  {row.clicks} clicks · {row.impressions} impr. ·{" "}
+                  {row.ctr != null ? `${(row.ctr * 100).toFixed(1)}% CTR` : "—"} · pos{" "}
+                  {row.position != null ? row.position.toFixed(1) : "—"}
                 </span>
               </div>
             ))}
@@ -2317,7 +2522,9 @@ function PageCtrPanel({ siteId }: { siteId: number }) {
               <div key={row.id} className="flex items-center justify-between gap-3 text-theme-sm">
                 <span className="truncate text-gray-700 dark:text-gray-300">{row.page}</span>
                 <span className="shrink-0 text-theme-xs text-gray-400">
-                  {row.clicks} clicks · {row.impressions} impr. · {row.ctr != null ? `${(row.ctr * 100).toFixed(1)}% CTR` : "—"}
+                  {row.clicks} clicks · {row.impressions} impr. ·{" "}
+                  {row.ctr != null ? `${(row.ctr * 100).toFixed(1)}% CTR` : "—"} · pos{" "}
+                  {row.position != null ? row.position.toFixed(1) : "—"}
                 </span>
               </div>
             ))}
@@ -3323,10 +3530,47 @@ function formatMs(ms: number | null) {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
 }
 
-function OpportunitiesPanel({ resultId }: { resultId: number }) {
+// Truncates the middle of a long asset URL so a real minified filename
+// (often 80+ characters with a cache-busting query string) doesn't blow
+// out the row width — keeps the meaningful start and end, not just a
+// trailing cut that hides the filename.
+function shortenResourceUrl(url: string, max = 70): string {
+  if (url.length <= max) return url;
+  const head = Math.ceil((max - 1) * 0.6);
+  const tail = max - 1 - head;
+  return `${url.slice(0, head)}…${url.slice(url.length - tail)}`;
+}
+
+function OpportunitiesPanel({
+  resultId,
+  siteId,
+  onEditStaticFile,
+}: {
+  resultId: number;
+  siteId: number;
+  onEditStaticFile: (path: string) => void;
+}) {
+  const toast = useToast();
   const oppQuery = useQuery({
     queryKey: ["seo", "pagespeed-opportunities", resultId],
     queryFn: () => getPageSpeedOpportunities(resultId),
+  });
+
+  const editTargetMutation = useMutation({
+    mutationFn: (url: string) => getUrlEditTarget(siteId, url),
+    onSuccess: (target) => {
+      if (target.kind === "cms" && target.edit_url) {
+        window.open(target.edit_url, "_blank", "noopener,noreferrer");
+      } else if (target.kind === "static_file" && target.file_path) {
+        onEditStaticFile(target.file_path);
+      } else {
+        toast.error(target.detail);
+      }
+    },
+    onError: (err) => {
+      const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
+      toast.error(detail || "Could not resolve where to edit this resource.");
+    },
   });
 
   if (oppQuery.isLoading) {
@@ -3383,6 +3627,45 @@ function OpportunitiesPanel({ resultId }: { resultId: number }) {
               {o.description && (
                 <p className="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">{o.description.replace(/\[.*?\]\(.*?\)/g, "").trim()}</p>
               )}
+              {o.items.length > 0 && (
+                <div className="mt-2 space-y-1.5 border-t border-gray-100 pt-2 dark:border-gray-800">
+                  <p className="text-theme-xs font-medium text-gray-500 dark:text-gray-400">
+                    Affected {o.items.length === 1 ? "file" : "files"} — exactly where this shows up:
+                  </p>
+                  {o.items.map((item, idx) => (
+                    <div
+                      key={`${item.url}-${idx}`}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded bg-gray-50 px-2 py-1.5 dark:bg-white/5"
+                    >
+                      <div className="min-w-0">
+                        <p className="break-all text-theme-xs text-gray-700 dark:text-gray-300" title={item.url ?? ""}>
+                          {item.url ? shortenResourceUrl(item.url) : "—"}
+                        </p>
+                        <p className="text-theme-xs text-gray-400">
+                          {item.wasted_bytes ? `~${formatKb(item.wasted_bytes / 1024)} wasted` : ""}
+                          {item.wasted_bytes && item.wasted_ms ? " · " : ""}
+                          {item.wasted_ms ? `~${formatMs(item.wasted_ms)} wasted` : ""}
+                        </p>
+                      </div>
+                      {item.url && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => editTargetMutation.mutate(item.url as string)}
+                          disabled={editTargetMutation.isPending}
+                        >
+                          {editTargetMutation.isPending ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <ExternalLink className="h-3.5 w-3.5" />
+                          )}
+                          Edit
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -3391,7 +3674,15 @@ function OpportunitiesPanel({ resultId }: { resultId: number }) {
   );
 }
 
-function PerformanceTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
+function PerformanceTab({
+  siteId,
+  siteUrl,
+  onEditStaticFile,
+}: {
+  siteId: number;
+  siteUrl: string;
+  onEditStaticFile: (path: string) => void;
+}) {
   const queryClient = useQueryClient();
   const toast = useToast();
   const [checkUrl, setCheckUrl] = useState(siteUrl);
@@ -3505,7 +3796,9 @@ function PerformanceTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }
                       <p className="text-theme-sm text-gray-700 dark:text-gray-300">{formatMs(r.fcp_ms)}</p>
                     </div>
                   </div>
-                  {expandedId === r.id && <OpportunitiesPanel resultId={r.id} />}
+                  {expandedId === r.id && (
+                    <OpportunitiesPanel resultId={r.id} siteId={siteId} onEditStaticFile={onEditStaticFile} />
+                  )}
                 </div>
               ))}
             </div>
@@ -3513,6 +3806,311 @@ function PerformanceTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }
         </CardContent>
       </Card>
     </>
+  );
+}
+
+// GSC's own "country" dimension returns lowercase ISO 3166-1 alpha-3
+// codes (Google's documented convention for this field — e.g. "usa",
+// not "US") — the real Search Console UI shows the country's name, not
+// this code, so this table translates it the same way for parity. A
+// code not in this table (rare/unrecognized) falls back to its own
+// uppercased form rather than guessing a name.
+const ISO_ALPHA3_COUNTRY_NAMES: Record<string, string> = {
+  afg: "Afghanistan", alb: "Albania", dza: "Algeria", and: "Andorra", ago: "Angola",
+  arg: "Argentina", arm: "Armenia", aus: "Australia", aut: "Austria", aze: "Azerbaijan",
+  bhs: "Bahamas", bhr: "Bahrain", bgd: "Bangladesh", brb: "Barbados", blr: "Belarus",
+  bel: "Belgium", blz: "Belize", ben: "Benin", btn: "Bhutan", bol: "Bolivia",
+  bih: "Bosnia and Herzegovina", bwa: "Botswana", bra: "Brazil", brn: "Brunei", bgr: "Bulgaria",
+  bfa: "Burkina Faso", bdi: "Burundi", khm: "Cambodia", cmr: "Cameroon", can: "Canada",
+  cpv: "Cabo Verde", caf: "Central African Republic", tcd: "Chad", chl: "Chile", chn: "China",
+  col: "Colombia", com: "Comoros", cog: "Congo", cod: "DR Congo", cri: "Costa Rica",
+  civ: "Côte d'Ivoire", hrv: "Croatia", cub: "Cuba", cyp: "Cyprus", cze: "Czechia",
+  dnk: "Denmark", dji: "Djibouti", dma: "Dominica", dom: "Dominican Republic", ecu: "Ecuador",
+  egy: "Egypt", slv: "El Salvador", gnq: "Equatorial Guinea", eri: "Eritrea", est: "Estonia",
+  swz: "Eswatini", eth: "Ethiopia", fji: "Fiji", fin: "Finland", fra: "France",
+  gab: "Gabon", gmb: "Gambia", geo: "Georgia", deu: "Germany", gha: "Ghana",
+  grc: "Greece", grd: "Grenada", gtm: "Guatemala", gin: "Guinea", gnb: "Guinea-Bissau",
+  guy: "Guyana", hti: "Haiti", hnd: "Honduras", hkg: "Hong Kong", hun: "Hungary",
+  isl: "Iceland", ind: "India", idn: "Indonesia", irn: "Iran", irq: "Iraq",
+  irl: "Ireland", isr: "Israel", ita: "Italy", jam: "Jamaica", jpn: "Japan",
+  jor: "Jordan", kaz: "Kazakhstan", ken: "Kenya", kir: "Kiribati", kwt: "Kuwait",
+  kgz: "Kyrgyzstan", lao: "Laos", lva: "Latvia", lbn: "Lebanon", lso: "Lesotho",
+  lbr: "Liberia", lby: "Libya", lie: "Liechtenstein", ltu: "Lithuania", lux: "Luxembourg",
+  mac: "Macao", mdg: "Madagascar", mwi: "Malawi", mys: "Malaysia", mdv: "Maldives",
+  mli: "Mali", mlt: "Malta", mrt: "Mauritania", mus: "Mauritius", mex: "Mexico",
+  mda: "Moldova", mco: "Monaco", mng: "Mongolia", mne: "Montenegro", mar: "Morocco",
+  moz: "Mozambique", mmr: "Myanmar", nam: "Namibia", npl: "Nepal", nld: "Netherlands",
+  nzl: "New Zealand", nic: "Nicaragua", ner: "Niger", nga: "Nigeria", prk: "North Korea",
+  mkd: "North Macedonia", nor: "Norway", omn: "Oman", pak: "Pakistan", pan: "Panama",
+  png: "Papua New Guinea", pry: "Paraguay", per: "Peru", phl: "Philippines", pol: "Poland",
+  prt: "Portugal", pri: "Puerto Rico", qat: "Qatar", rou: "Romania", rus: "Russia",
+  rwa: "Rwanda", sau: "Saudi Arabia", sen: "Senegal", srb: "Serbia", syc: "Seychelles",
+  sle: "Sierra Leone", sgp: "Singapore", svk: "Slovakia", svn: "Slovenia", som: "Somalia",
+  zaf: "South Africa", kor: "South Korea", ssd: "South Sudan", esp: "Spain", lka: "Sri Lanka",
+  sdn: "Sudan", sur: "Suriname", swe: "Sweden", che: "Switzerland", syr: "Syria",
+  twn: "Taiwan", tjk: "Tajikistan", tza: "Tanzania", tha: "Thailand", tls: "Timor-Leste",
+  tgo: "Togo", ton: "Tonga", tto: "Trinidad and Tobago", tun: "Tunisia", tur: "Turkey",
+  tkm: "Turkmenistan", uga: "Uganda", ukr: "Ukraine", are: "United Arab Emirates",
+  gbr: "United Kingdom", usa: "United States", ury: "Uruguay", uzb: "Uzbekistan",
+  vut: "Vanuatu", vat: "Vatican City", ven: "Venezuela", vnm: "Vietnam", yem: "Yemen",
+  zmb: "Zambia", zwe: "Zimbabwe",
+};
+
+// Matches the real Search Console UI's own presentation of each
+// dimension's values, not the raw API enum this app's backend passes
+// through as-is (ISO codes for country, SCREAMING_CASE for device/
+// search appearance).
+function formatGscDimensionKey(dimension: string, key: string): string {
+  if (dimension === "country") return ISO_ALPHA3_COUNTRY_NAMES[key.toLowerCase()] ?? key.toUpperCase();
+  if (dimension === "device") return key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+  // search-appearance: no official Google label list to draw from here —
+  // title-casing the enum's own words ("AMP_BLUE_LINK" -> "Amp Blue
+  // Link") is a readable, honest fallback rather than inventing exact
+  // Search Console wording this app hasn't verified.
+  return key
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
+const GSC_DIMENSIONS = [
+  { key: "country", label: "Country", fetcher: getGscByCountry },
+  { key: "device", label: "Device", fetcher: getGscByDevice },
+  { key: "search-appearance", label: "Search Appearance", fetcher: getGscBySearchAppearance },
+] as const;
+
+function GscDimensionPanel({ siteId }: { siteId: number }) {
+  const [dimension, setDimension] = useState<(typeof GSC_DIMENSIONS)[number]["key"]>("country");
+  const active = GSC_DIMENSIONS.find((d) => d.key === dimension)!;
+
+  const dimensionQuery = useQuery({
+    queryKey: ["seo", "gsc-dimension", siteId, dimension],
+    queryFn: () => active.fetcher(siteId),
+  });
+  const rows = dimensionQuery.data ?? [];
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <BarChart3 className="h-4 w-4 text-brand-500" />
+            Search Analytics by Dimension
+          </h2>
+          <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-white/5">
+            {GSC_DIMENSIONS.map((d) => (
+              <button
+                key={d.key}
+                onClick={() => setDimension(d.key)}
+                className={`rounded-md px-3 py-1 text-theme-xs font-medium transition-colors ${
+                  dimension === d.key
+                    ? "bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-white"
+                    : "text-gray-500"
+                }`}
+              >
+                {d.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">Last 30 days, real Search Console data.</p>
+        {dimensionQuery.isLoading ? (
+          <div className="flex h-16 items-center justify-center text-gray-400">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </div>
+        ) : dimensionQuery.isError ? (
+          <p className="text-theme-sm text-error-500">{serverErrorDetail(dimensionQuery.error, "GSC fetch failed.")}</p>
+        ) : rows.length === 0 ? (
+          <p className="text-theme-sm text-gray-400">No rows for this dimension in the last 30 days.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-theme-sm">
+              <thead>
+                <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                  <th className="py-2 pr-3 font-medium">{active.label}</th>
+                  <th className="py-2 pr-3 font-medium">Clicks</th>
+                  <th className="py-2 pr-3 font-medium">Impressions</th>
+                  <th className="py-2 pr-3 font-medium">CTR</th>
+                  <th className="py-2 font-medium">Avg. position</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i} className="border-b border-gray-50 dark:border-gray-800/50">
+                    <td className="py-2 pr-3 text-gray-700 dark:text-gray-300">{formatGscDimensionKey(dimension, r.key)}</td>
+                    <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.clicks}</td>
+                    <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.impressions}</td>
+                    <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{(r.ctr * 100).toFixed(1)}%</td>
+                    <td className="py-2 text-gray-500 dark:text-gray-400">{r.position.toFixed(1)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SitemapsPanel({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const [feedpath, setFeedpath] = useState("sitemap.xml");
+
+  const sitemapsQuery = useQuery({ queryKey: ["seo", "sitemaps", siteId], queryFn: () => getSitemaps(siteId) });
+  const sitemaps = sitemapsQuery.data ?? [];
+
+  const submitMutation = useMutation({
+    mutationFn: () => submitSitemap(siteId, feedpath.trim()),
+    onSuccess: (result) => {
+      if (result.ok) {
+        toast.success(result.detail);
+        queryClient.invalidateQueries({ queryKey: ["seo", "sitemaps", siteId] });
+      } else {
+        toast.error(result.detail);
+      }
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Sitemap submission failed.")),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (path: string) => deleteSitemap(siteId, path),
+    onSuccess: (result) => {
+      if (result.ok) {
+        toast.success(result.detail);
+        queryClient.invalidateQueries({ queryKey: ["seo", "sitemaps", siteId] });
+      } else {
+        toast.error(result.detail);
+      }
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Sitemap removal failed.")),
+  });
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <FileText className="h-4 w-4 text-brand-500" />
+          Sitemaps
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          Real Search Console sitemap tracking. Submitting/removing needs Full user or Owner access on this
+          property in Search Console — a read-only (Restricted) user, enough for every other GSC feature here, will
+          get a real permission error on those two actions.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Input value={feedpath} onChange={(e) => setFeedpath(e.target.value)} placeholder="sitemap.xml" className="max-w-xs" />
+          <Button size="sm" onClick={() => submitMutation.mutate()} disabled={submitMutation.isPending || !feedpath.trim()}>
+            {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Submit
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => sitemapsQuery.refetch()} disabled={sitemapsQuery.isFetching}>
+            {sitemapsQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            Refresh
+          </Button>
+        </div>
+
+        {sitemapsQuery.isLoading ? (
+          <div className="mt-4 flex h-16 items-center justify-center text-gray-400">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </div>
+        ) : sitemapsQuery.isError ? (
+          <p className="mt-4 text-theme-sm text-error-500">{serverErrorDetail(sitemapsQuery.error, "Sitemaps fetch failed.")}</p>
+        ) : sitemaps.length === 0 ? (
+          <p className="mt-4 text-theme-sm text-gray-400">No sitemaps submitted for this property yet.</p>
+        ) : (
+          <div className="mt-4 space-y-2">
+            {sitemaps.map((s) => (
+              <div key={s.path} className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="break-all text-theme-sm font-medium text-gray-900 dark:text-white">{s.path}</p>
+                  <Button size="sm" variant="outline" onClick={() => deleteMutation.mutate(s.path)} disabled={deleteMutation.isPending}>
+                    <XCircle className="h-3.5 w-3.5" />
+                    Remove
+                  </Button>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {s.is_pending && <Badge variant="warning">pending</Badge>}
+                  {s.is_sitemaps_index && <Badge variant="outline">sitemap index</Badge>}
+                  {typeof s.warnings === "number" && s.warnings > 0 && <Badge variant="warning">{s.warnings} warning(s)</Badge>}
+                  {typeof s.errors === "number" && s.errors > 0 && <Badge variant="destructive">{s.errors} error(s)</Badge>}
+                </div>
+                {s.contents.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-3 text-theme-xs text-gray-500 dark:text-gray-400">
+                    {s.contents.map((c, i) => (
+                      <span key={i}>
+                        {c.type}: {c.indexed ?? 0}/{c.submitted ?? 0} indexed
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <p className="mt-1 text-theme-xs text-gray-400">
+                  {s.last_submitted ? `Submitted ${s.last_submitted}` : "Not submitted"}
+                  {s.last_downloaded ? ` · last downloaded ${s.last_downloaded}` : ""}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SiteVerificationPanel() {
+  const verificationQuery = useQuery({ queryKey: ["seo", "site-verification"], queryFn: getVerifiedSites });
+  const sites = verificationQuery.data ?? [];
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <CheckCircle2 className="h-4 w-4 text-brand-500" />
+            Site Verification
+          </h2>
+          <Button size="sm" variant="outline" onClick={() => verificationQuery.refetch()} disabled={verificationQuery.isFetching}>
+            {verificationQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            Refresh
+          </Button>
+        </div>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          Properties this Google service account has itself verified ownership of — a separate Google permission
+          system from being added as a Search Console user (which is how every other GSC feature here works).
+        </p>
+        {verificationQuery.isLoading ? (
+          <div className="flex h-16 items-center justify-center text-gray-400">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </div>
+        ) : verificationQuery.isError ? (
+          <p className="text-theme-sm text-error-500">
+            {serverErrorDetail(verificationQuery.error, "Site Verification API call failed.")}
+          </p>
+        ) : sites.length === 0 ? (
+          <p className="text-theme-sm text-gray-400">
+            No verified sites for this service account (expected — this app connects sites by adding the service
+            account as a Search Console user, not by having it perform its own verification).
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {sites.map((s) => (
+              <div key={s.id} className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+                <p className="break-all text-theme-sm font-medium text-gray-900 dark:text-white">{s.identifier ?? s.id}</p>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {s.type && <Badge variant="outline">{s.type}</Badge>}
+                  {s.owners.map((o) => (
+                    <Badge key={o} variant="outline">
+                      {o}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -3598,6 +4196,11 @@ function IndexingTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
                     {s.indexing_state && <Badge variant="outline">{s.indexing_state}</Badge>}
                     {s.robots_txt_state && <Badge variant="outline">robots.txt: {s.robots_txt_state}</Badge>}
                     {s.page_fetch_state && <Badge variant="outline">fetch: {s.page_fetch_state}</Badge>}
+                    {s.mobile_usability_verdict && s.mobile_usability_verdict !== "VERDICT_UNSPECIFIED" && (
+                      <Badge variant={s.mobile_usability_verdict === "PASS" ? "success" : "outline"}>
+                        mobile: {s.mobile_usability_verdict}
+                      </Badge>
+                    )}
                   </div>
                   <p className="mt-2 text-theme-xs text-gray-400">
                     {s.last_crawl_time ? `Last crawled ${s.last_crawl_time}` : "Never crawled by Google"} · checked {s.checked_at}
@@ -3668,6 +4271,10 @@ function IndexingTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
           )}
         </CardContent>
       </Card>
+
+      <GscDimensionPanel siteId={siteId} />
+      <SitemapsPanel siteId={siteId} />
+      <SiteVerificationPanel />
     </>
   );
 }
@@ -4148,6 +4755,342 @@ function RapidApiKeywordCard({ siteId }: { siteId: number }) {
   );
 }
 
+function TopBacklinksCard({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
+  const toast = useToast();
+  const [website, setWebsite] = useState(siteUrl);
+
+  const checkMutation = useMutation({
+    mutationFn: () => getTopBacklinks(siteId, website.trim()),
+    onError: (err) => toast.error(serverErrorDetail(err, "Top backlinks check failed.")),
+  });
+  const rows = checkMutation.data ?? [];
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <Link2 className="h-4 w-4 text-brand-500" />
+          Top Backlinks (RapidAPI)
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          Real page-level backlinks for any domain — source URL, anchor text, follow/nofollow, and spam score. Works
+          for competitor domains too, not just your own.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Input value={website} onChange={(e) => setWebsite(e.target.value)} placeholder="https://example.com" className="max-w-sm" />
+          <Button size="sm" onClick={() => checkMutation.mutate()} disabled={checkMutation.isPending || !website.trim()}>
+            {checkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Check
+          </Button>
+        </div>
+        {rows.length > 0 && (
+          <div className="mt-4 overflow-x-auto">
+            <p className="mb-2 text-theme-xs text-gray-400">{rows.length} backlink(s) found</p>
+            <table className="w-full text-left text-theme-sm">
+              <thead>
+                <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                  <th className="py-2 pr-3 font-medium">Source</th>
+                  <th className="py-2 pr-3 font-medium">Anchor</th>
+                  <th className="py-2 pr-3 font-medium">Follow</th>
+                  <th className="py-2 pr-3 font-medium">Rank</th>
+                  <th className="py-2 pr-3 font-medium">Spam</th>
+                  <th className="py-2 font-medium">First seen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.slice(0, 50).map((r, i) => (
+                  <tr key={i} className="border-b border-gray-50 dark:border-gray-800/50">
+                    <td className="max-w-xs truncate py-2 pr-3" title={r.url_from}>
+                      <a href={r.url_from} target="_blank" rel="noreferrer" className="text-brand-600 hover:underline dark:text-brand-400">
+                        {r.url_from}
+                      </a>
+                    </td>
+                    <td className="max-w-[160px] truncate py-2 pr-3 text-gray-500 dark:text-gray-400" title={r.anchor}>
+                      {r.anchor || "—"}
+                    </td>
+                    <td className="py-2 pr-3">
+                      <Badge variant={r.nofollow ? "outline" : "success"}>{r.nofollow ? "nofollow" : "follow"}</Badge>
+                    </td>
+                    <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.inlink_rank ?? "—"}</td>
+                    <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.spam_score ?? "—"}</td>
+                    <td className="py-2 text-gray-500 dark:text-gray-400">{r.first_seen || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DomainAuthorityCard({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
+  const toast = useToast();
+  const [website, setWebsite] = useState(siteUrl);
+  const [bulkInput, setBulkInput] = useState("");
+
+  const checkMutation = useMutation({
+    mutationFn: () => getDomainAuthority(siteId, website.trim()),
+    onError: (err) => toast.error(serverErrorDetail(err, "Domain authority check failed.")),
+  });
+
+  const bulkMutation = useMutation({
+    mutationFn: (domains: string[]) => getBulkDomainAuthority(siteId, domains),
+    onError: (err) => toast.error(serverErrorDetail(err, "Bulk domain authority check failed.")),
+  });
+
+  const handleBulk = () => {
+    const domains = bulkInput.split(",").map((d) => d.trim()).filter(Boolean);
+    if (domains.length === 0) {
+      toast.error("Enter at least one domain.");
+      return;
+    }
+    bulkMutation.mutate(domains);
+  };
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <Award className="h-4 w-4 text-brand-500" />
+          DA / PA Checker (RapidAPI)
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          Domain Authority, Page Authority, spam score, Domain Rating, and estimated organic traffic for one domain,
+          or several at once below.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Input value={website} onChange={(e) => setWebsite(e.target.value)} placeholder="https://example.com" className="max-w-sm" />
+          <Button size="sm" onClick={() => checkMutation.mutate()} disabled={checkMutation.isPending || !website.trim()}>
+            {checkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Check
+          </Button>
+        </div>
+        {checkMutation.data && (
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
+            <div>
+              <p className="text-theme-xs text-gray-400">DA</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{checkMutation.data.da ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-theme-xs text-gray-400">PA</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{checkMutation.data.pa ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-theme-xs text-gray-400">Domain Rating</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{checkMutation.data.dr ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-theme-xs text-gray-400">Spam score</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{checkMutation.data.spam_score ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-theme-xs text-gray-400">Est. org. traffic</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{checkMutation.data.org_traffic ?? "—"}</p>
+            </div>
+          </div>
+        )}
+
+        <div className="mt-5 border-t border-gray-100 pt-4 dark:border-gray-800">
+          <p className="mb-2 text-theme-xs font-medium text-gray-500 dark:text-gray-400">Bulk check</p>
+          <div className="flex flex-wrap gap-2">
+            <Input
+              value={bulkInput}
+              onChange={(e) => setBulkInput(e.target.value)}
+              placeholder="domain1.com, domain2.com, domain3.com"
+              className="max-w-md"
+            />
+            <Button size="sm" variant="outline" onClick={handleBulk} disabled={bulkMutation.isPending}>
+              {bulkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Check all
+            </Button>
+          </div>
+          {bulkMutation.data && bulkMutation.data.length > 0 && (
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-left text-theme-sm">
+                <thead>
+                  <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                    <th className="py-2 pr-3 font-medium">Domain</th>
+                    <th className="py-2 pr-3 font-medium">DA</th>
+                    <th className="py-2 pr-3 font-medium">PA</th>
+                    <th className="py-2 pr-3 font-medium">DR</th>
+                    <th className="py-2 pr-3 font-medium">Spam</th>
+                    <th className="py-2 font-medium">Est. traffic</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bulkMutation.data.map((d) => (
+                    <tr key={d.domain} className="border-b border-gray-50 dark:border-gray-800/50">
+                      <td className="py-2 pr-3 text-gray-700 dark:text-gray-300">{d.domain}</td>
+                      <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{d.da ?? "—"}</td>
+                      <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{d.pa ?? "—"}</td>
+                      <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{d.dr ?? "—"}</td>
+                      <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{d.spam_score ?? "—"}</td>
+                      <td className="py-2 text-gray-500 dark:text-gray-400">{d.org_traffic ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function KeywordInsightsCard() {
+  const toast = useToast();
+  const [keyword, setKeyword] = useState("");
+  const [country, setCountry] = useState("us");
+
+  const checkMutation = useMutation({
+    mutationFn: () => getKeywordInsights(keyword.trim(), country.trim() || "us"),
+    onError: (err) => toast.error(serverErrorDetail(err, "Keyword insights check failed.")),
+  });
+  const data = checkMutation.data;
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <Search className="h-4 w-4 text-brand-500" />
+          Keyword Insights (RapidAPI)
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          Search volume, CPC, competition, and search intent for one keyword.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="Keyword" className="max-w-xs" />
+          <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country code" className="max-w-24" />
+          <Button size="sm" onClick={() => checkMutation.mutate()} disabled={checkMutation.isPending || !keyword.trim()}>
+            {checkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Check
+          </Button>
+        </div>
+        {data && (
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div>
+              <p className="text-theme-xs text-gray-400">Volume</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{data.volume ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-theme-xs text-gray-400">Competition</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{data.competition ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-theme-xs text-gray-400">CPC</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{data.cpc_dollars != null ? `$${data.cpc_dollars}` : "—"}</p>
+            </div>
+            <div>
+              <p className="text-theme-xs text-gray-400">Difficulty</p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">{data.sd ?? "—"}</p>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function WebsiteTrafficCard({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
+  const toast = useToast();
+  const [website, setWebsite] = useState(siteUrl);
+
+  const checkMutation = useMutation({
+    mutationFn: () => getWebsiteTraffic(siteId, website.trim()),
+    onError: (err) => toast.error(serverErrorDetail(err, "Website traffic check failed.")),
+  });
+  const data = checkMutation.data;
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <TrendingUp className="h-4 w-4 text-brand-500" />
+          Check Website Traffic (RapidAPI)
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          Estimated organic traffic, ranked-keyword count, ranking-position distribution, and real sample keywords
+          for any domain.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Input value={website} onChange={(e) => setWebsite(e.target.value)} placeholder="https://example.com" className="max-w-sm" />
+          <Button size="sm" onClick={() => checkMutation.mutate()} disabled={checkMutation.isPending || !website.trim()}>
+            {checkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Check
+          </Button>
+        </div>
+        {data && (
+          <>
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div>
+                <p className="text-theme-xs text-gray-400">Est. organic traffic</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">{data.organic_etv ?? "—"}</p>
+              </div>
+              <div>
+                <p className="text-theme-xs text-gray-400">Organic keywords</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">{data.organic_keywords ?? "—"}</p>
+              </div>
+              <div>
+                <p className="text-theme-xs text-gray-400">Ranked keywords</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">{data.ranked_keywords_total ?? "—"}</p>
+              </div>
+              <div>
+                <p className="text-theme-xs text-gray-400">Est. paid traffic cost</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                  {data.estimated_paid_traffic_cost != null ? `$${data.estimated_paid_traffic_cost}` : "—"}
+                </p>
+              </div>
+            </div>
+            {Object.keys(data.position_distribution).length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-3 text-theme-xs text-gray-500 dark:text-gray-400">
+                {Object.entries(data.position_distribution).map(([pos, count]) => (
+                  <span key={pos}>
+                    {pos.replace("pos_", "#")}: <span className="font-medium text-gray-700 dark:text-gray-300">{count}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+            {data.sample_keywords.length > 0 && (
+              <div className="mt-4 overflow-x-auto">
+                <p className="mb-2 text-theme-xs text-gray-400">Sample ranking keywords</p>
+                <table className="w-full text-left text-theme-sm">
+                  <thead>
+                    <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                      <th className="py-2 pr-3 font-medium">Keyword</th>
+                      <th className="py-2 pr-3 font-medium">Position</th>
+                      <th className="py-2 pr-3 font-medium">Volume</th>
+                      <th className="py-2 pr-3 font-medium">CPC</th>
+                      <th className="py-2 font-medium">Ranking page</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.sample_keywords.map((k, i) => (
+                      <tr key={i} className="border-b border-gray-50 dark:border-gray-800/50">
+                        <td className="py-2 pr-3 text-gray-700 dark:text-gray-300">{k.keyword}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{k.position ?? "—"}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{k.search_volume ?? "—"}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{k.cpc != null ? `$${k.cpc}` : "—"}</td>
+                        <td className="max-w-xs truncate py-2 text-gray-500 dark:text-gray-400" title={k.url}>
+                          <a href={k.url} target="_blank" rel="noreferrer" className="text-brand-600 hover:underline dark:text-brand-400">
+                            {k.url}
+                          </a>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function BacklinksTab({ siteId, siteName, siteUrl }: { siteId: number; siteName: string; siteUrl: string }) {
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -4181,6 +5124,10 @@ function BacklinksTab({ siteId, siteName, siteUrl }: { siteId: number; siteName:
       <KeywordResearchCard />
       <KeywordDifficultyCard />
       <RapidApiKeywordCard siteId={siteId} />
+      <TopBacklinksCard siteId={siteId} siteUrl={siteUrl} />
+      <DomainAuthorityCard siteId={siteId} siteUrl={siteUrl} />
+      <KeywordInsightsCard />
+      <WebsiteTrafficCard siteId={siteId} siteUrl={siteUrl} />
       <Card>
         <CardContent className="p-6">
         <div className="mb-4 flex items-center justify-between">
@@ -4238,6 +5185,18 @@ export default function SeoPage() {
   const [siteId, setSiteId] = useState<number | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [showAddSite, setShowAddSite] = useState(false);
+  // Set from anywhere (e.g. PageSpeed's fix list) that resolves an edit
+  // target to a static file with no CMS post behind it — switches to the
+  // Overview tab, where the Server Files browser lives, and jumps it
+  // straight to that file.
+  const [serverJumpPath, setServerJumpPath] = useState<string | null>(null);
+  const toast = useToast();
+
+  const openStaticFileForEdit = (path: string) => {
+    setServerJumpPath(path);
+    setTab("overview");
+    toast.success(`Opening ${path} in Server Files.`);
+  };
 
   const sitesQuery = useQuery({ queryKey: ["seo", "sites"], queryFn: getSeoSites });
   const sites = sitesQuery.data ?? [];
@@ -4328,8 +5287,21 @@ export default function SeoPage() {
                 ))}
               </div>
 
-              {tab === "overview" && <OverviewTab site={selectedSite} />}
-              {tab === "performance" && <PerformanceTab siteId={selectedSite.id} siteUrl={selectedSite.base_url} />}
+              {tab === "overview" && (
+                <OverviewTab
+                  site={selectedSite}
+                  serverJumpPath={serverJumpPath}
+                  onServerJumpHandled={() => setServerJumpPath(null)}
+                  onEditStaticFile={openStaticFileForEdit}
+                />
+              )}
+              {tab === "performance" && (
+                <PerformanceTab
+                  siteId={selectedSite.id}
+                  siteUrl={selectedSite.base_url}
+                  onEditStaticFile={openStaticFileForEdit}
+                />
+              )}
               {tab === "indexing" && <IndexingTab siteId={selectedSite.id} siteUrl={selectedSite.base_url} />}
               {tab === "social" && <SocialTab siteId={selectedSite.id} />}
               {tab === "blog" && <BlogTab siteId={selectedSite.id} />}

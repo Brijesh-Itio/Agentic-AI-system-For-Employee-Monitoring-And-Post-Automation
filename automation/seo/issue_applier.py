@@ -137,7 +137,7 @@ def _verify_meta_write(
     )
 
 
-def _remote_path_for_url(url: str) -> str:
+def remote_path_for_url(url: str) -> str:
     """The URL's own path is the file's path relative to wherever the
     site's Server Access connection is rooted — verified true for a real
     site this session (webpays.com's FTP root IS its web document root:
@@ -196,7 +196,7 @@ def apply_fix_to_static_file(server_client, url: str, rule: str, fix_value: str)
     matching bug. This edits the file's raw HTML over the site's Server
     Access (SFTP/FTP/FTPS) connection instead, with the same
     write-then-re-read-to-confirm discipline as apply_fix above."""
-    remote_path = _remote_path_for_url(url)
+    remote_path = remote_path_for_url(url)
     try:
         content = server_client.read_file(remote_path)
     except Exception as exc:

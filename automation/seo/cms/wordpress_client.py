@@ -294,6 +294,13 @@ class WordPressClient(CmsClient):
         except Exception:
             return False
 
+    def admin_edit_url(self, post_id: str, *, kind: str = "post") -> Optional[str]:
+        # WordPress's block editor uses the same post.php?action=edit
+        # screen for both Posts and Pages — the "kind" only matters for
+        # which REST endpoint a request goes to, not which admin screen
+        # opens, so there's nothing to branch on here.
+        return f"{self._base_url}/wp-admin/post.php?post={post_id}&action=edit"
+
     def create_post(
         self,
         *,

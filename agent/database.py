@@ -1022,6 +1022,17 @@ _SEO_TECHNICAL_ISSUES_EXTRA_COLUMNS = {
 }
 
 
+# Module 46 — mobile_usability_verdict added after seo_index_status
+# already shipped: Google's urlInspection.index:inspect response carries
+# this as a genuinely separate top-level result object
+# (mobileUsabilityResult), verified live this session that the real API
+# actually returns it even though the original implementation never
+# parsed or stored it. Same additive-column convention as the others here.
+_SEO_INDEX_STATUS_EXTRA_COLUMNS = {
+    "mobile_usability_verdict": "TEXT",
+}
+
+
 # Semrush Rank added after seo_semrush_metrics already shipped — same
 # additive-column convention as _SEO_SITES_EXTRA_COLUMNS above.
 _SEO_SEMRUSH_METRICS_EXTRA_COLUMNS = {
@@ -1077,6 +1088,7 @@ def init_db() -> None:
             _ensure_extra_columns(conn, "seo_semrush_metrics", _SEO_SEMRUSH_METRICS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_social_posts", _SEO_SOCIAL_POSTS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_blog_posts", _SEO_BLOG_POSTS_EXTRA_COLUMNS)
+            _ensure_extra_columns(conn, "seo_index_status", _SEO_INDEX_STATUS_EXTRA_COLUMNS)
             conn.commit()
             logger.info("Local SQLite schema ready at %s", LOCAL_DB_PATH)
         except Exception:
@@ -2633,8 +2645,8 @@ def upsert_index_status(site_id: int, url: str, inspection) -> None:
             """
             INSERT INTO seo_index_status
                 (site_id, url, coverage_state, indexing_state, robots_txt_state, page_fetch_state,
-                 last_crawl_time, google_canonical, user_canonical, sitemap_json, checked_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 last_crawl_time, google_canonical, user_canonical, sitemap_json, mobile_usability_verdict, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(site_id, url) DO UPDATE SET
                 coverage_state = excluded.coverage_state,
                 indexing_state = excluded.indexing_state,
@@ -2644,6 +2656,7 @@ def upsert_index_status(site_id: int, url: str, inspection) -> None:
                 google_canonical = excluded.google_canonical,
                 user_canonical = excluded.user_canonical,
                 sitemap_json = excluded.sitemap_json,
+                mobile_usability_verdict = excluded.mobile_usability_verdict,
                 checked_at = CURRENT_TIMESTAMP
             """,
             (
@@ -2657,6 +2670,7 @@ def upsert_index_status(site_id: int, url: str, inspection) -> None:
                 inspection.google_canonical,
                 inspection.user_canonical,
                 json.dumps(inspection.sitemap) if inspection.sitemap else None,
+                inspection.mobile_usability_verdict,
             ),
         )
 

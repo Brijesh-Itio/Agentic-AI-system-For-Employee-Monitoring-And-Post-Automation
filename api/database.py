@@ -626,6 +626,7 @@ class SeoIndexStatus(Base):
     google_canonical = Column(String)
     user_canonical = Column(String)
     sitemap_json = Column(String)
+    mobile_usability_verdict = Column(String)
     checked_at = Column(DateTime)
 
 

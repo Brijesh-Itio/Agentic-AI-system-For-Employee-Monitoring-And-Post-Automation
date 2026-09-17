@@ -14,6 +14,8 @@ LINKEDIN_COOKIES_PATH: Path = PROJECT_ROOT / "linkedin_cookies.json"
 
 # 18.2 — topics rotate through this list so none repeats until all have
 # been used (last_topic.txt, alongside the cookies file, tracks position).
+# Facebook gets its own rotation pointer (FACEBOOK_LAST_TOPIC_PATH) so the
+# two platforms' posting schedules don't advance each other's position.
 POST_TOPICS: list[str] = [
     "How local AI (Ollama) removes per-token cost from everyday agentic workflows",
     "Why an autonomous work-tracking agent should never need a button click",
@@ -22,6 +24,7 @@ POST_TOPICS: list[str] = [
     "How productivity scoring should work when it's built on real usage data",
 ]
 LAST_TOPIC_PATH: Path = PROJECT_ROOT / "last_topic.txt"
+FACEBOOK_LAST_TOPIC_PATH: Path = PROJECT_ROOT / "facebook_last_topic.txt"
 
 DAILY_POST_LIMIT: int = 10  # temporarily raised for testing — restore to a low number (e.g. 3) before real unattended use
 MIN_POST_INTERVAL_MINUTES: int = 0  # temporarily disabled for testing — restore to 30 before real unattended use

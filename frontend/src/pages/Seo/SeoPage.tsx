@@ -1,5 +1,6 @@
 import { Fragment, FormEvent, ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
   AlertTriangle,
   ArrowUp,
@@ -9,6 +10,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Download,
   ExternalLink,
   File,
   FileSearch,
@@ -117,6 +119,27 @@ import {
   getGscByCountry,
   getGscByDevice,
   getGscBySearchAppearance,
+  getGscQueriesLive,
+  getGscPagesLive,
+  getGscTimeseries,
+  GscFilterParams,
+  GscDateRow,
+  exportAllGscToSheet,
+  getGa4PagesLive,
+  getGa4BySource,
+  getGa4ByCountry,
+  getGa4ByDevice,
+  getGa4Timeseries,
+  getGa4Realtime,
+  getGa4RealtimeByMinute,
+  getGa4RealtimeByDevice,
+  getGa4RealtimeByPage,
+  getGa4RealtimeByAudience,
+  getGa4Events,
+  Ga4FilterParams,
+  Ga4DateRow,
+  exportAllGa4ToSheet,
+  exportOverviewToSheet,
   getSitemaps,
   submitSitemap,
   deleteSitemap,
@@ -133,8 +156,13 @@ import {
   getSeoJobs,
   getSeoSites,
   getSheetsStatus,
+  SheetsKind,
   indexPageForInterlinks,
   getSocialPosts,
+  getFacebookAccounts,
+  createFacebookAccount,
+  deleteFacebookAccount,
+  FacebookAccount,
   getServerFileBackup,
   getSshStatus,
   listServerDir,
@@ -192,7 +220,7 @@ import {
   updateSeoSiteSshConfig,
 } from "@/api";
 
-type Tab = "overview" | "performance" | "indexing" | "social" | "blog" | "backlinks";
+type Tab = "overview" | "performance" | "search-console" | "analytics" | "indexing" | "social" | "blog" | "backlinks";
 type IssueFilter = "pending" | "approved" | "rejected" | "resolved" | "all";
 
 // lucide-react 1.x dropped every brand/logo icon (trademark policy), so
@@ -267,7 +295,9 @@ const PLATFORM_ICONS: Record<SocialPlatform, (props: { className?: string }) => 
 const TABS: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "performance", label: "Performance", icon: Gauge },
-  { id: "indexing", label: "Indexing", icon: Search },
+  { id: "search-console", label: "Search Console", icon: Search },
+  { id: "analytics", label: "Analytics", icon: BarChart3 },
+  { id: "indexing", label: "Indexing", icon: FileSearch },
   { id: "social", label: "Social", icon: Share2 },
   { id: "blog", label: "Blog", icon: FileText },
   { id: "backlinks", label: "Backlinks", icon: Link2 },
@@ -1683,19 +1713,18 @@ function PageTagAuditCard({ siteId }: { siteId: number }) {
   );
 }
 
-function ReportingPanel({ siteId }: { siteId: number }) {
+// Module 56/57 — one of the separate "Export to Sheets" destinations
+// (main pipeline log / Search Console / Analytics / Overview report),
+// each its own spreadsheet a human adopts independently. Previously
+// ReportingPanel rendered a single hardcoded card for what was one
+// shared spreadsheet; now it renders one instance of this per
+// SheetsKind, each with fully independent connect/status/share state so
+// connecting one never touches another's.
+function SheetsConnectCard({ kind, title, description }: { kind: SheetsKind; title: string; description: ReactElement | string }) {
   const toast = useToast();
   const queryClient = useQueryClient();
-  const [rollupPeriod, setRollupPeriod] = useState<"weekly" | "monthly">("weekly");
-  const [rollup, setRollup] = useState<DigestRollup | null>(null);
   const [shareEmail, setShareEmail] = useState("");
   const [sheetUrl, setSheetUrl] = useState("");
-
-  const rollupsQuery = useQuery({
-    queryKey: ["seo", "digest-rollups", siteId, rollupPeriod],
-    queryFn: () => getDigestRollups(siteId, rollupPeriod),
-  });
-  const latestSaved = rollupsQuery.data?.[0] ?? null;
 
   // A useQuery, not a mutation fired only on button click — the
   // connection is a real, server-persisted setting (app_settings), so it
@@ -1704,30 +1733,21 @@ function ReportingPanel({ siteId }: { siteId: number }) {
   // fetch (an unconfigured sheet isn't an error worth a toast on every
   // page load); the explicit "Refresh" click below still reports it.
   const sheetsQuery = useQuery({
-    queryKey: ["seo", "sheets-status"],
-    queryFn: getSheetsStatus,
+    queryKey: ["seo", "sheets-status", kind],
+    queryFn: () => getSheetsStatus(kind),
     retry: false,
   });
   const sheets = sheetsQuery.data ?? null;
 
   const refreshSheetsStatus = async () => {
-    const result = await queryClient.fetchQuery({ queryKey: ["seo", "sheets-status"], queryFn: getSheetsStatus });
-    if (!result.configured) toast.error(result.error || "Sheets not configured yet.");
+    const result = await queryClient.fetchQuery({ queryKey: ["seo", "sheets-status", kind], queryFn: () => getSheetsStatus(kind) });
+    if (!result.configured) toast.error(result.error || "Sheet not configured yet.");
   };
 
-  const rollupMutation = useMutation({
-    mutationFn: () => generateDigestRollup(siteId, rollupPeriod),
-    onSuccess: (data) => {
-      setRollup(data);
-      toast.success(`${rollupPeriod === "weekly" ? "Weekly" : "Monthly"} roll-up generated.`);
-    },
-    onError: (err) => toast.error(serverErrorDetail(err, "Roll-up generation failed.")),
-  });
-
   const shareMutation = useMutation({
-    mutationFn: () => shareSheets(shareEmail.trim()),
+    mutationFn: () => shareSheets(shareEmail.trim(), kind),
     onSuccess: (data) => {
-      queryClient.setQueryData(["seo", "sheets-status"], data);
+      queryClient.setQueryData(["seo", "sheets-status", kind], data);
       if (data.configured) toast.success(`Shared with ${shareEmail.trim()}.`);
       else toast.error(data.error || "Sharing failed.");
     },
@@ -1739,79 +1759,127 @@ function ReportingPanel({ siteId }: { siteId: number }) {
   // path: paste a sheet you created yourself and shared with the
   // service account as Editor.
   const adoptMutation = useMutation({
-    mutationFn: () => adoptSheets(sheetUrl.trim()),
+    mutationFn: () => adoptSheets(sheetUrl.trim(), kind),
     onSuccess: (data) => {
-      queryClient.setQueryData(["seo", "sheets-status"], data);
+      queryClient.setQueryData(["seo", "sheets-status", kind], data);
       if (data.configured) toast.success("Connected — tabs and headers set up.");
       else toast.error(data.error || "Could not connect to that sheet.");
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Could not connect to that sheet.")),
   });
 
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <History className="h-4 w-4 text-brand-500" />
+          {title}
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">{description}</p>
+        <div className="mb-3 flex flex-wrap gap-2">
+          <Input
+            value={sheetUrl}
+            onChange={(e) => setSheetUrl(e.target.value)}
+            placeholder="Paste your Google Sheet URL or ID"
+            className="max-w-sm"
+          />
+          <Button size="sm" onClick={() => adoptMutation.mutate()} disabled={adoptMutation.isPending || !sheetUrl.trim()}>
+            {adoptMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Connect
+          </Button>
+        </div>
+        <Button size="sm" variant="outline" onClick={() => refreshSheetsStatus()} disabled={sheetsQuery.isFetching}>
+          {sheetsQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          {sheets?.configured ? "Refresh" : "Check status"}
+        </Button>
+        {sheets?.configured && sheets.url && (
+          <a
+            href={sheets.url}
+            target="_blank"
+            rel="noreferrer"
+            className="ml-2 text-theme-sm text-brand-600 underline dark:text-brand-400"
+          >
+            Open spreadsheet
+          </a>
+        )}
+        {sheets && !sheets.configured && (
+          <p className="mt-2 text-theme-xs text-error-500">{sheets.error}</p>
+        )}
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Input
+            value={shareEmail}
+            onChange={(e) => setShareEmail(e.target.value)}
+            placeholder="Share with a different Google account email"
+            className="max-w-xs"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => shareMutation.mutate()}
+            disabled={shareMutation.isPending || !shareEmail.trim()}
+          >
+            {shareMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Share
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ReportingPanel({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  const [rollupPeriod, setRollupPeriod] = useState<"weekly" | "monthly">("weekly");
+  const [rollup, setRollup] = useState<DigestRollup | null>(null);
+
+  const rollupsQuery = useQuery({
+    queryKey: ["seo", "digest-rollups", siteId, rollupPeriod],
+    queryFn: () => getDigestRollups(siteId, rollupPeriod),
+  });
+  const latestSaved = rollupsQuery.data?.[0] ?? null;
+
+  const rollupMutation = useMutation({
+    mutationFn: () => generateDigestRollup(siteId, rollupPeriod),
+    onSuccess: (data) => {
+      setRollup(data);
+      toast.success(`${rollupPeriod === "weekly" ? "Weekly" : "Monthly"} roll-up generated.`);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Roll-up generation failed.")),
+  });
+
   const shown = rollup ?? latestSaved;
+  const serviceAccountLine = (
+    <>
+      Google gives service accounts no Drive storage of their own, so create a blank sheet yourself, share it with{" "}
+      <span className="font-mono">workpulse-seo-agent@workpulse-ai-506706.iam.gserviceaccount.com</span> as Editor, and
+      paste its link below — the app sets up the tabs for you.
+    </>
+  );
 
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-      <Card>
-        <CardContent className="p-6">
-          <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
-            <History className="h-4 w-4 text-brand-500" />
-            Google Sheets command centre
-          </h2>
-          <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
-            A live spreadsheet the app writes rank/CWV/content/issue/link/digest data to automatically. Google
-            gives service accounts no Drive storage of their own, so create a blank sheet yourself, share it with{" "}
-            <span className="font-mono">workpulse-seo-agent@workpulse-ai-506706.iam.gserviceaccount.com</span> as
-            Editor, and paste its link below — the app sets up the tabs for you.
-          </p>
-          <div className="mb-3 flex flex-wrap gap-2">
-            <Input
-              value={sheetUrl}
-              onChange={(e) => setSheetUrl(e.target.value)}
-              placeholder="Paste your Google Sheet URL or ID"
-              className="max-w-sm"
-            />
-            <Button size="sm" onClick={() => adoptMutation.mutate()} disabled={adoptMutation.isPending || !sheetUrl.trim()}>
-              {adoptMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              Connect
-            </Button>
-          </div>
-          <Button size="sm" variant="outline" onClick={() => refreshSheetsStatus()} disabled={sheetsQuery.isFetching}>
-            {sheetsQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            {sheets?.configured ? "Refresh" : "Check status"}
-          </Button>
-          {sheets?.configured && sheets.url && (
-            <a
-              href={sheets.url}
-              target="_blank"
-              rel="noreferrer"
-              className="ml-2 text-theme-sm text-brand-600 underline dark:text-brand-400"
-            >
-              Open spreadsheet
-            </a>
-          )}
-          {sheets && !sheets.configured && (
-            <p className="mt-2 text-theme-xs text-error-500">{sheets.error}</p>
-          )}
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Input
-              value={shareEmail}
-              onChange={(e) => setShareEmail(e.target.value)}
-              placeholder="Share with a different Google account email"
-              className="max-w-xs"
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => shareMutation.mutate()}
-              disabled={shareMutation.isPending || !shareEmail.trim()}
-            >
-              {shareMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              Share
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 xl:grid-cols-4">
+        <SheetsConnectCard
+          kind="main"
+          title="Pipeline sheet"
+          description={<>The daily pipeline's own logs (rank/CWV/content/issue/link/digest). {serviceAccountLine}</>}
+        />
+        <SheetsConnectCard
+          kind="gsc"
+          title="Search Console sheet"
+          description={<>Everything exported from the Search Console Performance dashboard. {serviceAccountLine}</>}
+        />
+        <SheetsConnectCard
+          kind="ga4"
+          title="Analytics sheet"
+          description={<>Everything exported from the Analytics Performance dashboard, including Events. {serviceAccountLine}</>}
+        />
+        <SheetsConnectCard
+          kind="overview"
+          title="Overview report sheet"
+          description={<>The Overview dashboard's own report (Top Queries/Pages/CTR by Page/Rank Alerts). {serviceAccountLine}</>}
+        />
+      </div>
 
       <Card>
         <CardContent className="p-6">
@@ -2082,6 +2150,8 @@ function OverviewTab({
           )}
         </CardContent>
       </Card>
+
+      <OverviewExportBar siteId={siteId} />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <SearchConsolePanel siteId={siteId} />
@@ -2408,6 +2478,123 @@ function JobHistoryPanel({ jobs, loading }: { jobs: SeoJobRun[]; loading: boolea
   );
 }
 
+function OverviewExportBar({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  // Same query keys/queryFns each of the 4 panels below already uses —
+  // React Query dedupes on the key, so this shares their cache rather
+  // than re-fetching, and always exports whatever's actually on screen.
+  const queriesQuery = useQuery({ queryKey: ["seo", "gsc", siteId], queryFn: () => getGscQueries(siteId, 8) });
+  const pagesQuery = useQuery({ queryKey: ["seo", "ga4", siteId], queryFn: () => getGa4Pages(siteId, 8) });
+  const ctrQuery = useQuery({ queryKey: ["seo", "gsc-pages", siteId], queryFn: () => getGscPages(siteId, 10) });
+  const rankQuery = useQuery({ queryKey: ["seo", "rank-alerts", siteId], queryFn: () => getRankAlerts(siteId) });
+
+  const hasAnyData =
+    (queriesQuery.data?.length ?? 0) > 0 ||
+    (pagesQuery.data?.length ?? 0) > 0 ||
+    (ctrQuery.data?.length ?? 0) > 0 ||
+    (rankQuery.data?.length ?? 0) > 0;
+
+  const exportMutation = useMutation({
+    mutationFn: () =>
+      exportOverviewToSheet(siteId, {
+        top_queries: queriesQuery.data ?? [],
+        top_pages: pagesQuery.data ?? [],
+        ctr_by_page: ctrQuery.data ?? [],
+        rank_alerts: rankQuery.data ?? [],
+      }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error(result.detail);
+        return;
+      }
+      toast.success(result.detail);
+      if (result.sheet_url) window.open(result.sheet_url, "_blank", "noopener,noreferrer");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Export to Sheets failed.")),
+  });
+
+  const downloadCsv = () => {
+    const escape = (cell: string) => `"${cell.replace(/"/g, '""')}"`;
+    const section = (title: string, header: string[], rows: string[][]) =>
+      [
+        escape(title),
+        header.map(escape).join(","),
+        ...(rows.length ? rows.map((row) => row.map(escape).join(",")) : [escape("(no rows)")]),
+      ].join("\r\n");
+
+    const csv = [
+      section(
+        "Top Search Queries",
+        ["Query", "Clicks", "Impressions", "CTR", "Avg. Position"],
+        (queriesQuery.data ?? []).map((r) => [
+          r.query,
+          String(r.clicks),
+          String(r.impressions),
+          r.ctr != null ? `${(r.ctr * 100).toFixed(2)}%` : "",
+          r.position != null ? r.position.toFixed(1) : "",
+        ])
+      ),
+      section(
+        "Top Traffic Pages",
+        ["Page", "Sessions", "Bounce Rate", "Conversions"],
+        (pagesQuery.data ?? []).map((r) => [
+          r.page_path,
+          String(r.sessions),
+          r.bounce_rate != null ? `${(r.bounce_rate * 100).toFixed(2)}%` : "",
+          r.conversions != null ? String(r.conversions) : "",
+        ])
+      ),
+      section(
+        "CTR by Page",
+        ["Page", "Clicks", "Impressions", "CTR", "Avg. Position"],
+        (ctrQuery.data ?? []).map((r) => [
+          r.page,
+          String(r.clicks),
+          String(r.impressions),
+          r.ctr != null ? `${(r.ctr * 100).toFixed(2)}%` : "",
+          r.position != null ? r.position.toFixed(1) : "",
+        ])
+      ),
+      section(
+        "Rank Alerts",
+        ["Query", "Previous Position", "Current Position", "Delta"],
+        (rankQuery.data ?? []).map((r) => [r.query, r.previous_position.toFixed(1), r.current_position.toFixed(1), r.delta.toFixed(1)])
+      ),
+    ].join("\r\n\r\n");
+
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `overview-report-site-${siteId}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  if (!hasAnyData) return null;
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h2 className="flex items-center gap-2 text-base font-semibold text-gray-900 dark:text-white">
+        <LayoutDashboard className="h-4 w-4 text-brand-500" />
+        Overview Report
+      </h2>
+      <div className="flex gap-2">
+        <Button size="sm" variant="outline" onClick={downloadCsv}>
+          <Download className="h-3.5 w-3.5" />
+          Download CSV
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}>
+          {exportMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+          Export to Sheets
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function SearchConsolePanel({ siteId }: { siteId: number }) {
   const query = useQuery({ queryKey: ["seo", "gsc", siteId], queryFn: () => getGscQueries(siteId, 8) });
   const rows = query.data ?? [];
@@ -2692,9 +2879,16 @@ function SocialTab({ siteId }: { siteId: number }) {
   const [contentExcerpt, setContentExcerpt] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [selectedPlatforms, setSelectedPlatforms] = useState<SocialPlatform[]>(["linkedin"]);
+  const [facebookAccountId, setFacebookAccountId] = useState<number | "">("");
 
   const postsQuery = useQuery({ queryKey: ["seo", "social", siteId], queryFn: () => getSocialPosts(siteId) });
   const posts = postsQuery.data ?? [];
+
+  // Module 40 — multiple connected Facebook Pages. Global (not scoped to
+  // this site) since a Page is Meta's own asset, not tied to one SEO
+  // site; posts for any site can publish through any connected account.
+  const facebookAccountsQuery = useQuery({ queryKey: ["seo", "facebook-accounts"], queryFn: getFacebookAccounts });
+  const facebookAccounts = facebookAccountsQuery.data ?? [];
 
   const generateMutation = useMutation({
     mutationFn: () =>
@@ -2704,6 +2898,7 @@ function SocialTab({ siteId }: { siteId: number }) {
         content_excerpt: contentExcerpt,
         image_url: imageUrl.trim() || undefined,
         platforms: selectedPlatforms,
+        facebook_account_id: facebookAccountId === "" ? undefined : facebookAccountId,
       }),
     onSuccess: (created) => {
       toast.success(`Generated ${created.length} of ${selectedPlatforms.length} requested post(s).`);
@@ -2758,8 +2953,124 @@ function SocialTab({ siteId }: { siteId: number }) {
     setSelectedPlatforms((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
   };
 
+  const [showAddAccount, setShowAddAccount] = useState(false);
+  const [newAccountLabel, setNewAccountLabel] = useState("");
+  const [newAccountPageId, setNewAccountPageId] = useState("");
+  const [newAccountToken, setNewAccountToken] = useState("");
+
+  const createAccountMutation = useMutation({
+    mutationFn: () =>
+      createFacebookAccount({ label: newAccountLabel.trim(), page_id: newAccountPageId.trim(), page_access_token: newAccountToken.trim() }),
+    onSuccess: () => {
+      toast.success("Facebook account added.");
+      setNewAccountLabel("");
+      setNewAccountPageId("");
+      setNewAccountToken("");
+      setShowAddAccount(false);
+      queryClient.invalidateQueries({ queryKey: ["seo", "facebook-accounts"] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't add this Facebook account.")),
+  });
+
+  const deleteAccountMutation = useMutation({
+    mutationFn: (id: number) => deleteFacebookAccount(id),
+    onSuccess: () => {
+      toast.success("Facebook account removed.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "facebook-accounts"] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't remove this Facebook account.")),
+  });
+
   return (
     <>
+      {selectedPlatforms.includes("facebook") && (
+        <Card>
+          <CardContent className="p-6">
+            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+              <FacebookIcon className="h-4 w-4 text-brand-500" />
+              Facebook accounts
+            </h2>
+            {facebookAccounts.length === 0 && !showAddAccount && (
+              <p className="text-theme-sm text-gray-400">
+                No extra Pages connected yet — posts will use the default account from .env.
+              </p>
+            )}
+            {facebookAccounts.length > 0 && (
+              <div className="mb-3 space-y-2">
+                {facebookAccounts.map((account: FacebookAccount) => (
+                  <div
+                    key={account.id}
+                    className="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2 dark:border-gray-800"
+                  >
+                    <div>
+                      <p className="text-theme-sm font-medium text-gray-900 dark:text-white">{account.label}</p>
+                      <p className="text-theme-xs text-gray-400">Page ID: {account.page_id}</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => deleteAccountMutation.mutate(account.id)}
+                      disabled={deleteAccountMutation.isPending}
+                    >
+                      <XCircle className="h-3.5 w-3.5" />
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {showAddAccount ? (
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div>
+                  <Label htmlFor="fb-account-label">Label</Label>
+                  <Input
+                    id="fb-account-label"
+                    value={newAccountLabel}
+                    onChange={(e) => setNewAccountLabel(e.target.value)}
+                    placeholder="e.g. Just post"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="fb-account-page-id">Page ID</Label>
+                  <Input id="fb-account-page-id" value={newAccountPageId} onChange={(e) => setNewAccountPageId(e.target.value)} />
+                </div>
+                <div>
+                  <Label htmlFor="fb-account-token">Page Access Token</Label>
+                  <Input
+                    id="fb-account-token"
+                    type="password"
+                    value={newAccountToken}
+                    onChange={(e) => setNewAccountToken(e.target.value)}
+                  />
+                </div>
+                <div className="flex gap-2 sm:col-span-3">
+                  <Button
+                    size="sm"
+                    onClick={() => createAccountMutation.mutate()}
+                    disabled={
+                      createAccountMutation.isPending ||
+                      !newAccountLabel.trim() ||
+                      !newAccountPageId.trim() ||
+                      !newAccountToken.trim()
+                    }
+                  >
+                    {createAccountMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                    Save account
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setShowAddAccount(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button size="sm" variant="outline" onClick={() => setShowAddAccount(true)}>
+                + Add Facebook account
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardContent className="p-6">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
@@ -2791,6 +3102,24 @@ function SocialTab({ siteId }: { siteId: number }) {
                 </p>
               )}
             </div>
+            {selectedPlatforms.includes("facebook") && facebookAccounts.length > 0 && (
+              <div className="sm:col-span-2">
+                <Label htmlFor="social-fb-account">Facebook Page</Label>
+                <select
+                  id="social-fb-account"
+                  value={facebookAccountId}
+                  onChange={(e) => setFacebookAccountId(e.target.value === "" ? "" : Number(e.target.value))}
+                  className="h-11 w-full rounded-lg border border-gray-300 bg-transparent px-4 text-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+                >
+                  <option value="">Default (.env)</option>
+                  {facebookAccounts.map((account: FacebookAccount) => (
+                    <option key={account.id} value={account.id}>
+                      {account.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
           <div className="mt-4 flex flex-wrap gap-2">
             {ALL_PLATFORMS.map((p) => {
@@ -2847,6 +3176,11 @@ function SocialTab({ siteId }: { siteId: number }) {
                       {post.platform}
                     </Badge>
                     <Badge variant={socialStatusVariant[post.status]}>{post.status}</Badge>
+                    {post.platform === "facebook" && (
+                      <span className="text-theme-xs text-gray-400">
+                        via {facebookAccounts.find((a: FacebookAccount) => a.id === post.facebook_account_id)?.label ?? "Default (.env)"}
+                      </span>
+                    )}
                   </div>
                   {post.image_url && (
                     <img
@@ -2904,7 +3238,7 @@ function SocialTab({ siteId }: { siteId: number }) {
                         disabled={uploadImageMutation.isPending}
                       >
                         {uploadImageMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}
-                        Upload image
+                        {post.image_url ? "Replace image" : "Upload image"}
                       </Button>
                     </div>
                   )}
@@ -3873,61 +4207,579 @@ function formatGscDimensionKey(dimension: string, key: string): string {
     .join(" ");
 }
 
-const GSC_DIMENSIONS = [
-  { key: "country", label: "Country", fetcher: getGscByCountry },
-  { key: "device", label: "Device", fetcher: getGscByDevice },
-  { key: "search-appearance", label: "Search Appearance", fetcher: getGscBySearchAppearance },
+type GscTabKey = "queries" | "pages" | "countries" | "devices" | "search-appearance";
+
+const GSC_TABS: { key: GscTabKey; label: string }[] = [
+  { key: "queries", label: "Queries" },
+  { key: "pages", label: "Pages" },
+  { key: "countries", label: "Countries" },
+  { key: "devices", label: "Devices" },
+  { key: "search-appearance", label: "Search Appearance" },
+];
+
+// Matches the real Search Console UI's own date-range chips. "24 hours"
+// is included for parity even though the public API's data has a real
+// ~2-3 day processing lag — a same-day range will often come back
+// genuinely empty, which is an honest result, not a bug, so it's left
+// in rather than second-guessed away.
+const GSC_DATE_RANGES = [
+  { key: "24h", label: "24 hours", days: 1 },
+  { key: "7d", label: "7 days", days: 7 },
+  { key: "28d", label: "28 days", days: 28 },
+  { key: "3m", label: "3 months", days: 90 },
+  { key: "custom", label: "Custom", days: null },
 ] as const;
 
-function GscDimensionPanel({ siteId }: { siteId: number }) {
-  const [dimension, setDimension] = useState<(typeof GSC_DIMENSIONS)[number]["key"]>("country");
-  const active = GSC_DIMENSIONS.find((d) => d.key === dimension)!;
+interface GscPerfRow {
+  label: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+  rawKey?: string;
+}
 
-  const dimensionQuery = useQuery({
-    queryKey: ["seo", "gsc-dimension", siteId, dimension],
-    queryFn: () => active.fetcher(siteId),
+// GA4's own dimension values are already human-readable (full country
+// names, "google"/"(direct)" for source) unlike GSC's coded values —
+// the only one worth reformatting here is deviceCategory's lowercase
+// "desktop"/"mobile"/"tablet".
+function formatGa4DimensionKey(key: string): string {
+  return key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+}
+
+type Ga4TabKey = "pages" | "sources" | "countries" | "devices";
+
+const GA4_TABS: { key: Ga4TabKey; label: string }[] = [
+  { key: "pages", label: "Pages" },
+  { key: "sources", label: "Sources" },
+  { key: "countries", label: "Countries" },
+  { key: "devices", label: "Devices" },
+];
+
+const GA4_DATE_RANGES = [
+  { key: "24h", label: "24 hours", days: 1 },
+  { key: "7d", label: "7 days", days: 7 },
+  { key: "28d", label: "28 days", days: 28 },
+  { key: "3m", label: "3 months", days: 90 },
+  { key: "custom", label: "Custom", days: null },
+] as const;
+
+// Module 54 — the switchable metric on GA4's own Home report card
+// ("Active users ▾ 266  ↑0.8%"), with a searchable/categorized picker
+// matching GA4's own "Search items" dropdown. Grouped into the same
+// User/Session/Event categories GA4 itself uses, but only with the 9
+// metrics ga4_client.py's _METRICS actually fetches per day — GA4's
+// fuller picker also has Ecommerce/Revenue/Page-screen categories this
+// app has no data for, so those are left out rather than shown empty
+// or faked.
+type Ga4HeadlineMetricKey =
+  | "active_users"
+  | "new_users"
+  | "total_users"
+  | "sessions"
+  | "engaged_sessions"
+  | "engagement_rate"
+  | "avg_session_duration"
+  | "event_count"
+  | "conversions";
+
+const GA4_HEADLINE_METRICS: { key: Ga4HeadlineMetricKey; label: string; category: "User" | "Session" | "Event" }[] = [
+  { key: "active_users", label: "Active users", category: "User" },
+  { key: "new_users", label: "New users", category: "User" },
+  { key: "total_users", label: "Total users", category: "User" },
+  { key: "sessions", label: "Sessions", category: "Session" },
+  { key: "engaged_sessions", label: "Engaged sessions", category: "Session" },
+  { key: "engagement_rate", label: "Engagement rate", category: "Session" },
+  { key: "avg_session_duration", label: "Average session duration", category: "Session" },
+  { key: "event_count", label: "Event count", category: "Event" },
+  { key: "conversions", label: "Conversions", category: "Event" },
+];
+
+// engagement_rate/avg_session_duration are rates, not counts — summing
+// them across days the way sessions/active users are summed would be
+// meaningless (a 7-day engagement rate could add up to "210%"), so
+// these two are session-weighted-averaged instead, the same technique
+// this panel's own avgBounceRate stat already uses.
+const GA4_RATE_METRICS: Ga4HeadlineMetricKey[] = ["engagement_rate", "avg_session_duration"];
+
+function computeHeadlineMetricValue(rows: Ga4DateRow[], key: Ga4HeadlineMetricKey): number {
+  if (GA4_RATE_METRICS.includes(key)) {
+    const totalSessions = rows.reduce((sum, r) => sum + r.sessions, 0);
+    if (totalSessions === 0) return 0;
+    return rows.reduce((sum, r) => sum + r[key] * r.sessions, 0) / totalSessions;
+  }
+  return rows.reduce((sum, r) => sum + r[key], 0);
+}
+
+function formatHeadlineMetricValue(key: Ga4HeadlineMetricKey, value: number): string {
+  if (key === "engagement_rate") return `${(value * 100).toFixed(1)}%`;
+  if (key === "avg_session_duration") {
+    const totalSeconds = Math.round(value);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+  }
+  return Math.round(value).toLocaleString();
+}
+
+function shiftIsoDate(dateStr: string, days: number): string {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// The immediately preceding period of equal length — the same
+// comparison GA4's own Home report trend arrow uses ("vs previous
+// period"). Returns explicit start/end dates so it can reuse the exact
+// same /ga4/timeseries endpoint the main chart already calls, just with
+// an overridden range instead of days_back.
+function getPreviousPeriodFilters(filters: Ga4FilterParams): Ga4FilterParams | null {
+  if (filters.startDate && filters.endDate) {
+    const dayCount =
+      Math.round(
+        (new Date(filters.endDate + "T00:00:00").getTime() - new Date(filters.startDate + "T00:00:00").getTime()) / 86_400_000
+      ) + 1;
+    const prevEnd = shiftIsoDate(filters.startDate, -1);
+    return { startDate: shiftIsoDate(prevEnd, -(dayCount - 1)), endDate: prevEnd };
+  }
+  if (filters.daysBack) {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const currentStart = shiftIsoDate(todayStr, -(filters.daysBack - 1));
+    const prevEnd = shiftIsoDate(currentStart, -1);
+    return { startDate: shiftIsoDate(prevEnd, -(filters.daysBack - 1)), endDate: prevEnd };
+  }
+  return null;
+}
+
+interface Ga4PerfRow {
+  label: string;
+  sessions: number;
+  bounceRate: number;
+  conversions: number;
+}
+
+function formatDayLabel(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00");
+  return Number.isNaN(d.getTime()) ? dateStr : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function GscTrendChart({ data }: { data: GscDateRow[] }) {
+  const [showClicks, setShowClicks] = useState(true);
+  const [showImpressions, setShowImpressions] = useState(true);
+  const chartData = data.map((d) => ({ ...d, label: formatDayLabel(d.date) }));
+
+  return (
+    <div>
+      <div className="mb-2 flex flex-wrap gap-4 text-theme-xs">
+        <label className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
+          <input type="checkbox" checked={showClicks} onChange={(e) => setShowClicks(e.target.checked)} />
+          <span className="inline-block h-2 w-2 rounded-full bg-brand-500" /> Clicks
+        </label>
+        <label className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
+          <input type="checkbox" checked={showImpressions} onChange={(e) => setShowImpressions(e.target.checked)} />
+          <span className="inline-block h-2 w-2 rounded-full bg-purple-500" /> Impressions
+        </label>
+      </div>
+      <ResponsiveContainer width="100%" height={220}>
+        <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" className="stroke-gray-100 dark:stroke-gray-800" />
+          <XAxis dataKey="label" tick={{ fontSize: 11 }} minTickGap={30} />
+          <YAxis yAxisId="clicks" tick={{ fontSize: 11 }} width={40} />
+          <YAxis yAxisId="impressions" orientation="right" tick={{ fontSize: 11 }} width={40} />
+          <Tooltip
+            formatter={(value, name) => [value, name === "clicks" ? "Clicks" : "Impressions"]}
+            labelFormatter={(label) => label}
+          />
+          {showClicks && (
+            <Line yAxisId="clicks" type="monotone" dataKey="clicks" stroke="#465fff" strokeWidth={2} dot={false} name="clicks" />
+          )}
+          {showImpressions && (
+            <Line
+              yAxisId="impressions"
+              type="monotone"
+              dataKey="impressions"
+              stroke="#a855f7"
+              strokeWidth={2}
+              dot={false}
+              name="impressions"
+            />
+          )}
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function GscPerformancePanel({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const [tab, setTab] = useState<GscTabKey>("queries");
+  const [rangeKey, setRangeKey] = useState<(typeof GSC_DATE_RANGES)[number]["key"]>("3m");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [countryFilter, setCountryFilter] = useState<string | null>(null);
+  const [pageFilter, setPageFilter] = useState<string | null>(null);
+
+  const activeRange = GSC_DATE_RANGES.find((r) => r.key === rangeKey)!;
+  const customReady = rangeKey === "custom" && !!customStart && !!customEnd;
+  const filters: GscFilterParams =
+    rangeKey === "custom"
+      ? { startDate: customStart || undefined, endDate: customEnd || undefined, country: countryFilter, page: pageFilter }
+      : { daysBack: activeRange.days ?? 90, country: countryFilter, page: pageFilter };
+  // Custom range isn't queryable until both dates are picked — every hook
+  // below stays disabled rather than firing on a half-entered range.
+  const rangeIsReady = rangeKey !== "custom" || customReady;
+
+  const timeseriesQuery = useQuery({
+    queryKey: ["seo", "gsc-timeseries", siteId, filters],
+    queryFn: () => getGscTimeseries(siteId, filters),
+    enabled: rangeIsReady,
   });
-  const rows = dimensionQuery.data ?? [];
+  const timeseries = timeseriesQuery.data ?? [];
+  const totals = timeseries.reduce(
+    (acc, d) => ({ clicks: acc.clicks + d.clicks, impressions: acc.impressions + d.impressions, posWeighted: acc.posWeighted + d.position * d.impressions }),
+    { clicks: 0, impressions: 0, posWeighted: 0 }
+  );
+  const avgCtr = totals.impressions > 0 ? totals.clicks / totals.impressions : 0;
+  const avgPosition = totals.impressions > 0 ? totals.posWeighted / totals.impressions : 0;
+
+  const queriesQuery = useQuery({
+    queryKey: ["seo", "gsc-live-queries", siteId, filters],
+    queryFn: () => getGscQueriesLive(siteId, filters),
+    enabled: tab === "queries" && rangeIsReady,
+  });
+  const pagesQuery = useQuery({
+    queryKey: ["seo", "gsc-live-pages", siteId, filters],
+    queryFn: () => getGscPagesLive(siteId, filters),
+    enabled: tab === "pages" && rangeIsReady,
+  });
+  const countriesQuery = useQuery({
+    queryKey: ["seo", "gsc-live-countries", siteId, filters.daysBack, filters.startDate, filters.endDate, filters.page],
+    queryFn: () => getGscByCountry(siteId, { ...filters, country: undefined }),
+    enabled: tab === "countries" && rangeIsReady,
+  });
+  const devicesQuery = useQuery({
+    queryKey: ["seo", "gsc-live-devices", siteId, filters],
+    queryFn: () => getGscByDevice(siteId, filters),
+    enabled: tab === "devices" && rangeIsReady,
+  });
+  const appearanceQuery = useQuery({
+    queryKey: ["seo", "gsc-live-appearance", siteId, filters],
+    queryFn: () => getGscBySearchAppearance(siteId, filters),
+    enabled: tab === "search-appearance" && rangeIsReady,
+  });
+
+  const activeQuery = {
+    queries: queriesQuery,
+    pages: pagesQuery,
+    countries: countriesQuery,
+    devices: devicesQuery,
+    "search-appearance": appearanceQuery,
+  }[tab];
+
+  const rows: GscPerfRow[] =
+    tab === "queries"
+      ? (queriesQuery.data ?? []).map((r) => ({ label: r.query, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position }))
+      : tab === "pages"
+        ? (pagesQuery.data ?? []).map((r) => ({ label: r.page, rawKey: r.page, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position }))
+        : tab === "countries"
+          ? (countriesQuery.data ?? []).map((r) => ({
+              label: formatGscDimensionKey("country", r.key),
+              rawKey: r.key,
+              clicks: r.clicks,
+              impressions: r.impressions,
+              ctr: r.ctr,
+              position: r.position,
+            }))
+          : tab === "devices"
+            ? (devicesQuery.data ?? []).map((r) => ({ label: formatGscDimensionKey("device", r.key), clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position }))
+            : (appearanceQuery.data ?? []).map((r) => ({
+                label: formatGscDimensionKey("search-appearance", r.key),
+                clicks: r.clicks,
+                impressions: r.impressions,
+                ctr: r.ctr,
+                position: r.position,
+              }));
+
+  const columnLabel = GSC_TABS.find((t) => t.key === tab)!.label.replace(/s$/, "");
+  const rowIsClickable = tab === "countries" || tab === "pages";
+
+  const handleRowClick = (row: GscPerfRow) => {
+    if (!row.rawKey) return;
+    if (tab === "countries") {
+      setCountryFilter(row.rawKey);
+      setTab("queries");
+    } else if (tab === "pages") {
+      setPageFilter(row.rawKey);
+    }
+  };
+
+  const hasFilters = !!countryFilter || !!pageFilter;
+  const resetFilters = () => {
+    setCountryFilter(null);
+    setPageFilter(null);
+  };
+
+  const dateRangeLabel =
+    rangeKey === "custom" ? `Custom (${customStart || "?"} to ${customEnd || "?"})` : activeRange.label;
+
+  const exportMutation = useMutation({
+    // Fetches all 5 dimensions (not just whichever tab is on screen) so
+    // one click writes Queries/Pages/Countries/Devices/Search Appearance
+    // into their own clean tabs — reuses the same query keys the tabs'
+    // own useQuery hooks use, so an already-loaded tab isn't re-fetched.
+    mutationFn: async () => {
+      const [queriesData, pagesData, countriesData, devicesData, appearanceData] = await Promise.all([
+        queryClient.fetchQuery({ queryKey: ["seo", "gsc-live-queries", siteId, filters], queryFn: () => getGscQueriesLive(siteId, filters) }),
+        queryClient.fetchQuery({ queryKey: ["seo", "gsc-live-pages", siteId, filters], queryFn: () => getGscPagesLive(siteId, filters) }),
+        queryClient.fetchQuery({
+          queryKey: ["seo", "gsc-live-countries", siteId, filters.daysBack, filters.startDate, filters.endDate, filters.page],
+          queryFn: () => getGscByCountry(siteId, { ...filters, country: undefined }),
+        }),
+        queryClient.fetchQuery({ queryKey: ["seo", "gsc-live-devices", siteId, filters], queryFn: () => getGscByDevice(siteId, filters) }),
+        queryClient.fetchQuery({ queryKey: ["seo", "gsc-live-appearance", siteId, filters], queryFn: () => getGscBySearchAppearance(siteId, filters) }),
+      ]);
+      return exportAllGscToSheet(siteId, dateRangeLabel, GSC_TABS.find((t) => t.key === tab)!.label, {
+        queries: queriesData.map((r) => ({ label: r.query, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position })),
+        pages: pagesData.map((r) => ({ label: r.page, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position })),
+        countries: countriesData.map((r) => ({
+          label: formatGscDimensionKey("country", r.key),
+          clicks: r.clicks,
+          impressions: r.impressions,
+          ctr: r.ctr,
+          position: r.position,
+        })),
+        devices: devicesData.map((r) => ({
+          label: formatGscDimensionKey("device", r.key),
+          clicks: r.clicks,
+          impressions: r.impressions,
+          ctr: r.ctr,
+          position: r.position,
+        })),
+        search_appearance: appearanceData.map((r) => ({
+          label: formatGscDimensionKey("search-appearance", r.key),
+          clicks: r.clicks,
+          impressions: r.impressions,
+          ctr: r.ctr,
+          position: r.position,
+        })),
+        timeseries,
+      });
+    },
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error(result.detail);
+        return;
+      }
+      toast.success(result.detail);
+      // Opens straight to the tab matching whatever view is on screen —
+      // the bare spreadsheet link opens whatever tab was last active,
+      // which made a real, successful export look like it hadn't
+      // written anything. The other 4 dimension tabs are populated too,
+      // reachable via the tab strip at the bottom of the sheet.
+      if (result.sheet_url) window.open(result.sheet_url, "_blank", "noopener,noreferrer");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Export to Sheets failed.")),
+  });
+
+  // Downloads ALL 5 dimensions in one file (one section per view —
+  // Queries/Pages/Countries/Devices/Search Appearance), not just
+  // whichever tab is on screen — mirrors exportMutation's "fetch every
+  // dimension" approach so both buttons give the same complete data.
+  const downloadCsvMutation = useMutation({
+    mutationFn: async () => {
+      const [queriesData, pagesData, countriesData, devicesData, appearanceData] = await Promise.all([
+        queryClient.fetchQuery({ queryKey: ["seo", "gsc-live-queries", siteId, filters], queryFn: () => getGscQueriesLive(siteId, filters) }),
+        queryClient.fetchQuery({ queryKey: ["seo", "gsc-live-pages", siteId, filters], queryFn: () => getGscPagesLive(siteId, filters) }),
+        queryClient.fetchQuery({
+          queryKey: ["seo", "gsc-live-countries", siteId, filters.daysBack, filters.startDate, filters.endDate, filters.page],
+          queryFn: () => getGscByCountry(siteId, { ...filters, country: undefined }),
+        }),
+        queryClient.fetchQuery({ queryKey: ["seo", "gsc-live-devices", siteId, filters], queryFn: () => getGscByDevice(siteId, filters) }),
+        queryClient.fetchQuery({ queryKey: ["seo", "gsc-live-appearance", siteId, filters], queryFn: () => getGscBySearchAppearance(siteId, filters) }),
+      ]);
+
+      const toRow = (label: string, r: { clicks: number; impressions: number; ctr: number; position: number }) => [
+        label,
+        String(r.clicks),
+        String(r.impressions),
+        `${(r.ctr * 100).toFixed(2)}%`,
+        r.position.toFixed(1),
+      ];
+      const sections: { title: string; column: string; rows: string[][] }[] = [
+        { title: "Queries", column: "Query", rows: queriesData.map((r) => toRow(r.query, r)) },
+        { title: "Pages", column: "Page", rows: pagesData.map((r) => toRow(r.page, r)) },
+        { title: "Countries", column: "Country", rows: countriesData.map((r) => toRow(formatGscDimensionKey("country", r.key), r)) },
+        { title: "Devices", column: "Device", rows: devicesData.map((r) => toRow(formatGscDimensionKey("device", r.key), r)) },
+        { title: "Search Appearance", column: "Search Appearance", rows: appearanceData.map((r) => toRow(formatGscDimensionKey("search-appearance", r.key), r)) },
+      ];
+
+      const escape = (cell: string) => `"${cell.replace(/"/g, '""')}"`;
+      const csv = sections
+        .map((s) =>
+          [
+            escape(s.title),
+            [s.column, "Clicks", "Impressions", "CTR", "Avg. Position"].map(escape).join(","),
+            ...(s.rows.length ? s.rows.map((row) => row.map(escape).join(",")) : [escape("(no rows)")]),
+          ].join("\r\n")
+        )
+        .join("\r\n\r\n");
+
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `gsc-all-${dateRangeLabel.replace(/[^a-z0-9]+/gi, "-")}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Download failed.")),
+  });
 
   return (
     <Card>
       <CardContent className="p-6">
-        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
             <BarChart3 className="h-4 w-4 text-brand-500" />
-            Search Analytics by Dimension
+            Search Console Performance
           </h2>
-          <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-white/5">
-            {GSC_DIMENSIONS.map((d) => (
-              <button
-                key={d.key}
-                onClick={() => setDimension(d.key)}
-                className={`rounded-md px-3 py-1 text-theme-xs font-medium transition-colors ${
-                  dimension === d.key
-                    ? "bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-white"
-                    : "text-gray-500"
-                }`}
-              >
-                {d.label}
-              </button>
-            ))}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-white/5">
+              {GSC_DATE_RANGES.map((r) => (
+                <button
+                  key={r.key}
+                  onClick={() => setRangeKey(r.key)}
+                  className={`rounded-md px-3 py-1 text-theme-xs font-medium transition-colors ${
+                    rangeKey === r.key ? "bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-white" : "text-gray-500"
+                  }`}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+            {hasFilters && (
+              <Button size="sm" variant="outline" onClick={resetFilters}>
+                Reset filters
+              </Button>
+            )}
           </div>
         </div>
-        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">Last 30 days, real Search Console data.</p>
-        {dimensionQuery.isLoading ? (
+
+        {rangeKey === "custom" && (
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <Label htmlFor="gsc-custom-start" className="mb-0">
+              From
+            </Label>
+            <Input id="gsc-custom-start" type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className="max-w-40" />
+            <Label htmlFor="gsc-custom-end" className="mb-0">
+              To
+            </Label>
+            <Input id="gsc-custom-end" type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className="max-w-40" />
+            {!customReady && <span className="text-theme-xs text-gray-400">Pick both dates to load data.</span>}
+          </div>
+        )}
+
+        {(countryFilter || pageFilter) && (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {pageFilter && (
+              <Badge variant="outline">
+                Page: {pageFilter}
+                <button onClick={() => setPageFilter(null)} className="ml-1.5 align-middle">
+                  <XCircle className="h-3 w-3" />
+                </button>
+              </Badge>
+            )}
+            {countryFilter && (
+              <Badge variant="outline">
+                Country: {formatGscDimensionKey("country", countryFilter)}
+                <button onClick={() => setCountryFilter(null)} className="ml-1.5 align-middle">
+                  <XCircle className="h-3 w-3" />
+                </button>
+              </Badge>
+            )}
+          </div>
+        )}
+
+        {rangeIsReady && (
+          <>
+            <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-lg border border-brand-200 bg-brand-50 p-3 dark:border-brand-500/30 dark:bg-brand-500/10">
+                <p className="text-theme-xs text-brand-700 dark:text-brand-300">Total clicks</p>
+                <p className="text-xl font-semibold text-brand-800 dark:text-brand-200">{totals.clicks.toLocaleString()}</p>
+              </div>
+              <div className="rounded-lg border border-purple-200 bg-purple-50 p-3 dark:border-purple-500/30 dark:bg-purple-500/10">
+                <p className="text-theme-xs text-purple-700 dark:text-purple-300">Total impressions</p>
+                <p className="text-xl font-semibold text-purple-800 dark:text-purple-200">{totals.impressions.toLocaleString()}</p>
+              </div>
+              <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+                <p className="text-theme-xs text-gray-400">Average CTR</p>
+                <p className="text-xl font-semibold text-gray-900 dark:text-white">{(avgCtr * 100).toFixed(1)}%</p>
+              </div>
+              <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+                <p className="text-theme-xs text-gray-400">Average position</p>
+                <p className="text-xl font-semibold text-gray-900 dark:text-white">{avgPosition.toFixed(1)}</p>
+              </div>
+            </div>
+
+            {timeseriesQuery.isLoading ? (
+              <div className="mb-4 flex h-24 items-center justify-center text-gray-400">
+                <Loader2 className="h-5 w-5 animate-spin" />
+              </div>
+            ) : timeseriesQuery.isError ? (
+              <p className="mb-4 text-theme-sm text-error-500">{serverErrorDetail(timeseriesQuery.error, "GSC fetch failed.")}</p>
+            ) : timeseries.length === 0 ? (
+              <p className="mb-4 text-theme-sm text-gray-400">No data for this date range.</p>
+            ) : (
+              <div className="mb-4">
+                <GscTrendChart data={timeseries} />
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="mb-3 flex flex-wrap gap-4 border-b border-gray-100 dark:border-gray-800">
+          {GSC_TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`-mb-px border-b-2 pb-2 text-theme-xs font-semibold tracking-wide uppercase transition-colors ${
+                tab === t.key
+                  ? "border-brand-500 text-gray-900 dark:text-white"
+                  : "border-transparent text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {!rangeIsReady ? null : activeQuery.isLoading ? (
           <div className="flex h-16 items-center justify-center text-gray-400">
             <Loader2 className="h-5 w-5 animate-spin" />
           </div>
-        ) : dimensionQuery.isError ? (
-          <p className="text-theme-sm text-error-500">{serverErrorDetail(dimensionQuery.error, "GSC fetch failed.")}</p>
+        ) : activeQuery.isError ? (
+          <p className="text-theme-sm text-error-500">{serverErrorDetail(activeQuery.error, "GSC fetch failed.")}</p>
         ) : rows.length === 0 ? (
-          <p className="text-theme-sm text-gray-400">No rows for this dimension in the last 30 days.</p>
+          <p className="text-theme-sm text-gray-400">No rows for this view in the selected date range.</p>
         ) : (
           <div className="overflow-x-auto">
+            <div className="mb-2 flex justify-end gap-2">
+              <Button size="sm" variant="outline" onClick={() => downloadCsvMutation.mutate()} disabled={downloadCsvMutation.isPending}>
+                {downloadCsvMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                Download CSV
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}>
+                {exportMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                Export All to Sheets
+              </Button>
+            </div>
             <table className="w-full text-left text-theme-sm">
               <thead>
                 <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
-                  <th className="py-2 pr-3 font-medium">{active.label}</th>
+                  <th className="py-2 pr-3 font-medium">{columnLabel}</th>
                   <th className="py-2 pr-3 font-medium">Clicks</th>
                   <th className="py-2 pr-3 font-medium">Impressions</th>
                   <th className="py-2 pr-3 font-medium">CTR</th>
@@ -3936,12 +4788,701 @@ function GscDimensionPanel({ siteId }: { siteId: number }) {
               </thead>
               <tbody>
                 {rows.map((r, i) => (
-                  <tr key={i} className="border-b border-gray-50 dark:border-gray-800/50">
-                    <td className="py-2 pr-3 text-gray-700 dark:text-gray-300">{formatGscDimensionKey(dimension, r.key)}</td>
+                  <tr
+                    key={i}
+                    onClick={() => handleRowClick(r)}
+                    className={`border-b border-gray-50 dark:border-gray-800/50 ${
+                      rowIsClickable ? "cursor-pointer hover:bg-gray-50 dark:hover:bg-white/5" : ""
+                    }`}
+                  >
+                    <td
+                      className={`max-w-xs truncate py-2 pr-3 ${
+                        rowIsClickable ? "text-brand-600 hover:underline dark:text-brand-400" : "text-gray-700 dark:text-gray-300"
+                      }`}
+                    >
+                      {r.label}
+                    </td>
                     <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.clicks}</td>
                     <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.impressions}</td>
                     <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{(r.ctr * 100).toFixed(1)}%</td>
                     <td className="py-2 text-gray-500 dark:text-gray-400">{r.position.toFixed(1)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Plots whichever two metrics the headline cards above have selected —
+// previously hardcoded to Sessions/Conversions, which meant switching a
+// card's dropdown updated its own number but left the chart showing
+// unrelated data. metricA/metricB (and their matching colors) come
+// straight from Ga4PerformancePanel's own headlineMetricA/B state, so
+// the chart and the two cards always agree on what's on screen.
+function Ga4TrendChart({ data, metricA, metricB }: { data: Ga4DateRow[]; metricA: Ga4HeadlineMetricKey; metricB: Ga4HeadlineMetricKey }) {
+  const [showA, setShowA] = useState(true);
+  const [showB, setShowB] = useState(true);
+  const chartData = data.map((d) => ({ ...d, label: formatDayLabel(d.date) }));
+  const labelA = GA4_HEADLINE_METRICS.find((m) => m.key === metricA)!.label;
+  const labelB = GA4_HEADLINE_METRICS.find((m) => m.key === metricB)!.label;
+  const sameMetric = metricA === metricB;
+
+  return (
+    <div>
+      <div className="mb-2 flex flex-wrap gap-4 text-theme-xs">
+        <label className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
+          <input type="checkbox" checked={showA} onChange={(e) => setShowA(e.target.checked)} />
+          <span className="inline-block h-2 w-2 rounded-full bg-brand-500" /> {labelA}
+        </label>
+        {!sameMetric && (
+          <label className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
+            <input type="checkbox" checked={showB} onChange={(e) => setShowB(e.target.checked)} />
+            <span className="inline-block h-2 w-2 rounded-full bg-purple-500" /> {labelB}
+          </label>
+        )}
+      </div>
+      <ResponsiveContainer width="100%" height={220}>
+        <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" className="stroke-gray-100 dark:stroke-gray-800" />
+          <XAxis dataKey="label" tick={{ fontSize: 11 }} minTickGap={30} />
+          <YAxis yAxisId="a" tick={{ fontSize: 11 }} width={40} />
+          <YAxis yAxisId="b" orientation="right" tick={{ fontSize: 11 }} width={40} />
+          <Tooltip
+            formatter={(value, name) => [
+              formatHeadlineMetricValue(name === labelA ? metricA : metricB, value as number),
+              name,
+            ]}
+            labelFormatter={(label) => label}
+          />
+          {showA && <Line yAxisId="a" type="monotone" dataKey={metricA} stroke="#465fff" strokeWidth={2} dot={false} name={labelA} />}
+          {showB && !sameMetric && (
+            <Line yAxisId="b" type="monotone" dataKey={metricB} stroke="#a855f7" strokeWidth={2} dot={false} name={labelB} />
+          )}
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function Ga4RealtimeRankedList({ title, rows }: { title: string; rows: { key: string; value: number }[] }) {
+  const max = Math.max(1, ...rows.map((r) => r.value));
+  return (
+    <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+      <p className="mb-2 text-theme-xs font-semibold tracking-wide text-gray-400 uppercase">{title}</p>
+      {rows.length === 0 ? (
+        <p className="text-theme-xs text-gray-400">No data available</p>
+      ) : (
+        <div className="space-y-1.5">
+          {rows.slice(0, 5).map((r, i) => (
+            <div key={i} className="relative overflow-hidden rounded">
+              <div
+                className="absolute inset-y-0 left-0 bg-brand-50 dark:bg-brand-500/10"
+                style={{ width: `${(r.value / max) * 100}%` }}
+              />
+              <div className="relative flex items-center justify-between gap-2 px-1.5 py-1 text-theme-xs">
+                <span className="truncate text-gray-700 dark:text-gray-300">{r.key}</span>
+                <span className="shrink-0 font-medium text-gray-900 dark:text-white">{r.value}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Ga4RealtimeOverviewPanel({ siteId }: { siteId: number }) {
+  // Every query here polls every 30s — GA4 itself defines "realtime" as
+  // the trailing ~30-minute window, so a snapshot older than that is
+  // stale by the report's own definition.
+  const minuteQuery = useQuery({
+    queryKey: ["seo", "ga4-realtime-minute", siteId],
+    queryFn: () => getGa4RealtimeByMinute(siteId),
+    refetchInterval: 30_000,
+  });
+  const countryQuery = useQuery({
+    queryKey: ["seo", "ga4-realtime-country", siteId],
+    queryFn: () => getGa4Realtime(siteId),
+    refetchInterval: 30_000,
+  });
+  const deviceQuery = useQuery({
+    queryKey: ["seo", "ga4-realtime-device", siteId],
+    queryFn: () => getGa4RealtimeByDevice(siteId),
+    refetchInterval: 30_000,
+  });
+  const pageQuery = useQuery({
+    queryKey: ["seo", "ga4-realtime-page", siteId],
+    queryFn: () => getGa4RealtimeByPage(siteId),
+    refetchInterval: 30_000,
+  });
+  const audienceQuery = useQuery({
+    queryKey: ["seo", "ga4-realtime-audience", siteId],
+    queryFn: () => getGa4RealtimeByAudience(siteId),
+    refetchInterval: 30_000,
+  });
+
+  const minuteRows = minuteQuery.data ?? [];
+  const byMinute = new Map(minuteRows.map((d) => [d.minutes_ago, d.active_users]));
+  // Dense 30-slot series (minutesAgo 29 -> 0) — GA4 omits empty minutes
+  // entirely rather than sending a zero row, so gaps are filled here to
+  // match the real chart's own continuous bar-per-minute look.
+  const chartData = Array.from({ length: 30 }, (_, i) => {
+    const m = 29 - i;
+    return { label: m === 0 ? "now" : `-${m} min`, activeUsers: byMinute.get(m) ?? 0 };
+  });
+  const active30 = minuteRows.reduce((sum, r) => sum + r.active_users, 0);
+  const active5 = minuteRows.filter((r) => r.minutes_ago <= 4).reduce((sum, r) => sum + r.active_users, 0);
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <div className="mb-4 flex items-center gap-2">
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success-400 opacity-75" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-success-500" />
+          </span>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Realtime overview</h2>
+        </div>
+
+        {minuteQuery.isError ? (
+          <p className="text-theme-sm text-error-500">{serverErrorDetail(minuteQuery.error, "GA4 realtime fetch failed.")}</p>
+        ) : (
+          <>
+            <div className="mb-4 grid max-w-md grid-cols-2 gap-3">
+              <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+                <p className="text-theme-xs text-gray-400">Active users in last 30 minutes</p>
+                <p className="text-2xl font-semibold text-gray-900 dark:text-white">{active30}</p>
+              </div>
+              <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+                <p className="text-theme-xs text-gray-400">Active users in last 5 minutes</p>
+                <p className="text-2xl font-semibold text-gray-900 dark:text-white">{active5}</p>
+              </div>
+            </div>
+
+            <p className="mb-1 text-theme-xs font-semibold tracking-wide text-gray-400 uppercase">Active users per minute</p>
+            {minuteQuery.isLoading ? (
+              <div className="flex h-32 items-center justify-center text-gray-400">
+                <Loader2 className="h-5 w-5 animate-spin" />
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={140}>
+                <BarChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+                  <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={4} />
+                  <YAxis tick={{ fontSize: 11 }} width={28} allowDecimals={false} />
+                  <Tooltip />
+                  <Bar dataKey="activeUsers" name="Active users" fill="#465fff" radius={[2, 2, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+
+            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <Ga4RealtimeRankedList
+                title="By country"
+                rows={(countryQuery.data ?? []).map((r) => ({ key: r.country, value: r.active_users }))}
+              />
+              <Ga4RealtimeRankedList
+                title="By device"
+                rows={(deviceQuery.data ?? []).map((r) => ({ key: formatGa4DimensionKey(r.key), value: r.value }))}
+              />
+              <Ga4RealtimeRankedList
+                title="By audience"
+                rows={(audienceQuery.data ?? []).map((r) => ({ key: r.key, value: r.value }))}
+              />
+              <Ga4RealtimeRankedList
+                title="Views by page title"
+                rows={(pageQuery.data ?? []).map((r) => ({ key: r.key, value: r.value }))}
+              />
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// A searchable, categorized dropdown matching GA4's own "Search items"
+// metric picker (search box up top, items grouped by category below,
+// the current selection highlighted) — see GA4_HEADLINE_METRICS above
+// for why only User/Session/Event categories are offered.
+function Ga4MetricPicker({
+  value,
+  onChange,
+  triggerClassName,
+}: {
+  value: Ga4HeadlineMetricKey;
+  onChange: (key: Ga4HeadlineMetricKey) => void;
+  triggerClassName?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [open]);
+
+  const selected = GA4_HEADLINE_METRICS.find((m) => m.key === value)!;
+  const query = search.trim().toLowerCase();
+  const filtered = query ? GA4_HEADLINE_METRICS.filter((m) => m.label.toLowerCase().includes(query)) : null;
+  const categories: (typeof GA4_HEADLINE_METRICS)[number]["category"][] = ["User", "Session", "Event"];
+
+  const pick = (key: Ga4HeadlineMetricKey) => {
+    onChange(key);
+    setOpen(false);
+    setSearch("");
+  };
+
+  const itemClass = (key: Ga4HeadlineMetricKey) =>
+    `block w-full truncate rounded-md px-2 py-1.5 text-left text-theme-xs ${
+      key === value
+        ? "bg-brand-50 font-medium text-brand-700 dark:bg-brand-500/10 dark:text-brand-300"
+        : "text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5"
+    }`;
+
+  return (
+    <div className="relative inline-block" ref={containerRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={`flex items-center gap-1 text-theme-xs font-medium ${triggerClassName ?? ""}`}
+      >
+        {selected.label}
+        <ChevronDown className="h-3 w-3" />
+      </button>
+      {open && (
+        <div className="absolute z-20 mt-1 w-64 rounded-lg border border-gray-200 bg-white p-2 text-left shadow-lg dark:border-gray-700 dark:bg-gray-900">
+          <div className="mb-2 flex items-center gap-2 rounded-md border border-gray-200 px-2 py-1.5 dark:border-gray-700">
+            <Search className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+            <input
+              autoFocus
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search items"
+              className="w-full bg-transparent text-theme-xs text-gray-700 outline-hidden dark:text-gray-300"
+            />
+          </div>
+          <div className="max-h-64 overflow-y-auto">
+            {filtered ? (
+              filtered.length === 0 ? (
+                <p className="px-2 py-1.5 text-theme-xs text-gray-400">No matches.</p>
+              ) : (
+                filtered.map((m) => (
+                  <button key={m.key} type="button" onClick={() => pick(m.key)} className={itemClass(m.key)}>
+                    {m.label}
+                  </button>
+                ))
+              )
+            ) : (
+              categories.map((cat) => (
+                <div key={cat} className="mb-2 last:mb-0">
+                  <p className="px-2 py-1 text-theme-xs font-semibold tracking-wide text-gray-400 uppercase">{cat}</p>
+                  {GA4_HEADLINE_METRICS.filter((m) => m.category === cat).map((m) => (
+                    <button key={m.key} type="button" onClick={() => pick(m.key)} className={itemClass(m.key)}>
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One of the two switchable stat tiles in Ga4PerformancePanel's top
+// row — each carries its own picker and its own % change vs the
+// previous period, matching the real GA4 Home report's card carousel
+// (picking a metric on one card never touches the other).
+function Ga4HeadlineMetricCard({
+  metric,
+  onChange,
+  value,
+  pctChange,
+  loading,
+  colorClass,
+  valueColorClass,
+}: {
+  metric: Ga4HeadlineMetricKey;
+  onChange: (metric: Ga4HeadlineMetricKey) => void;
+  value: number;
+  pctChange: number | null;
+  loading: boolean;
+  colorClass: string;
+  valueColorClass: string;
+}) {
+  return (
+    <div className={`rounded-lg border p-3 ${colorClass}`}>
+      <Ga4MetricPicker value={metric} onChange={onChange} triggerClassName="mb-1 text-inherit" />
+      {loading ? (
+        <div className="flex h-7 items-center text-gray-400">
+          <Loader2 className="h-4 w-4 animate-spin" />
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-baseline gap-1.5">
+          <p className={`text-xl font-semibold ${valueColorClass}`}>{formatHeadlineMetricValue(metric, value)}</p>
+          {pctChange !== null && (
+            <span
+              className={`text-theme-xs font-medium ${pctChange >= 0 ? "text-success-600 dark:text-success-400" : "text-error-600 dark:text-error-400"}`}
+            >
+              {pctChange >= 0 ? "↑" : "↓"} {Math.abs(pctChange).toFixed(1)}%
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Ga4PerformancePanel({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const [tab, setTab] = useState<Ga4TabKey>("pages");
+  const [rangeKey, setRangeKey] = useState<(typeof GA4_DATE_RANGES)[number]["key"]>("3m");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+
+  const activeRange = GA4_DATE_RANGES.find((r) => r.key === rangeKey)!;
+  const customReady = rangeKey === "custom" && !!customStart && !!customEnd;
+  const filters: Ga4FilterParams =
+    rangeKey === "custom"
+      ? { startDate: customStart || undefined, endDate: customEnd || undefined }
+      : { daysBack: activeRange.days ?? 90 };
+  // Custom range isn't queryable until both dates are picked — every hook
+  // below stays disabled rather than firing on a half-entered range.
+  const rangeIsReady = rangeKey !== "custom" || customReady;
+
+  const timeseriesQuery = useQuery({
+    queryKey: ["seo", "ga4-timeseries", siteId, filters],
+    queryFn: () => getGa4Timeseries(siteId, filters),
+    enabled: rangeIsReady,
+  });
+  const timeseries = timeseriesQuery.data ?? [];
+  const totals = timeseries.reduce(
+    (acc, d) => ({ sessions: acc.sessions + d.sessions, conversions: acc.conversions + d.conversions, bounceWeighted: acc.bounceWeighted + d.bounce_rate * d.sessions }),
+    { sessions: 0, conversions: 0, bounceWeighted: 0 }
+  );
+  const avgBounceRate = totals.sessions > 0 ? totals.bounceWeighted / totals.sessions : 0;
+  const conversionRate = totals.sessions > 0 ? totals.conversions / totals.sessions : 0;
+
+  // Two independently switchable metric cards, matching the real GA4
+  // Home report's own card carousel (each card has its own "▾" dropdown
+  // — picking a metric on one never changes the other). Defaulting to
+  // Active users / New users per the actual request driving this.
+  const [headlineMetricA, setHeadlineMetricA] = useState<Ga4HeadlineMetricKey>("active_users");
+  const [headlineMetricB, setHeadlineMetricB] = useState<Ga4HeadlineMetricKey>("new_users");
+  const previousFilters = getPreviousPeriodFilters(filters);
+  const previousTimeseriesQuery = useQuery({
+    queryKey: ["seo", "ga4-timeseries-previous", siteId, previousFilters],
+    queryFn: () => getGa4Timeseries(siteId, previousFilters!),
+    enabled: rangeIsReady && !!previousFilters,
+  });
+  const previousTimeseries = previousTimeseriesQuery.data ?? [];
+  const pctChange = (current: number, previous: number) => (previous > 0 ? ((current - previous) / previous) * 100 : null);
+
+  // Matches the real GA4 UI's own Home/Realtime "active users in the
+  // last 30 minutes" tile — polled every 30s so it stays live without a
+  // manual refresh, same trailing window GA4 itself uses.
+  const realtimeQuery = useQuery({
+    queryKey: ["seo", "ga4-realtime", siteId],
+    queryFn: () => getGa4Realtime(siteId),
+    refetchInterval: 30_000,
+  });
+  const realtimeRows = realtimeQuery.data ?? [];
+  const realtimeTotal = realtimeRows.reduce((sum, r) => sum + r.active_users, 0);
+
+  const pagesQuery = useQuery({
+    queryKey: ["seo", "ga4-live-pages", siteId, filters],
+    queryFn: () => getGa4PagesLive(siteId, filters),
+    enabled: tab === "pages" && rangeIsReady,
+  });
+  const sourcesQuery = useQuery({
+    queryKey: ["seo", "ga4-live-sources", siteId, filters],
+    queryFn: () => getGa4BySource(siteId, filters),
+    enabled: tab === "sources" && rangeIsReady,
+  });
+  const countriesQuery = useQuery({
+    queryKey: ["seo", "ga4-live-countries", siteId, filters],
+    queryFn: () => getGa4ByCountry(siteId, filters),
+    enabled: tab === "countries" && rangeIsReady,
+  });
+  const devicesQuery = useQuery({
+    queryKey: ["seo", "ga4-live-devices", siteId, filters],
+    queryFn: () => getGa4ByDevice(siteId, filters),
+    enabled: tab === "devices" && rangeIsReady,
+  });
+
+  const activeQuery = { pages: pagesQuery, sources: sourcesQuery, countries: countriesQuery, devices: devicesQuery }[tab];
+
+  const rows: Ga4PerfRow[] =
+    tab === "pages"
+      ? (pagesQuery.data ?? []).map((r) => ({ label: r.page_path, sessions: r.sessions, bounceRate: r.bounce_rate, conversions: r.conversions }))
+      : tab === "sources"
+        ? (sourcesQuery.data ?? []).map((r) => ({ label: r.key, sessions: r.sessions, bounceRate: r.bounce_rate, conversions: r.conversions }))
+        : tab === "countries"
+          ? (countriesQuery.data ?? []).map((r) => ({ label: r.key, sessions: r.sessions, bounceRate: r.bounce_rate, conversions: r.conversions }))
+          : (devicesQuery.data ?? []).map((r) => ({ label: formatGa4DimensionKey(r.key), sessions: r.sessions, bounceRate: r.bounce_rate, conversions: r.conversions }));
+
+  const columnLabel = GA4_TABS.find((t) => t.key === tab)!.label.replace(/s$/, "");
+
+  const dateRangeLabel =
+    rangeKey === "custom" ? `Custom (${customStart || "?"} to ${customEnd || "?"})` : activeRange.label;
+
+  const exportMutation = useMutation({
+    // Fetches all 4 dimensions (not just whichever tab is on screen) so
+    // one click writes Pages/Sources/Countries/Devices into their own
+    // clean tabs — mirrors the GSC "Export All to Sheets" mutation above.
+    mutationFn: async () => {
+      const [pagesData, sourcesData, countriesData, devicesData] = await Promise.all([
+        queryClient.fetchQuery({ queryKey: ["seo", "ga4-live-pages", siteId, filters], queryFn: () => getGa4PagesLive(siteId, filters) }),
+        queryClient.fetchQuery({ queryKey: ["seo", "ga4-live-sources", siteId, filters], queryFn: () => getGa4BySource(siteId, filters) }),
+        queryClient.fetchQuery({ queryKey: ["seo", "ga4-live-countries", siteId, filters], queryFn: () => getGa4ByCountry(siteId, filters) }),
+        queryClient.fetchQuery({ queryKey: ["seo", "ga4-live-devices", siteId, filters], queryFn: () => getGa4ByDevice(siteId, filters) }),
+      ]);
+      return exportAllGa4ToSheet(siteId, dateRangeLabel, GA4_TABS.find((t) => t.key === tab)!.label, {
+        pages: pagesData.map((r) => ({ label: r.page_path, sessions: r.sessions, bounce_rate: r.bounce_rate, conversions: r.conversions })),
+        sources: sourcesData.map((r) => ({ label: r.key, sessions: r.sessions, bounce_rate: r.bounce_rate, conversions: r.conversions })),
+        countries: countriesData.map((r) => ({ label: r.key, sessions: r.sessions, bounce_rate: r.bounce_rate, conversions: r.conversions })),
+        devices: devicesData.map((r) => ({ label: formatGa4DimensionKey(r.key), sessions: r.sessions, bounce_rate: r.bounce_rate, conversions: r.conversions })),
+        timeseries,
+      });
+    },
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error(result.detail);
+        return;
+      }
+      toast.success(result.detail);
+      if (result.sheet_url) window.open(result.sheet_url, "_blank", "noopener,noreferrer");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Export to Sheets failed.")),
+  });
+
+  const downloadCsvMutation = useMutation({
+    mutationFn: async () => {
+      const [pagesData, sourcesData, countriesData, devicesData] = await Promise.all([
+        queryClient.fetchQuery({ queryKey: ["seo", "ga4-live-pages", siteId, filters], queryFn: () => getGa4PagesLive(siteId, filters) }),
+        queryClient.fetchQuery({ queryKey: ["seo", "ga4-live-sources", siteId, filters], queryFn: () => getGa4BySource(siteId, filters) }),
+        queryClient.fetchQuery({ queryKey: ["seo", "ga4-live-countries", siteId, filters], queryFn: () => getGa4ByCountry(siteId, filters) }),
+        queryClient.fetchQuery({ queryKey: ["seo", "ga4-live-devices", siteId, filters], queryFn: () => getGa4ByDevice(siteId, filters) }),
+      ]);
+
+      const toRow = (label: string, r: { sessions: number; bounce_rate: number; conversions: number }) => [
+        label,
+        String(r.sessions),
+        `${(r.bounce_rate * 100).toFixed(1)}%`,
+        String(r.conversions),
+      ];
+      const sections: { title: string; column: string; rows: string[][] }[] = [
+        { title: "Pages", column: "Page", rows: pagesData.map((r) => toRow(r.page_path, r)) },
+        { title: "Sources", column: "Source", rows: sourcesData.map((r) => toRow(r.key, r)) },
+        { title: "Countries", column: "Country", rows: countriesData.map((r) => toRow(r.key, r)) },
+        { title: "Devices", column: "Device", rows: devicesData.map((r) => toRow(formatGa4DimensionKey(r.key), r)) },
+      ];
+
+      const escape = (cell: string) => `"${cell.replace(/"/g, '""')}"`;
+      const csv = sections
+        .map((s) =>
+          [
+            escape(s.title),
+            [s.column, "Sessions", "Bounce Rate", "Conversions"].map(escape).join(","),
+            ...(s.rows.length ? s.rows.map((row) => row.map(escape).join(",")) : [escape("(no rows)")]),
+          ].join("\r\n")
+        )
+        .join("\r\n\r\n");
+
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ga4-all-${dateRangeLabel.replace(/[^a-z0-9]+/gi, "-")}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Download failed.")),
+  });
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <BarChart3 className="h-4 w-4 text-brand-500" />
+            Analytics Performance
+          </h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-white/5">
+              {GA4_DATE_RANGES.map((r) => (
+                <button
+                  key={r.key}
+                  onClick={() => setRangeKey(r.key)}
+                  className={`rounded-md px-3 py-1 text-theme-xs font-medium transition-colors ${
+                    rangeKey === r.key ? "bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-white" : "text-gray-500"
+                  }`}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="mb-4 rounded-lg border border-success-200 bg-success-50 p-3 dark:border-success-500/30 dark:bg-success-500/10">
+          <div className="flex items-center gap-2">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success-400 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-success-500" />
+            </span>
+            <p className="text-theme-sm font-medium text-success-700 dark:text-success-300">
+              {realtimeQuery.isLoading
+                ? "Checking active users…"
+                : realtimeQuery.isError
+                  ? serverErrorDetail(realtimeQuery.error, "Realtime fetch failed.")
+                  : `${realtimeTotal.toLocaleString()} active user${realtimeTotal === 1 ? "" : "s"} right now`}
+            </p>
+          </div>
+          {realtimeRows.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-theme-xs text-gray-500 dark:text-gray-400">
+              {realtimeRows.slice(0, 8).map((r) => (
+                <span key={r.country}>
+                  {r.country}: {r.active_users}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {rangeKey === "custom" && (
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <Label htmlFor="ga4-custom-start" className="mb-0">
+              From
+            </Label>
+            <Input id="ga4-custom-start" type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className="max-w-40" />
+            <Label htmlFor="ga4-custom-end" className="mb-0">
+              To
+            </Label>
+            <Input id="ga4-custom-end" type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className="max-w-40" />
+            {!customReady && <span className="text-theme-xs text-gray-400">Pick both dates to load data.</span>}
+          </div>
+        )}
+
+        {rangeIsReady && (
+          <>
+            <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <Ga4HeadlineMetricCard
+                metric={headlineMetricA}
+                onChange={setHeadlineMetricA}
+                value={computeHeadlineMetricValue(timeseries, headlineMetricA)}
+                pctChange={pctChange(
+                  computeHeadlineMetricValue(timeseries, headlineMetricA),
+                  computeHeadlineMetricValue(previousTimeseries, headlineMetricA)
+                )}
+                loading={timeseriesQuery.isLoading}
+                colorClass="border-brand-200 bg-brand-50 dark:border-brand-500/30 dark:bg-brand-500/10 text-brand-700 dark:text-brand-300"
+                valueColorClass="text-brand-800 dark:text-brand-200"
+              />
+              <Ga4HeadlineMetricCard
+                metric={headlineMetricB}
+                onChange={setHeadlineMetricB}
+                value={computeHeadlineMetricValue(timeseries, headlineMetricB)}
+                pctChange={pctChange(
+                  computeHeadlineMetricValue(timeseries, headlineMetricB),
+                  computeHeadlineMetricValue(previousTimeseries, headlineMetricB)
+                )}
+                loading={timeseriesQuery.isLoading}
+                colorClass="border-purple-200 bg-purple-50 dark:border-purple-500/30 dark:bg-purple-500/10 text-purple-700 dark:text-purple-300"
+                valueColorClass="text-purple-800 dark:text-purple-200"
+              />
+              <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+                <p className="text-theme-xs text-gray-400">Avg. bounce rate</p>
+                <p className="text-xl font-semibold text-gray-900 dark:text-white">{(avgBounceRate * 100).toFixed(1)}%</p>
+              </div>
+              <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+                <p className="text-theme-xs text-gray-400">Conversion rate</p>
+                <p className="text-xl font-semibold text-gray-900 dark:text-white">{(conversionRate * 100).toFixed(1)}%</p>
+              </div>
+            </div>
+
+            {timeseriesQuery.isLoading ? (
+              <div className="mb-4 flex h-24 items-center justify-center text-gray-400">
+                <Loader2 className="h-5 w-5 animate-spin" />
+              </div>
+            ) : timeseriesQuery.isError ? (
+              <p className="mb-4 text-theme-sm text-error-500">{serverErrorDetail(timeseriesQuery.error, "GA4 fetch failed.")}</p>
+            ) : timeseries.length === 0 ? (
+              <p className="mb-4 text-theme-sm text-gray-400">No data for this date range.</p>
+            ) : (
+              <div className="mb-4">
+                <Ga4TrendChart data={timeseries} metricA={headlineMetricA} metricB={headlineMetricB} />
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="mb-3 flex flex-wrap gap-4 border-b border-gray-100 dark:border-gray-800">
+          {GA4_TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`-mb-px border-b-2 pb-2 text-theme-xs font-semibold tracking-wide uppercase transition-colors ${
+                tab === t.key
+                  ? "border-brand-500 text-gray-900 dark:text-white"
+                  : "border-transparent text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {!rangeIsReady ? null : activeQuery.isLoading ? (
+          <div className="flex h-16 items-center justify-center text-gray-400">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </div>
+        ) : activeQuery.isError ? (
+          <p className="text-theme-sm text-error-500">{serverErrorDetail(activeQuery.error, "GA4 fetch failed.")}</p>
+        ) : rows.length === 0 ? (
+          <p className="text-theme-sm text-gray-400">No rows for this view in the selected date range.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <div className="mb-2 flex justify-end gap-2">
+              <Button size="sm" variant="outline" onClick={() => downloadCsvMutation.mutate()} disabled={downloadCsvMutation.isPending}>
+                {downloadCsvMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                Download CSV
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}>
+                {exportMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                Export All to Sheets
+              </Button>
+            </div>
+            <table className="w-full text-left text-theme-sm">
+              <thead>
+                <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                  <th className="py-2 pr-3 font-medium">{columnLabel}</th>
+                  <th className="py-2 pr-3 font-medium">Sessions</th>
+                  <th className="py-2 pr-3 font-medium">Bounce rate</th>
+                  <th className="py-2 font-medium">Conversions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i} className="border-b border-gray-50 dark:border-gray-800/50">
+                    <td className="max-w-xs truncate py-2 pr-3 text-gray-700 dark:text-gray-300">{r.label}</td>
+                    <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.sessions}</td>
+                    <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{(r.bounceRate * 100).toFixed(1)}%</td>
+                    <td className="py-2 text-gray-500 dark:text-gray-400">{r.conversions}</td>
                   </tr>
                 ))}
               </tbody>
@@ -4154,6 +5695,18 @@ function IndexingTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
     },
   });
 
+  // "Request again" on a specific inspected URL's own card — separate
+  // from the form above's submitMutation so clicking it doesn't touch
+  // whatever the human currently has typed into that form's input.
+  const requestIndexingMutation = useMutation({
+    mutationFn: (url: string) => submitForIndexing(siteId, url, "URL_UPDATED"),
+    onSuccess: (result) => {
+      if (result.success) toast.success("Submitted to Google's Indexing API.");
+      else toast.info(result.error || "Submission failed — see the log below.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "indexing-submissions", siteId] });
+    },
+  });
+
   return (
     <>
       <Card>
@@ -4186,27 +5739,110 @@ function IndexingTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
             <p className="mt-4 text-theme-sm text-gray-400">No URLs inspected yet.</p>
           ) : (
             <div className="mt-4 space-y-3">
-              {statuses.map((s) => (
-                <div key={s.id} className="rounded-lg border border-gray-100 p-4 dark:border-gray-800">
-                  <p className="break-all text-theme-sm font-medium text-gray-900 dark:text-white">{s.url}</p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <Badge variant={s.coverage_state?.toLowerCase().includes("indexed") && !s.coverage_state?.toLowerCase().includes("not") ? "success" : "outline"}>
-                      {s.coverage_state ?? "unknown"}
-                    </Badge>
-                    {s.indexing_state && <Badge variant="outline">{s.indexing_state}</Badge>}
-                    {s.robots_txt_state && <Badge variant="outline">robots.txt: {s.robots_txt_state}</Badge>}
-                    {s.page_fetch_state && <Badge variant="outline">fetch: {s.page_fetch_state}</Badge>}
-                    {s.mobile_usability_verdict && s.mobile_usability_verdict !== "VERDICT_UNSPECIFIED" && (
-                      <Badge variant={s.mobile_usability_verdict === "PASS" ? "success" : "outline"}>
-                        mobile: {s.mobile_usability_verdict}
-                      </Badge>
-                    )}
+              {statuses.map((s) => {
+                const isIndexed = !!s.coverage_state?.toLowerCase().includes("indexed") && !s.coverage_state?.toLowerCase().includes("not");
+                const lastSubmission = submissions
+                  .filter((sub) => sub.url === s.url && sub.success)
+                  .sort((a, b) => (b.submitted_at ?? "").localeCompare(a.submitted_at ?? ""))[0];
+                let sitemapList: string[] = [];
+                try {
+                  sitemapList = s.sitemap_json ? JSON.parse(s.sitemap_json) : [];
+                } catch {
+                  sitemapList = [];
+                }
+
+                return (
+                  <div key={s.id} className="rounded-lg border border-gray-100 p-4 dark:border-gray-800">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <p className="break-all text-theme-sm font-medium text-gray-900 dark:text-white">{s.url}</p>
+                      {s.inspection_result_link && (
+                        <a
+                          href={s.inspection_result_link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="shrink-0 text-theme-xs text-brand-600 hover:underline dark:text-brand-400"
+                        >
+                          Open in Search Console
+                        </a>
+                      )}
+                    </div>
+
+                    <div className="mt-2 flex items-center gap-2">
+                      {isIndexed ? (
+                        <CheckCircle2 className="h-4 w-4 text-success-500" />
+                      ) : (
+                        <XCircle className="h-4 w-4 text-warning-500" />
+                      )}
+                      <p className="text-theme-sm font-semibold text-gray-900 dark:text-white">
+                        {isIndexed ? "URL is on Google" : "URL is not on Google"}
+                      </p>
+                    </div>
+
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Badge variant={isIndexed ? "success" : "outline"}>{s.coverage_state ?? "unknown"}</Badge>
+                      {s.indexing_state && <Badge variant="outline">{s.indexing_state}</Badge>}
+                      {s.robots_txt_state && <Badge variant="outline">robots.txt: {s.robots_txt_state}</Badge>}
+                      {s.page_fetch_state && <Badge variant="outline">fetch: {s.page_fetch_state}</Badge>}
+                      {s.mobile_usability_verdict && s.mobile_usability_verdict !== "VERDICT_UNSPECIFIED" && (
+                        <Badge variant={s.mobile_usability_verdict === "PASS" ? "success" : "outline"}>
+                          mobile: {s.mobile_usability_verdict}
+                        </Badge>
+                      )}
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3 dark:border-gray-800">
+                      {lastSubmission ? (
+                        <span className="flex items-center gap-1 text-theme-xs text-gray-500 dark:text-gray-400">
+                          <CheckCircle2 className="h-3.5 w-3.5 text-success-500" />
+                          Indexing requested {lastSubmission.submitted_at}
+                        </span>
+                      ) : (
+                        <span className="text-theme-xs text-gray-400">Not yet requested for indexing</span>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => requestIndexingMutation.mutate(s.url)}
+                        disabled={requestIndexingMutation.isPending}
+                      >
+                        {requestIndexingMutation.isPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Send className="h-3.5 w-3.5" />
+                        )}
+                        {lastSubmission ? "Request again" : "Request indexing"}
+                      </Button>
+                    </div>
+
+                    <div className="mt-3 border-t border-gray-100 pt-3 dark:border-gray-800">
+                      <p className="text-theme-xs font-semibold text-gray-500 dark:text-gray-400">Discovery</p>
+                      <p className="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">
+                        {sitemapList.length > 0 ? `Referenced in: ${sitemapList.join(", ")}` : "No referring sitemaps detected"}
+                      </p>
+                    </div>
+
+                    <div className="mt-3 border-t border-gray-100 pt-3 dark:border-gray-800">
+                      <p className="text-theme-xs font-semibold text-gray-500 dark:text-gray-400">Crawl</p>
+                      <p className="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">
+                        {s.last_crawl_time ? `Last crawled ${s.last_crawl_time}` : "Never crawled by Google"}
+                        {s.crawled_as ? ` · crawled as ${s.crawled_as.charAt(0)}${s.crawled_as.slice(1).toLowerCase()}` : ""}
+                      </p>
+                      {s.google_canonical && (
+                        <p className="mt-1 break-all text-theme-xs text-gray-500 dark:text-gray-400">
+                          Google-selected canonical: {s.google_canonical}
+                        </p>
+                      )}
+                      {s.user_canonical && s.user_canonical !== s.google_canonical && (
+                        <p className="mt-1 break-all text-theme-xs text-gray-500 dark:text-gray-400">
+                          User-declared canonical: {s.user_canonical}
+                        </p>
+                      )}
+                    </div>
+
+                    <p className="mt-2 text-theme-xs text-gray-400">checked {s.checked_at}</p>
                   </div>
-                  <p className="mt-2 text-theme-xs text-gray-400">
-                    {s.last_crawl_time ? `Last crawled ${s.last_crawl_time}` : "Never crawled by Google"} · checked {s.checked_at}
-                  </p>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>
@@ -4271,10 +5907,198 @@ function IndexingTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
           )}
         </CardContent>
       </Card>
+    </>
+  );
+}
 
-      <GscDimensionPanel siteId={siteId} />
+// Module 55 — GA4's own "Events: Event name" report (Life cycle >
+// Engagement > Events in the real GA4 UI). Its own date-range state,
+// separate from Ga4PerformancePanel above, same as every other GA4/GSC
+// panel on this page. The real report also lets a human tick rows to
+// plot them on a chart above the table — left out here since it's a
+// secondary interaction on top of the core "see every event with its
+// real numbers" ask this panel already delivers.
+function Ga4EventsPanel({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  const [rangeKey, setRangeKey] = useState<(typeof GA4_DATE_RANGES)[number]["key"]>("7d");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [search, setSearch] = useState("");
+
+  const activeRange = GA4_DATE_RANGES.find((r) => r.key === rangeKey)!;
+  const customReady = rangeKey === "custom" && !!customStart && !!customEnd;
+  const filters: Ga4FilterParams =
+    rangeKey === "custom"
+      ? { startDate: customStart || undefined, endDate: customEnd || undefined }
+      : { daysBack: activeRange.days ?? 7 };
+  const rangeIsReady = rangeKey !== "custom" || customReady;
+  const dateRangeLabel = rangeKey === "custom" ? `Custom (${customStart || "?"} to ${customEnd || "?"})` : activeRange.label;
+
+  const eventsQuery = useQuery({
+    queryKey: ["seo", "ga4-events", siteId, filters],
+    queryFn: () => getGa4Events(siteId, filters),
+    enabled: rangeIsReady,
+  });
+  const events = eventsQuery.data ?? [];
+  const query = search.trim().toLowerCase();
+  const rows = query ? events.filter((e) => e.event_name.toLowerCase().includes(query)) : events;
+  const totalEventCount = events.reduce((sum, e) => sum + e.event_count, 0);
+
+  // Its own dedicated "GA4 Events" tab — separate from Ga4PerformancePanel's
+  // own "Export All to Sheets" (Pages/Sources/Countries/Devices), which
+  // never fetched event data and so never had anything to write here.
+  const exportMutation = useMutation({
+    mutationFn: () =>
+      exportAllGa4ToSheet(siteId, dateRangeLabel, "Events", {
+        events: events.map((e) => ({
+          event_name: e.event_name,
+          event_count: e.event_count,
+          total_users: e.total_users,
+          event_count_per_active_user: e.event_count_per_active_user,
+          total_revenue: e.total_revenue,
+        })),
+      }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error(result.detail);
+        return;
+      }
+      toast.success(result.detail);
+      if (result.sheet_url) window.open(result.sheet_url, "_blank", "noopener,noreferrer");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Export to Sheets failed.")),
+  });
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <Hash className="h-4 w-4 text-brand-500" />
+            Events
+          </h2>
+          <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-white/5">
+            {GA4_DATE_RANGES.map((r) => (
+              <button
+                key={r.key}
+                onClick={() => setRangeKey(r.key)}
+                className={`rounded-md px-3 py-1 text-theme-xs font-medium transition-colors ${
+                  rangeKey === r.key ? "bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-white" : "text-gray-500"
+                }`}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {rangeKey === "custom" && (
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <Label htmlFor="ga4-events-custom-start" className="mb-0">
+              From
+            </Label>
+            <Input id="ga4-events-custom-start" type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className="max-w-40" />
+            <Label htmlFor="ga4-events-custom-end" className="mb-0">
+              To
+            </Label>
+            <Input id="ga4-events-custom-end" type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className="max-w-40" />
+            {!customReady && <span className="text-theme-xs text-gray-400">Pick both dates to load data.</span>}
+          </div>
+        )}
+
+        {!rangeIsReady ? null : eventsQuery.isLoading ? (
+          <div className="flex h-24 items-center justify-center text-gray-400">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </div>
+        ) : eventsQuery.isError ? (
+          <p className="text-theme-sm text-error-500">{serverErrorDetail(eventsQuery.error, "GA4 events fetch failed.")}</p>
+        ) : events.length === 0 ? (
+          <p className="text-theme-sm text-gray-400">No events recorded for this date range.</p>
+        ) : (
+          <>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="relative max-w-xs flex-1">
+                <Search className="absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+                <Input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search events…"
+                  className="pl-8"
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <p className="text-theme-xs text-gray-400">
+                  {events.length} event type{events.length === 1 ? "" : "s"} · {totalEventCount.toLocaleString()} total events
+                </p>
+                <Button size="sm" variant="outline" onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}>
+                  {exportMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                  Export to Sheets
+                </Button>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-theme-sm">
+                <thead>
+                  <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                    <th className="py-2 pr-3 font-medium">Event name</th>
+                    <th className="py-2 pr-3 font-medium">Event count</th>
+                    <th className="py-2 pr-3 font-medium">Total users</th>
+                    <th className="py-2 pr-3 font-medium">Event count per active user</th>
+                    <th className="py-2 font-medium">Total revenue</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="py-4 text-theme-sm text-gray-400">
+                        No events match "{search}".
+                      </td>
+                    </tr>
+                  ) : (
+                    rows.map((e) => (
+                      <tr key={e.event_name} className="border-b border-gray-50 dark:border-gray-800/50">
+                        <td className="max-w-xs truncate py-2 pr-3 font-medium text-gray-900 dark:text-white">{e.event_name}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{e.event_count.toLocaleString()}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{e.total_users.toLocaleString()}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{e.event_count_per_active_user.toFixed(2)}</td>
+                        <td className="py-2 text-gray-500 dark:text-gray-400">${e.total_revenue.toFixed(2)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Search Console gets its own tab (Module 53) — previously bundled into
+// the Indexing tab alongside GA4 and the Indexing tab's own index-
+// coverage/submission tools, which made one tab do three unrelated
+// jobs. Performance dashboard + sitemap management + site verification
+// are all genuinely "Search Console" concerns, so they move together.
+function SearchConsoleTab({ siteId }: { siteId: number }) {
+  return (
+    <>
+      <GscPerformancePanel siteId={siteId} />
       <SitemapsPanel siteId={siteId} />
       <SiteVerificationPanel />
+    </>
+  );
+}
+
+// Analytics (GA4) gets its own tab (Module 53) — same split as
+// SearchConsoleTab above, just for the GA4 side of what used to be
+// crammed into Indexing.
+function Ga4Tab({ siteId }: { siteId: number }) {
+  return (
+    <>
+      <Ga4PerformancePanel siteId={siteId} />
+      <Ga4EventsPanel siteId={siteId} />
+      <Ga4RealtimeOverviewPanel siteId={siteId} />
     </>
   );
 }
@@ -5302,6 +7126,8 @@ export default function SeoPage() {
                   onEditStaticFile={openStaticFileForEdit}
                 />
               )}
+              {tab === "search-console" && <SearchConsoleTab siteId={selectedSite.id} />}
+              {tab === "analytics" && <Ga4Tab siteId={selectedSite.id} />}
               {tab === "indexing" && <IndexingTab siteId={selectedSite.id} siteUrl={selectedSite.base_url} />}
               {tab === "social" && <SocialTab siteId={selectedSite.id} />}
               {tab === "blog" && <BlogTab siteId={selectedSite.id} />}

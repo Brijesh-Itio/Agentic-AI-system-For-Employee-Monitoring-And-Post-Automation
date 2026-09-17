@@ -39,6 +39,7 @@ from api.database import (
     SeoServerFileBackup,
     SeoSite,
     SeoSocialPost,
+    SeoFacebookAccount,
     SeoTechnicalIssue,
     get_db,
 )
@@ -75,8 +76,26 @@ from api.schemas import (
     BulkDomainAuthorityRequest,
     DomainAuthorityOut,
     DomainAuthorityRequest,
+    GscDateRowOut,
     GscDimensionRequest,
     GscDimensionRowOut,
+    GscExportAllRequest,
+    GscExportRequest,
+    GscExportResult,
+    GscLivePageRowOut,
+    GscLiveQueryRowOut,
+    Ga4DateRowOut,
+    Ga4DimensionRequest,
+    Ga4DimensionRowOut,
+    Ga4EventRowOut,
+    Ga4ExportAllRequest,
+    Ga4ExportResult,
+    Ga4LivePageRowOut,
+    Ga4RealtimeDimensionRowOut,
+    Ga4RealtimeMinuteRowOut,
+    Ga4RealtimeRowOut,
+    OverviewExportRequest,
+    OverviewExportResult,
     SitemapActionOut,
     SitemapActionRequest,
     SitemapInfoOut,
@@ -133,6 +152,8 @@ from api.schemas import (
     SshStatusOut,
     SocialGenerateRequest,
     SocialPostOut,
+    FacebookAccountCreate,
+    FacebookAccountOut,
     StructureReportOut,
     TechnicalAuditRequest,
     PageTagAuditOut,
@@ -156,8 +177,20 @@ from ai.seo.social_content import generate_social_post
 from automation.seo.backlinks.factory import get_provider as get_backlink_provider
 from automation.seo.cms.factory import get_cms_client
 from automation.seo.crawler import crawl_site, fetch_sitemap_urls
-from automation.seo.ga4_client import fetch_traffic_by_page
-from automation.seo.gsc_client import fetch_search_analytics, fetch_search_analytics_by_page
+from automation.seo.ga4_client import (
+    fetch_events as ga4_fetch_events,
+    fetch_realtime_active_users,
+    fetch_realtime_active_users_by_minute,
+    fetch_realtime_by_audience,
+    fetch_realtime_by_device as ga4_fetch_realtime_by_device,
+    fetch_realtime_by_page as ga4_fetch_realtime_by_page,
+    fetch_traffic_by_country as ga4_fetch_by_country,
+    fetch_traffic_by_date as ga4_fetch_by_date,
+    fetch_traffic_by_device as ga4_fetch_by_device,
+    fetch_traffic_by_page,
+    fetch_traffic_by_source as ga4_fetch_by_source,
+)
+from automation.seo.gsc_client import fetch_search_analytics, fetch_search_analytics_by_page, today_with_lag
 from automation.seo.indexing_client import fetch_url_inspection, submit_url_for_indexing
 from automation.seo.issue_applier import apply_fix as apply_issue_fix
 from automation.seo.issue_applier import apply_fix_to_static_file
@@ -858,7 +891,7 @@ def pull_gsc(payload: GscPullRequest, db: Session = Depends(get_db)):
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
-    end_date = date_cls.today()
+    end_date = today_with_lag()
     start_date = end_date - timedelta(days=payload.days_back)
     rows = fetch_search_analytics(start_date, end_date, site_url=_effective_gsc_url(site))
     if rows is None:
@@ -907,7 +940,7 @@ def pull_gsc_pages(payload: GscPullRequest, db: Session = Depends(get_db)):
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
-    end_date = date_cls.today()
+    end_date = today_with_lag()
     start_date = end_date - timedelta(days=payload.days_back)
     rows = fetch_search_analytics_by_page(start_date, end_date, site_url=_effective_gsc_url(site))
     if rows is None:
@@ -937,12 +970,155 @@ def list_gsc_pages(site_id: int, limit: int = 100, db: Session = Depends(get_db)
 
 def _gsc_dimension_route(payload: GscDimensionRequest, db: Session, fetch_fn):
     site = _site_or_404(payload.site_id, db)
-    end_date = date_cls.today()
-    start_date = end_date - timedelta(days=payload.days_back)
-    rows = fetch_fn(start_date, end_date, row_limit=payload.row_limit, site_url=_effective_gsc_url(site))
+    if payload.start_date and payload.end_date:
+        start_date, end_date = payload.start_date, payload.end_date
+    else:
+        end_date = today_with_lag()
+        # -1: both start_date and end_date are inclusive in Google's API,
+        # so a naive `- timedelta(days=days_back)` spans days_back+1
+        # calendar days — verified live this session that "7 days" was
+        # actually returning 8 days' worth of data until this was fixed,
+        # a real (if small) contributor to not matching the real Search
+        # Console UI's own "7 days" chip exactly.
+        start_date = end_date - timedelta(days=payload.days_back - 1)
+    rows = fetch_fn(
+        start_date,
+        end_date,
+        row_limit=payload.row_limit,
+        site_url=_effective_gsc_url(site),
+        country=payload.country,
+        page=payload.page,
+    )
     if rows is None:
         raise HTTPException(status_code=502, detail="GSC fetch failed — see server logs")
     return rows
+
+
+@router.post("/gsc/timeseries", response_model=list[GscDateRowOut])
+def gsc_timeseries_route(payload: GscDimensionRequest, db: Session = Depends(get_db)):
+    """Module 50 — per-day clicks/impressions/CTR/position, the real
+    trend-chart data Search Console's own Performance report shows,
+    filterable by the same country/page drill-downs as every other live
+    GSC route here."""
+    from automation.seo.gsc_client import fetch_search_analytics_by_date
+
+    return _gsc_dimension_route(payload, db, fetch_search_analytics_by_date)
+
+
+@router.post("/gsc/export-to-sheet", response_model=GscExportResult)
+def gsc_export_to_sheet_route(payload: GscExportRequest, db: Session = Depends(get_db)):
+    """Module 50 — writes whatever rows the GSC Performance report
+    currently has on screen (already fetched client-side — no second
+    Google API call here) to the connected spreadsheet's own "GSC
+    Performance Export" tab, one batched write rather than one row at a
+    time."""
+    from automation.seo.sheets_client import append_rows, get_or_create_spreadsheet, get_tab_url
+
+    site = _site_or_404(payload.site_id, db)
+    spreadsheet_id = get_or_create_spreadsheet("gsc")
+    if not spreadsheet_id:
+        return GscExportResult(ok=False, detail="No Google Sheets (Search Console) connection configured — see the Overview tab.")
+
+    exported_at = datetime.utcnow().isoformat()
+    sheet_rows = [
+        [exported_at, site.name, payload.view, payload.date_range, r.label, r.clicks, r.impressions, r.ctr, r.position]
+        for r in payload.rows
+    ]
+    ok = append_rows("GSC Performance Export", sheet_rows)
+    if not ok:
+        return GscExportResult(ok=False, detail="Sheets write failed — see server logs.")
+
+    # A direct link straight into the tab the data actually landed in —
+    # the bare spreadsheet URL opens whatever tab was last active, which
+    # made a real, successful export look like "no data showing" simply
+    # because this tab (the newest one, at the far end of the tab strip)
+    # wasn't the one on screen.
+    sheet_url = get_tab_url(spreadsheet_id, "GSC Performance Export")
+    return GscExportResult(
+        ok=True,
+        detail=f"Exported {len(sheet_rows)} row(s) to the 'GSC Performance Export' tab.",
+        sheet_url=sheet_url,
+    )
+
+
+_GSC_EXPORT_ALL_DIMENSIONS = [
+    ("GSC Queries", "Query", "queries"),
+    ("GSC Pages", "Page", "pages"),
+    ("GSC Countries", "Country", "countries"),
+    ("GSC Devices", "Device", "devices"),
+    ("GSC Search Appearance", "Search Appearance", "search_appearance"),
+]
+_GSC_EXPORT_ALL_TAB_BY_VIEW = {"Queries": "GSC Queries", "Pages": "GSC Pages", "Countries": "GSC Countries", "Devices": "GSC Devices", "Search Appearance": "GSC Search Appearance"}
+
+
+@router.post("/gsc/export-all-to-sheet", response_model=GscExportResult)
+def gsc_export_all_to_sheet_route(payload: GscExportAllRequest, db: Session = Depends(get_db)):
+    """Module 50 follow-up — one click writes EVERY GSC dimension
+    (Queries/Pages/Countries/Devices/Search Appearance) into its own
+    clean tab (Country | Clicks | Impressions | CTR | Position, etc.),
+    matching the real Search Console UI's own per-dimension tables —
+    instead of the earlier /gsc/export-to-sheet, which only wrote
+    whichever single view a human happened to have open on screen."""
+    from automation.seo.sheets_client import get_or_create_spreadsheet, get_tab_url, overwrite_rows, write_chart_tab
+
+    _site_or_404(payload.site_id, db)
+    spreadsheet_id = get_or_create_spreadsheet("gsc")
+    if not spreadsheet_id:
+        return GscExportResult(ok=False, detail="No Google Sheets (Search Console) connection configured — see the Overview tab.")
+
+    written, failed = [], []
+
+    if payload.timeseries:
+        chart_header = ["Date", "Clicks", "Impressions", "CTR", "Avg. Position"]
+        chart_rows = [[r.date, r.clicks, r.impressions, r.ctr, r.position] for r in payload.timeseries]
+        if write_chart_tab("GSC Chart", chart_header, chart_rows, "Clicks & Impressions", series_cols=[1, 2]):
+            written.append("GSC Chart")
+        else:
+            failed.append("GSC Chart")
+
+    for tab_name, column_label, field_name in _GSC_EXPORT_ALL_DIMENSIONS:
+        export_rows = getattr(payload, field_name)
+        if not export_rows:
+            continue
+        header = [column_label, "Clicks", "Impressions", "CTR", "Avg. Position"]
+        sheet_rows = [[r.label, r.clicks, r.impressions, r.ctr, r.position] for r in export_rows]
+        if overwrite_rows(tab_name, header, sheet_rows):
+            written.append(tab_name)
+        else:
+            failed.append(tab_name)
+
+    if not written:
+        detail = "Sheets write failed — see server logs." if failed else "No data to export yet — load a view first."
+        return GscExportResult(ok=False, detail=detail)
+
+    detail = f"Exported {', '.join(t.replace('GSC ', '') for t in written)} to their own tabs."
+    if failed:
+        detail += f" ({', '.join(t.replace('GSC ', '') for t in failed)} failed — see server logs.)"
+
+    focus_tab = _GSC_EXPORT_ALL_TAB_BY_VIEW.get(payload.focus_view, "GSC Queries")
+    sheet_url = get_tab_url(spreadsheet_id, focus_tab if focus_tab in written else written[0])
+    return GscExportResult(ok=True, detail=detail, sheet_url=sheet_url)
+
+
+@router.post("/gsc/queries/live", response_model=list[GscLiveQueryRowOut])
+def gsc_queries_live_route(payload: GscDimensionRequest, db: Session = Depends(get_db)):
+    """Module 50 — query-dimension breakdown, live (stateless — the
+    persisted /gsc/pull + /gsc routes above feed the daily digest
+    pipeline and stay untouched; this is the same data for the unified
+    Performance-report UI, with the same country-drill-down filter the
+    other live dimension routes below support)."""
+    from automation.seo.gsc_client import fetch_search_analytics
+
+    return _gsc_dimension_route(payload, db, fetch_search_analytics)
+
+
+@router.post("/gsc/pages/live", response_model=list[GscLivePageRowOut])
+def gsc_pages_live_route(payload: GscDimensionRequest, db: Session = Depends(get_db)):
+    """Module 50 — page-dimension breakdown, live — see /gsc/queries/live
+    above for why this is separate from the persisted /gsc/pages/pull."""
+    from automation.seo.gsc_client import fetch_search_analytics_by_page
+
+    return _gsc_dimension_route(payload, db, fetch_search_analytics_by_page)
 
 
 @router.post("/gsc/country", response_model=list[GscDimensionRowOut])
@@ -1117,6 +1293,250 @@ def list_ga4(site_id: int, limit: int = 100, db: Session = Depends(get_db)):
         .limit(limit)
         .all()
     )
+
+
+# ── Module 51 — GA4 live dimension/timeseries views and Sheets export,
+# mirroring the GSC Performance dashboard's own live routes above
+# (_gsc_dimension_route / /gsc/timeseries / /gsc/*/live /
+# /gsc/export-all-to-sheet). Stateless — re-fetched live each time, no
+# local table, same as those GSC routes. ──
+
+
+def _ga4_dimension_route(payload: Ga4DimensionRequest, db: Session, fetch_fn):
+    site = _site_or_404(payload.site_id, db)
+    if payload.start_date and payload.end_date:
+        start_date, end_date = payload.start_date, payload.end_date
+    else:
+        end_date = date_cls.today()
+        start_date = end_date - timedelta(days=payload.days_back - 1)
+    rows = fetch_fn(start_date, end_date, limit=payload.row_limit, property_id=_effective_ga4_property(site))
+    if rows is None:
+        raise HTTPException(status_code=502, detail="GA4 fetch failed — see server logs")
+    return rows
+
+
+@router.post("/ga4/timeseries", response_model=list[Ga4DateRowOut])
+def ga4_timeseries_route(payload: Ga4DimensionRequest, db: Session = Depends(get_db)):
+    """Module 51 — per-day sessions/bounce rate/conversions, the trend-
+    chart data behind the Analytics Performance panel's chart, matching
+    /gsc/timeseries above."""
+    return _ga4_dimension_route(payload, db, ga4_fetch_by_date)
+
+
+@router.post("/ga4/pages/live", response_model=list[Ga4LivePageRowOut])
+def ga4_pages_live_route(payload: Ga4DimensionRequest, db: Session = Depends(get_db)):
+    """Module 51 — page-dimension breakdown, live (stateless — the
+    persisted /ga4/pull + /ga4 routes above feed the daily digest
+    pipeline and stay untouched; this is the same data for the unified
+    Analytics Performance panel, matching /gsc/pages/live above)."""
+    return _ga4_dimension_route(payload, db, fetch_traffic_by_page)
+
+
+@router.post("/ga4/sources/live", response_model=list[Ga4DimensionRowOut])
+def ga4_sources_live_route(payload: Ga4DimensionRequest, db: Session = Depends(get_db)):
+    return _ga4_dimension_route(payload, db, ga4_fetch_by_source)
+
+
+@router.post("/ga4/countries/live", response_model=list[Ga4DimensionRowOut])
+def ga4_countries_live_route(payload: Ga4DimensionRequest, db: Session = Depends(get_db)):
+    return _ga4_dimension_route(payload, db, ga4_fetch_by_country)
+
+
+@router.post("/ga4/devices/live", response_model=list[Ga4DimensionRowOut])
+def ga4_devices_live_route(payload: Ga4DimensionRequest, db: Session = Depends(get_db)):
+    return _ga4_dimension_route(payload, db, ga4_fetch_by_device)
+
+
+@router.post("/ga4/events", response_model=list[Ga4EventRowOut])
+def ga4_events_route(payload: Ga4DimensionRequest, db: Session = Depends(get_db)):
+    """Module 55 — GA4's own "Events: Event name" report."""
+    return _ga4_dimension_route(payload, db, ga4_fetch_events)
+
+
+@router.get("/ga4/realtime", response_model=list[Ga4RealtimeRowOut])
+def ga4_realtime_route(site_id: int, db: Session = Depends(get_db)):
+    """Module 52 — active users right now, broken down by country,
+    matching the real GA4 UI's own Home/Realtime report. No date range
+    (GA4 itself defines "realtime" as the trailing ~30-minute window),
+    so this is a GET unlike the dimension routes above."""
+    site = _site_or_404(site_id, db)
+    rows = fetch_realtime_active_users(property_id=_effective_ga4_property(site))
+    if rows is None:
+        raise HTTPException(status_code=502, detail="GA4 realtime fetch failed — see server logs")
+    return rows
+
+
+@router.get("/ga4/realtime/by-minute", response_model=list[Ga4RealtimeMinuteRowOut])
+def ga4_realtime_by_minute_route(site_id: int, db: Session = Depends(get_db)):
+    """The "Active users per minute" bar chart on GA4's own Realtime
+    overview report."""
+    site = _site_or_404(site_id, db)
+    rows = fetch_realtime_active_users_by_minute(property_id=_effective_ga4_property(site))
+    if rows is None:
+        raise HTTPException(status_code=502, detail="GA4 realtime fetch failed — see server logs")
+    return rows
+
+
+@router.get("/ga4/realtime/by-device", response_model=list[Ga4RealtimeDimensionRowOut])
+def ga4_realtime_by_device_route(site_id: int, db: Session = Depends(get_db)):
+    """Active users right now by device category — GA4's own Realtime
+    overview has no exact equivalent tile (its "First user source" tile
+    isn't backed by a documented Data API realtime dimension), so this
+    substitutes a real, verifiable breakdown instead of faking one."""
+    site = _site_or_404(site_id, db)
+    rows = ga4_fetch_realtime_by_device(property_id=_effective_ga4_property(site))
+    if rows is None:
+        raise HTTPException(status_code=502, detail="GA4 realtime fetch failed — see server logs")
+    return rows
+
+
+@router.get("/ga4/realtime/by-page", response_model=list[Ga4RealtimeDimensionRowOut])
+def ga4_realtime_by_page_route(site_id: int, db: Session = Depends(get_db)):
+    """GA4's own "Views by Page title and screen name" realtime tile."""
+    site = _site_or_404(site_id, db)
+    rows = ga4_fetch_realtime_by_page(property_id=_effective_ga4_property(site))
+    if rows is None:
+        raise HTTPException(status_code=502, detail="GA4 realtime fetch failed — see server logs")
+    return rows
+
+
+@router.get("/ga4/realtime/by-audience", response_model=list[Ga4RealtimeDimensionRowOut])
+def ga4_realtime_by_audience_route(site_id: int, db: Session = Depends(get_db)):
+    """GA4's own "Active users by Audience" realtime tile — empty when
+    the property has no GA4 Audiences configured, same honest empty
+    state the real GA4 UI shows."""
+    site = _site_or_404(site_id, db)
+    rows = fetch_realtime_by_audience(property_id=_effective_ga4_property(site))
+    if rows is None:
+        raise HTTPException(status_code=502, detail="GA4 realtime fetch failed — see server logs")
+    return rows
+
+
+_GA4_EXPORT_DIMENSIONS = [
+    ("GA4 Pages", "Page", "pages"),
+    ("GA4 Sources", "Source", "sources"),
+    ("GA4 Countries", "Country", "countries"),
+    ("GA4 Devices", "Device", "devices"),
+]
+_GA4_EXPORT_ALL_TAB_BY_VIEW = {
+    "Pages": "GA4 Pages",
+    "Sources": "GA4 Sources",
+    "Countries": "GA4 Countries",
+    "Devices": "GA4 Devices",
+    "Events": "GA4 Events",
+}
+
+
+@router.post("/ga4/export-all-to-sheet", response_model=Ga4ExportResult)
+def ga4_export_all_to_sheet_route(payload: Ga4ExportAllRequest, db: Session = Depends(get_db)):
+    """Module 51 — one click writes every GA4 dimension (Pages/Sources/
+    Countries/Devices) into its own clean tab, plus a chart tab for the
+    timeseries — matches /gsc/export-all-to-sheet above exactly, just
+    against GA4's own metric set (sessions/bounce rate/conversions
+    instead of clicks/impressions/CTR/position). Module 55 added the
+    Events tab (its own row shape, so it's handled separately from the
+    generic _GA4_EXPORT_DIMENSIONS loop below). Module 56 — writes to
+    its own dedicated "ga4" spreadsheet rather than the shared one GSC's
+    export also used to write into."""
+    from automation.seo.sheets_client import get_or_create_spreadsheet, get_tab_url, overwrite_rows, write_chart_tab
+
+    _site_or_404(payload.site_id, db)
+    spreadsheet_id = get_or_create_spreadsheet("ga4")
+    if not spreadsheet_id:
+        return Ga4ExportResult(ok=False, detail="No Google Sheets (Analytics) connection configured — see the Overview tab.")
+
+    written, failed = [], []
+
+    if payload.timeseries:
+        chart_header = ["Date", "Sessions", "Bounce Rate", "Conversions"]
+        chart_rows = [[r.date, r.sessions, r.bounce_rate, r.conversions] for r in payload.timeseries]
+        if write_chart_tab("GA4 Chart", chart_header, chart_rows, "Sessions & Conversions", series_cols=[1, 3]):
+            written.append("GA4 Chart")
+        else:
+            failed.append("GA4 Chart")
+
+    for tab_name, column_label, field_name in _GA4_EXPORT_DIMENSIONS:
+        export_rows = getattr(payload, field_name)
+        if not export_rows:
+            continue
+        header = [column_label, "Sessions", "Bounce Rate", "Conversions"]
+        sheet_rows = [[r.label, r.sessions, r.bounce_rate, r.conversions] for r in export_rows]
+        if overwrite_rows(tab_name, header, sheet_rows):
+            written.append(tab_name)
+        else:
+            failed.append(tab_name)
+
+    if payload.events:
+        header = ["Event Name", "Event Count", "Total Users", "Event Count Per Active User", "Total Revenue"]
+        sheet_rows = [
+            [e.event_name, e.event_count, e.total_users, round(e.event_count_per_active_user, 2), e.total_revenue]
+            for e in payload.events
+        ]
+        if overwrite_rows("GA4 Events", header, sheet_rows):
+            written.append("GA4 Events")
+        else:
+            failed.append("GA4 Events")
+
+    if not written:
+        detail = "Sheets write failed — see server logs." if failed else "No data to export yet — load a view first."
+        return Ga4ExportResult(ok=False, detail=detail)
+
+    detail = f"Exported {', '.join(t.replace('GA4 ', '') for t in written)} to their own tabs."
+    if failed:
+        detail += f" ({', '.join(t.replace('GA4 ', '') for t in failed)} failed — see server logs.)"
+
+    focus_tab = _GA4_EXPORT_ALL_TAB_BY_VIEW.get(payload.focus_view, "GA4 Pages")
+    sheet_url = get_tab_url(spreadsheet_id, focus_tab if focus_tab in written else written[0])
+    return Ga4ExportResult(ok=True, detail=detail, sheet_url=sheet_url)
+
+
+_OVERVIEW_EXPORTS = [
+    ("top_queries", "Overview Top Queries", ["Query", "Clicks", "Impressions", "CTR", "Avg. Position"], lambda r: [r.query, r.clicks, r.impressions, r.ctr, r.position]),
+    ("top_pages", "Overview Top Traffic Pages", ["Page", "Sessions", "Bounce Rate", "Conversions"], lambda r: [r.page_path, r.sessions, r.bounce_rate, r.conversions]),
+    ("ctr_by_page", "Overview CTR by Page", ["Page", "Clicks", "Impressions", "CTR", "Avg. Position"], lambda r: [r.page, r.clicks, r.impressions, r.ctr, r.position]),
+    ("rank_alerts", "Overview Rank Alerts", ["Query", "Previous Position", "Current Position", "Delta"], lambda r: [r.query, r.previous_position, r.current_position, r.delta]),
+]
+
+
+@router.post("/overview/export-to-sheet", response_model=OverviewExportResult)
+def overview_export_to_sheet_route(payload: OverviewExportRequest, db: Session = Depends(get_db)):
+    """Module 57 — the site Overview dashboard's own "download this
+    report in Google Sheets" button: Top Search Queries, Top Traffic
+    Pages, CTR by Page, and Rank Alerts, each in its own clean tab in its
+    own dedicated "overview" spreadsheet — separate from "main"/"gsc"/
+    "ga4" (this dashboard blends GSC and GA4 data, so it doesn't belong
+    to either of those alone). Same overwrite-on-export convention as
+    /gsc/export-all-to-sheet and /ga4/export-all-to-sheet."""
+    from automation.seo.sheets_client import get_or_create_spreadsheet, get_tab_url, overwrite_rows
+
+    _site_or_404(payload.site_id, db)
+    spreadsheet_id = get_or_create_spreadsheet("overview")
+    if not spreadsheet_id:
+        return OverviewExportResult(
+            ok=False, detail="No Overview report sheet connected yet — connect one on the Overview tab."
+        )
+
+    written, failed = [], []
+    for field_key, tab_name, header, row_fn in _OVERVIEW_EXPORTS:
+        export_rows = getattr(payload, field_key)
+        if not export_rows:
+            continue
+        sheet_rows = [row_fn(r) for r in export_rows]
+        if overwrite_rows(tab_name, header, sheet_rows):
+            written.append(tab_name)
+        else:
+            failed.append(tab_name)
+
+    if not written:
+        detail = "Sheets write failed — see server logs." if failed else "No data to export yet — this dashboard is still empty."
+        return OverviewExportResult(ok=False, detail=detail)
+
+    detail = f"Exported {', '.join(t.replace('Overview ', '') for t in written)} to their own tabs."
+    if failed:
+        detail += f" ({', '.join(t.replace('Overview ', '') for t in failed)} failed — see server logs.)"
+
+    sheet_url = get_tab_url(spreadsheet_id, written[0])
+    return OverviewExportResult(ok=True, detail=detail, sheet_url=sheet_url)
 
 
 @router.post("/indexing/inspect", response_model=IndexStatusOut, status_code=201)
@@ -1675,39 +2095,45 @@ def list_digest_rollups_route(site_id: int, period: Optional[str] = None, limit:
     return query.order_by(SeoDigestRollup.period_start.desc()).limit(limit).all()
 
 
-def _sheet_open_url(spreadsheet_id: str) -> str:
+def _sheet_open_url(spreadsheet_id: str, kind: str = "main") -> str:
     """The bare spreadsheet edit URL opens whatever tab the browser last
     had active — for a first-time visitor that's index-0, a human's own
     pre-existing "Sheet1", not any of this app's own tabs. Deep-links
-    straight into "Meta Tag Audit" instead (the tab most people click
+    straight into that kind's own default tab instead (see
+    sheets_client.SPREADSHEET_DEFAULT_TAB — the tab most people click
     "Open spreadsheet" to actually check), falling back to the bare URL
     if the gid lookup itself fails for any reason."""
-    from automation.seo.sheets_client import get_tab_url
+    from automation.seo.sheets_client import SPREADSHEET_DEFAULT_TAB, get_tab_url
 
-    return get_tab_url(spreadsheet_id, "Meta Tag Audit") or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+    return get_tab_url(spreadsheet_id, SPREADSHEET_DEFAULT_TAB[kind]) or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
 
 
 @router.get("/sheets", response_model=SheetsStatusOut)
-def get_sheets_status_route():
-    """Creates the Google Sheets command-centre spreadsheet on first
-    call (idempotent after that — see sheets_client.get_or_create_
-    spreadsheet), shared with settings.SEO_SHEETS_SHARE_EMAIL if set.
-    configured=False with an error message is the honest, expected
-    result until the Sheets + Drive APIs are enabled for the Google
-    Cloud project the service account belongs to."""
+def get_sheets_status_route(kind: str = "main"):
+    """Creates the given kind's spreadsheet on first call (idempotent
+    after that — see sheets_client.get_or_create_spreadsheet), shared
+    with settings.SEO_SHEETS_SHARE_EMAIL if set. kind is "main" (the
+    automated pipeline's own log tabs), "gsc", or "ga4" — Module 56 split
+    what used to be one shared spreadsheet into three. configured=False
+    with an error message is the honest, expected result until the
+    Sheets + Drive APIs are enabled for the Google Cloud project the
+    service account belongs to (and in practice, for a brand new kind,
+    until a human adopts a sheet they created themselves — see
+    /sheets/adopt's docstring)."""
     from automation.seo.sheets_client import get_or_create_spreadsheet
 
-    spreadsheet_id = get_or_create_spreadsheet()
+    spreadsheet_id = get_or_create_spreadsheet(kind)
     if spreadsheet_id is None:
         return SheetsStatusOut(
             configured=False,
             error="Could not create the spreadsheet — enable the Google Sheets API and Google Drive API "
-            "for this project in Google Cloud Console, then retry. See server logs for the exact error.",
+            "for this project in Google Cloud Console, then retry, or connect an existing sheet below. "
+            "See server logs for the exact error.",
         )
     return SheetsStatusOut(
         configured=True,
         spreadsheet_id=spreadsheet_id,
-        url=_sheet_open_url(spreadsheet_id),
+        url=_sheet_open_url(spreadsheet_id, kind),
     )
 
 
@@ -1715,7 +2141,7 @@ def get_sheets_status_route():
 def share_sheets_route(payload: SheetsShareRequest):
     from automation.seo.sheets_client import get_or_create_spreadsheet, share_spreadsheet
 
-    spreadsheet_id = get_or_create_spreadsheet()
+    spreadsheet_id = get_or_create_spreadsheet(payload.kind)
     if spreadsheet_id is None:
         return SheetsStatusOut(configured=False, error="Spreadsheet doesn't exist yet and couldn't be created.")
 
@@ -1723,7 +2149,7 @@ def share_sheets_route(payload: SheetsShareRequest):
     return SheetsStatusOut(
         configured=ok,
         spreadsheet_id=spreadsheet_id,
-        url=_sheet_open_url(spreadsheet_id),
+        url=_sheet_open_url(spreadsheet_id, payload.kind),
         error=None if ok else f"Could not share with {payload.email} — see server logs",
     )
 
@@ -1736,7 +2162,10 @@ def adopt_sheets_route(payload: SheetsAdoptRequest):
     one, verified live. The real path: a human creates a normal Google
     Sheet in their own Drive and shares it with the service account as
     Editor, then gives the app that sheet's id/URL here — writing to an
-    existing shared file needs no quota, only creating a new one does."""
+    existing shared file needs no quota, only creating a new one does.
+    Module 56 — payload.kind picks which of the three spreadsheets
+    (main/gsc/ga4) this sheet becomes; adopting three separate sheets
+    means calling this three times, once per kind."""
     import re
 
     from automation.seo.sheets_client import adopt_existing_spreadsheet
@@ -1744,11 +2173,11 @@ def adopt_sheets_route(payload: SheetsAdoptRequest):
     match = re.search(r"/d/([a-zA-Z0-9_-]+)", payload.spreadsheet_id_or_url)
     spreadsheet_id = match.group(1) if match else payload.spreadsheet_id_or_url.strip()
 
-    ok = adopt_existing_spreadsheet(spreadsheet_id)
+    ok = adopt_existing_spreadsheet(spreadsheet_id, payload.kind)
     return SheetsStatusOut(
         configured=ok,
         spreadsheet_id=spreadsheet_id if ok else None,
-        url=_sheet_open_url(spreadsheet_id) if ok else None,
+        url=_sheet_open_url(spreadsheet_id, payload.kind) if ok else None,
         error=None if ok else "Could not read/write this spreadsheet — make sure it's shared with "
         "workpulse-seo-agent@workpulse-ai-506706.iam.gserviceaccount.com as Editor, and the id/URL is correct.",
     )
@@ -1766,7 +2195,12 @@ def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = De
         if draft is None:
             continue  # one platform failing shouldn't fail the whole batch
         post_id = database.create_social_post(
-            payload.site_id, platform, draft.content, payload.source_url, payload.image_url
+            payload.site_id,
+            platform,
+            draft.content,
+            payload.source_url,
+            payload.image_url,
+            facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
         )
         created_ids.append(post_id)
 
@@ -1861,7 +2295,24 @@ def publish_social_post_route(post_id: int, db: Session = Depends(get_db)):
     if row.status not in ("approved", "failed"):
         raise HTTPException(status_code=409, detail=f"Post must be approved first (current status: {row.status})")
 
-    result = publish_social_post(row.platform, row.content, image_url=row.image_url)
+    facebook_page_id = None
+    facebook_access_token = None
+    if row.platform == "facebook" and row.facebook_account_id is not None:
+        account = database.get_facebook_account(row.facebook_account_id)
+        if account is None:
+            database.mark_social_post_failed(post_id, f"Facebook account {row.facebook_account_id} was deleted")
+            db.expire_all()
+            return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+        facebook_page_id = account["page_id"]
+        facebook_access_token = account["page_access_token"]
+
+    result = publish_social_post(
+        row.platform,
+        row.content,
+        image_url=row.image_url,
+        facebook_page_id=facebook_page_id,
+        facebook_access_token=facebook_access_token,
+    )
     if result.ok:
         database.mark_social_post_posted(post_id, result.external_post_id)
     else:
@@ -1869,6 +2320,24 @@ def publish_social_post_route(post_id: int, db: Session = Depends(get_db)):
 
     db.expire_all()
     return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+
+
+@router.get("/facebook-accounts", response_model=list[FacebookAccountOut])
+def list_facebook_accounts_route(db: Session = Depends(get_db)):
+    return db.query(SeoFacebookAccount).order_by(SeoFacebookAccount.created_at.asc()).all()
+
+
+@router.post("/facebook-accounts", response_model=FacebookAccountOut, status_code=201)
+def create_facebook_account_route(payload: FacebookAccountCreate, db: Session = Depends(get_db)):
+    account_id = database.create_facebook_account(payload.label, payload.page_id, payload.page_access_token)
+    return db.query(SeoFacebookAccount).filter(SeoFacebookAccount.id == account_id).first()
+
+
+@router.delete("/facebook-accounts/{account_id}", status_code=204)
+def delete_facebook_account_route(account_id: int):
+    ok = database.delete_facebook_account(account_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No Facebook account {account_id}")
 
 
 @router.post("/backlinks/pull", response_model=list[BacklinkMentionOut], status_code=201)

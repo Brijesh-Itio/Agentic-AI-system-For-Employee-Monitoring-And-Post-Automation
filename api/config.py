@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     LINKEDIN_EMAIL: str = ""
     LINKEDIN_PASSWORD: str = ""
 
+
     # ── Pexels image search (module 18.3, fallback only) ──
     # Free API key, not Playwright scraping: Pexels/Pixabay both sit behind
     # Cloudflare bot-detection that blocks headless browsers outright (a
@@ -214,13 +215,26 @@ class Settings(BaseSettings):
     TWITTER_ACCESS_TOKEN: str = ""
     TWITTER_ACCESS_TOKEN_SECRET: str = ""
 
-    # Facebook Graph API (POST /{page-id}/feed) — see
-    # automation/facebook/poster.py. Needs a Page access token with
-    # pages_manage_posts scope, verified against Meta's current Pages
-    # API docs this session. Blank = stays off, same convention as
-    # every other optional integration here.
+    # Facebook Graph API (POST /{page-id}/feed, or /{page-id}/photos with
+    # an image) — see automation/facebook/poster.py. Needs a genuinely
+    # long-lived/permanent Page Access Token, not the ~2hr default Graph
+    # API Explorer's "Generate Access Token" issues: generate a User
+    # Access Token there with pages_manage_posts + pages_read_engagement
+    # + pages_show_list, exchange it for a 60-day user token via
+    # GET oauth/access_token?grant_type=fb_exchange_token&client_id=
+    # {FACEBOOK_APP_ID}&client_secret={FACEBOOK_APP_SECRET}&
+    # fb_exchange_token={short_lived_token}, THEN call /me/accounts with
+    # that long-lived token to get a Page token that never expires
+    # (verify via the debug_token endpoint: type=PAGE, expires_at=0). A
+    # Page token derived straight from the short-lived default expires
+    # just as fast. FACEBOOK_APP_ID/SECRET (Settings -> Basic in the Meta
+    # app dashboard) are only needed again to redo this exchange for a
+    # fresh token. Blank = stays off, same convention as every other
+    # optional integration here.
     FACEBOOK_PAGE_ACCESS_TOKEN: str = ""
     FACEBOOK_PAGE_ID: str = ""
+    FACEBOOK_APP_ID: str = ""
+    FACEBOOK_APP_SECRET: str = ""
 
     # Google Sheets "SEO Command Centre" (module 36) — see
     # automation/seo/sheets_client.py. The spreadsheet is created and

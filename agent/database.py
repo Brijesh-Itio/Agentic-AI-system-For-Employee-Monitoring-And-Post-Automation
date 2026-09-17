@@ -784,6 +784,23 @@ CREATE TABLE IF NOT EXISTS seo_social_posts (
 
 CREATE INDEX IF NOT EXISTS idx_seo_social_posts_site_status ON seo_social_posts(site_id, status);
 
+-- Module 40 — Multiple Facebook Pages ("accounts"), so posting isn't
+-- limited to the single Page hardcoded in .env (FACEBOOK_PAGE_ID/
+-- FACEBOOK_PAGE_ACCESS_TOKEN). Global, not per-site: a Facebook Page is
+-- Meta's own asset, not tied to one SEO site, so any site's social posts
+-- can pick any connected account. seo_social_posts.facebook_account_id
+-- (added below via the additive-column convention) references this;
+-- NULL there means "use the single default account from .env" so
+-- installs that never add a second account keep behaving exactly as
+-- before this module.
+CREATE TABLE IF NOT EXISTS seo_facebook_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    page_id TEXT NOT NULL,
+    page_access_token TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Module 31 — Backlink/brand-mention monitoring. UNIQUE(site_id,
 -- source_url) makes re-polling the same feed idempotent (a mention seen
 -- again on a later poll doesn't duplicate). outreach_subject/body are
@@ -1030,6 +1047,12 @@ _SEO_TECHNICAL_ISSUES_EXTRA_COLUMNS = {
 # parsed or stored it. Same additive-column convention as the others here.
 _SEO_INDEX_STATUS_EXTRA_COLUMNS = {
     "mobile_usability_verdict": "TEXT",
+    # Module 50 — real fields Google's API returns (inspectionResultLink,
+    # indexStatusResult.crawledAs) that were being parsed out of the
+    # response but discarded rather than stored, same as mobile_usability_
+    # verdict above before it was fixed.
+    "inspection_result_link": "TEXT",
+    "crawled_as": "TEXT",
 }
 
 
@@ -1046,6 +1069,10 @@ _SEO_SEMRUSH_METRICS_EXTRA_COLUMNS = {
 # above.
 _SEO_SOCIAL_POSTS_EXTRA_COLUMNS = {
     "image_url": "TEXT",
+    # Module 40 — which seo_facebook_accounts row a facebook-platform post
+    # publishes through when more than one is configured. NULL = use the
+    # single default account from .env (see that table's own comment).
+    "facebook_account_id": "INTEGER",
 }
 
 # Module 36 — blog posts shipped without a featured-image field; added
@@ -2537,15 +2564,20 @@ def get_content_backup(backup_id: int):
 # ── seo_social_posts — module 30 ──
 
 def create_social_post(
-    site_id: int, platform: str, content: str, source_url: Optional[str] = None, image_url: Optional[str] = None
+    site_id: int,
+    platform: str,
+    content: str,
+    source_url: Optional[str] = None,
+    image_url: Optional[str] = None,
+    facebook_account_id: Optional[int] = None,
 ) -> int:
     with write_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO seo_social_posts (site_id, platform, source_url, content, image_url, status)
-            VALUES (?, ?, ?, ?, ?, 'draft')
+            INSERT INTO seo_social_posts (site_id, platform, source_url, content, image_url, status, facebook_account_id)
+            VALUES (?, ?, ?, ?, ?, 'draft', ?)
             """,
-            (site_id, platform, source_url, content, image_url),
+            (site_id, platform, source_url, content, image_url, facebook_account_id),
         )
         return cur.lastrowid
 
@@ -2593,6 +2625,33 @@ def mark_social_post_failed(post_id: int, error: str) -> None:
         cur.execute(
             "UPDATE seo_social_posts SET status = 'failed', error = ? WHERE id = ?", (error, post_id)
         )
+
+
+# ── seo_facebook_accounts — module 40 ──
+
+def create_facebook_account(label: str, page_id: str, page_access_token: str) -> int:
+    with write_cursor() as cur:
+        cur.execute(
+            "INSERT INTO seo_facebook_accounts (label, page_id, page_access_token) VALUES (?, ?, ?)",
+            (label, page_id, page_access_token),
+        )
+        return cur.lastrowid
+
+
+def list_facebook_accounts():
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_facebook_accounts ORDER BY created_at ASC").fetchall()
+
+
+def get_facebook_account(account_id: int):
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_facebook_accounts WHERE id = ?", (account_id,)).fetchone()
+
+
+def delete_facebook_account(account_id: int) -> bool:
+    with write_cursor() as cur:
+        cur.execute("DELETE FROM seo_facebook_accounts WHERE id = ?", (account_id,))
+        return cur.rowcount > 0
 
 
 # ── seo_backlink_mentions — module 31 ──
@@ -2645,8 +2704,9 @@ def upsert_index_status(site_id: int, url: str, inspection) -> None:
             """
             INSERT INTO seo_index_status
                 (site_id, url, coverage_state, indexing_state, robots_txt_state, page_fetch_state,
-                 last_crawl_time, google_canonical, user_canonical, sitemap_json, mobile_usability_verdict, checked_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 last_crawl_time, google_canonical, user_canonical, sitemap_json, mobile_usability_verdict,
+                 inspection_result_link, crawled_as, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(site_id, url) DO UPDATE SET
                 coverage_state = excluded.coverage_state,
                 indexing_state = excluded.indexing_state,
@@ -2657,6 +2717,8 @@ def upsert_index_status(site_id: int, url: str, inspection) -> None:
                 user_canonical = excluded.user_canonical,
                 sitemap_json = excluded.sitemap_json,
                 mobile_usability_verdict = excluded.mobile_usability_verdict,
+                inspection_result_link = excluded.inspection_result_link,
+                crawled_as = excluded.crawled_as,
                 checked_at = CURRENT_TIMESTAMP
             """,
             (
@@ -2671,6 +2733,8 @@ def upsert_index_status(site_id: int, url: str, inspection) -> None:
                 inspection.user_canonical,
                 json.dumps(inspection.sitemap) if inspection.sitemap else None,
                 inspection.mobile_usability_verdict,
+                inspection.inspection_result_link,
+                inspection.crawled_as,
             ),
         )
 

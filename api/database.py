@@ -597,6 +597,19 @@ class SeoSocialPost(Base):
     error = Column(String)
     created_at = Column(DateTime)
     posted_at = Column(DateTime)
+    # Module 40 — which seo_facebook_accounts row this post publishes
+    # through when more than one Facebook Page is configured; NULL means
+    # "use the single default account from .env".
+    facebook_account_id = Column(Integer, ForeignKey("seo_facebook_accounts.id"))
+
+
+class SeoFacebookAccount(Base):
+    __tablename__ = "seo_facebook_accounts"
+    id = Column(Integer, primary_key=True)
+    label = Column(String, nullable=False)
+    page_id = Column(String, nullable=False)
+    page_access_token = Column(String, nullable=False)
+    created_at = Column(DateTime)
 
 
 class SeoBacklinkMention(Base):
@@ -627,6 +640,8 @@ class SeoIndexStatus(Base):
     user_canonical = Column(String)
     sitemap_json = Column(String)
     mobile_usability_verdict = Column(String)
+    inspection_result_link = Column(String)
+    crawled_as = Column(String)
     checked_at = Column(DateTime)
 
 

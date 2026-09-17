@@ -70,7 +70,7 @@ from ai.seo.meta_rewrite_generator import generate_meta_rewrite
 from api.config import settings
 from automation.seo.crawler import crawl_site, fetch_page_title, fetch_sitemap_urls
 from automation.seo.ga4_client import fetch_traffic_by_page
-from automation.seo.gsc_client import fetch_search_analytics, fetch_search_analytics_by_page
+from automation.seo.gsc_client import fetch_search_analytics, fetch_search_analytics_by_page, today_with_lag
 from automation.seo.indexing_client import fetch_url_inspection
 from automation.seo.pagespeed_client import fetch_page_speed
 from automation.seo.slack_notifier import send_slack_message
@@ -202,8 +202,18 @@ def technical_audit_node(state: SeoAgentState) -> dict:
 
 def gsc_pull_node(state: SeoAgentState) -> dict:
     def work(site: dict, run_date):
-        start_date = run_date - timedelta(days=7)
-        rows = fetch_search_analytics(start_date, run_date, site_url=_effective_gsc_url(site))
+        # The QUERY window is anchored to the last day Google's Search
+        # Analytics data has actually finished processing (see
+        # gsc_client.today_with_lag's docstring — verified live this
+        # session that querying through literal today() silently
+        # undercounts by omitting the most recent ~3 still-unprocessed
+        # days), not to run_date itself. run_date still stamps the DB
+        # row/job-idempotency as "captured during today's automation
+        # run," which is a separate, correct concept from what date
+        # range the query asked Google for.
+        query_end_date = today_with_lag()
+        start_date = query_end_date - timedelta(days=7)
+        rows = fetch_search_analytics(start_date, query_end_date, site_url=_effective_gsc_url(site))
         if rows is None:
             raise RuntimeError("fetch_search_analytics failed — see server logs")
         database.upsert_gsc_query_rows(site["id"], run_date, rows)
@@ -221,8 +231,9 @@ def gsc_pages_pull_node(state: SeoAgentState) -> dict:
     per-URL position tracking, which the query-dimension pull above can't
     give you. Feeds meta_opportunity_node below."""
     def work(site: dict, run_date):
-        start_date = run_date - timedelta(days=7)
-        rows = fetch_search_analytics_by_page(start_date, run_date, site_url=_effective_gsc_url(site))
+        query_end_date = today_with_lag()
+        start_date = query_end_date - timedelta(days=7)
+        rows = fetch_search_analytics_by_page(start_date, query_end_date, site_url=_effective_gsc_url(site))
         if rows is None:
             raise RuntimeError("fetch_search_analytics_by_page failed — see server logs")
         database.upsert_gsc_page_rows(site["id"], run_date, rows)

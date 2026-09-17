@@ -66,6 +66,13 @@ class UrlInspectionResult:
     # is Google's own value when it hasn't run a mobile-usability check for
     # this URL yet, not a failure of this call.
     mobile_usability_verdict: Optional[str] = None
+    # Google's own real link to view this exact inspection result inside
+    # Search Console — verified live this session that the API actually
+    # returns this (inspectionResultLink), previously discarded.
+    inspection_result_link: Optional[str] = None
+    # "MOBILE" or "DESKTOP" — which user agent Google crawled the page
+    # as. Also previously discarded despite being in the real response.
+    crawled_as: Optional[str] = None
 
 
 @dataclass
@@ -137,6 +144,8 @@ def fetch_url_inspection(url: str, site_url: Optional[str] = None) -> Optional[U
         user_canonical=index_result.get("userCanonical"),
         sitemap=index_result.get("sitemap") or [],
         mobile_usability_verdict=mobile_result.get("verdict"),
+        inspection_result_link=inspection_result.get("inspectionResultLink"),
+        crawled_as=index_result.get("crawledAs"),
     )
 
 

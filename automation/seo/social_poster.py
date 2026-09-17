@@ -23,7 +23,11 @@ credentials degrade to the same "not configured" result as Instagram.
 
 Facebook: automation/facebook/poster.py, the official Graph API (POST
 /{page-id}/feed) — same pattern, needs FACEBOOK_PAGE_ACCESS_TOKEN/
-FACEBOOK_PAGE_ID in .env.
+FACEBOOK_PAGE_ID in .env as the default account. Module 40 added
+multi-account support (seo_facebook_accounts table): passing
+facebook_page_id/facebook_access_token here posts through that specific
+connected Page instead of the .env default — api/routes/seo.py's publish
+route resolves a post's chosen account before calling this.
 
 Both Twitter and Facebook are listed in AUTOMATED_PLATFORMS because the
 real API integration code exists and is correct against current docs —
@@ -50,7 +54,14 @@ class PublishResult:
     external_post_id: Optional[str] = None
 
 
-def publish_social_post(platform: str, content: str, image_url: Optional[str] = None) -> PublishResult:
+def publish_social_post(
+    platform: str,
+    content: str,
+    image_url: Optional[str] = None,
+    *,
+    facebook_page_id: Optional[str] = None,
+    facebook_access_token: Optional[str] = None,
+) -> PublishResult:
     if platform == "linkedin":
         from automation.linkedin.poster import post_to_linkedin
 
@@ -74,7 +85,9 @@ def publish_social_post(platform: str, content: str, image_url: Optional[str] = 
     if platform == "facebook":
         from automation.facebook.poster import post_to_facebook
 
-        result = post_to_facebook(content, image_url=image_url)
+        result = post_to_facebook(
+            content, image_url=image_url, page_id=facebook_page_id, access_token=facebook_access_token
+        )
         return PublishResult(ok=result.ok, detail=result.detail, external_post_id=result.external_post_id)
 
     return PublishResult(

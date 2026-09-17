@@ -20,6 +20,7 @@ agent/data/
 workpulse-config.json
 linkedin_cookies.json
 last_topic.txt
+*_last_topic.txt
 
 # Node / dashboard
 node_modules/

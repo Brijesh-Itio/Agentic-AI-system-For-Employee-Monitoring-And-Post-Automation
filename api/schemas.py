@@ -1270,6 +1270,10 @@ class SocialGenerateRequest(BaseModel):
     # text-only post type) — optional for every other platform.
     image_url: Optional[str] = None
     platforms: list[SocialPlatform] = ["linkedin"]
+    # Module 40 — which seo_facebook_accounts row a facebook-platform post
+    # should publish through; ignored for every other platform. None =
+    # use the single default account from .env.
+    facebook_account_id: Optional[int] = None
 
 
 class SocialPostOut(BaseModel):
@@ -1286,6 +1290,26 @@ class SocialPostOut(BaseModel):
     error: Optional[str] = None
     created_at: Optional[datetime] = None
     posted_at: Optional[datetime] = None
+    facebook_account_id: Optional[int] = None
+
+
+class FacebookAccountCreate(BaseModel):
+    label: str
+    page_id: str
+    page_access_token: str
+
+
+class FacebookAccountOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    label: str
+    page_id: str
+    # page_access_token deliberately omitted — this is a real, live
+    # credential (see api/config.py's comment on FACEBOOK_PAGE_ACCESS_TOKEN
+    # for how sensitive one of these is); the frontend never needs it back
+    # after creation, only enough to identify/delete the right account.
+    created_at: Optional[datetime] = None
 
 
 class BacklinkPullRequest(BaseModel):
@@ -1331,6 +1355,12 @@ class IndexStatusOut(BaseModel):
     google_canonical: Optional[str] = None
     user_canonical: Optional[str] = None
     mobile_usability_verdict: Optional[str] = None
+    inspection_result_link: Optional[str] = None
+    crawled_as: Optional[str] = None
+    # Raw JSON string (a list of sitemap URLs) — matches the DB column
+    # as-is rather than parsing server-side; the frontend JSON.parses it,
+    # same convention as this codebase's other *_json fields.
+    sitemap_json: Optional[str] = None
     checked_at: Optional[datetime] = None
 
 
@@ -1342,6 +1372,20 @@ class GscDimensionRequest(BaseModel):
     site_id: int
     days_back: int = 7
     row_limit: int = 100
+    # ISO 3166-1 alpha-3 code — the same "click a country row to drill
+    # into it" filter the real Search Console UI applies; matches the row
+    # values automation/seo/gsc_client.py's country dimension returns.
+    country: Optional[str] = None
+    # Exact page URL — the same "click a page row to drill into it"
+    # filter. Given as its own field (not folded into `country`) since a
+    # human/UI caller may combine both, matching the real UI's filter chips.
+    page: Optional[str] = None
+    # Explicit range, overriding days_back when both are given — the
+    # "Custom" date-range option in the real Search Console UI. Plain
+    # ISO date strings ("YYYY-MM-DD"), not datetimes — GSC's own API is
+    # date-granular, not time-of-day granular.
+    start_date: Optional[date_type] = None
+    end_date: Optional[date_type] = None
 
 
 class GscDimensionRowOut(BaseModel):
@@ -1350,6 +1394,217 @@ class GscDimensionRowOut(BaseModel):
     impressions: int
     ctr: float
     position: float
+
+
+class GscDateRowOut(BaseModel):
+    date: str
+    clicks: int
+    impressions: int
+    ctr: float
+    position: float
+
+
+class GscExportRow(BaseModel):
+    label: str
+    clicks: int
+    impressions: int
+    ctr: float
+    position: float
+
+
+class GscExportRequest(BaseModel):
+    site_id: int
+    view: str
+    date_range: str
+    rows: list[GscExportRow]
+
+
+class GscExportResult(BaseModel):
+    ok: bool
+    detail: str
+    sheet_url: Optional[str] = None
+
+
+class GscExportAllRequest(BaseModel):
+    """Module 50 follow-up — one export call for every dimension at
+    once (Queries/Pages/Countries/Devices/Search Appearance), each
+    written to its own clean tab, instead of only whichever single tab
+    a human currently has open on screen."""
+
+    site_id: int
+    date_range: str
+    focus_view: str = "Queries"
+    queries: list[GscExportRow] = []
+    pages: list[GscExportRow] = []
+    countries: list[GscExportRow] = []
+    devices: list[GscExportRow] = []
+    search_appearance: list[GscExportRow] = []
+    # Per-day clicks/impressions — the same data behind the in-app trend
+    # chart — used to (re)embed a real Google Sheets line chart on its
+    # own "GSC Chart" tab, matching the real Search Console UI's own
+    # "Export > Google Sheets" layout (Chart tab first, then one tab per
+    # dimension).
+    timeseries: list[GscDateRowOut] = []
+
+
+class GscLiveQueryRowOut(BaseModel):
+    query: str
+    clicks: int
+    impressions: int
+    ctr: float
+    position: float
+
+
+class GscLivePageRowOut(BaseModel):
+    page: str
+    clicks: int
+    impressions: int
+    ctr: float
+    position: float
+
+
+# Module 51 — GA4 dimension/timeseries live views and Sheets export,
+# mirroring the GscDimensionRequest/GscDateRowOut/GscExport* family
+# above (see those classes' comments for the shared reasoning); GA4 has
+# no country/page drill-down filter here since automation/seo/
+# ga4_client.py's dimension pulls don't support combining filters the
+# way gsc_client.py's dimensionFilterGroups do.
+class Ga4DimensionRequest(BaseModel):
+    site_id: int
+    days_back: int = 28
+    row_limit: int = 100
+    start_date: Optional[date_type] = None
+    end_date: Optional[date_type] = None
+
+
+class Ga4DimensionRowOut(BaseModel):
+    key: str
+    sessions: int
+    bounce_rate: float
+    conversions: float
+    active_users: int = 0
+    new_users: int = 0
+    total_users: int = 0
+    event_count: int = 0
+    engagement_rate: float = 0.0
+    engaged_sessions: int = 0
+    avg_session_duration: float = 0.0
+
+
+class Ga4LivePageRowOut(BaseModel):
+    page_path: str
+    sessions: int
+    bounce_rate: float
+    conversions: float
+    active_users: int = 0
+    new_users: int = 0
+    total_users: int = 0
+    event_count: int = 0
+    engagement_rate: float = 0.0
+    engaged_sessions: int = 0
+    avg_session_duration: float = 0.0
+
+
+class Ga4DateRowOut(BaseModel):
+    date: str
+    sessions: int
+    bounce_rate: float
+    conversions: float
+    active_users: int = 0
+    new_users: int = 0
+    total_users: int = 0
+    event_count: int = 0
+    engagement_rate: float = 0.0
+    engaged_sessions: int = 0
+    avg_session_duration: float = 0.0
+
+
+class Ga4ExportRow(BaseModel):
+    label: str
+    sessions: int
+    bounce_rate: float
+    conversions: float
+
+
+class Ga4EventExportRow(BaseModel):
+    event_name: str
+    event_count: int
+    total_users: int
+    event_count_per_active_user: float
+    total_revenue: float
+
+
+class Ga4ExportAllRequest(BaseModel):
+    """One export call for every GA4 dimension at once (Pages/Sources/
+    Countries/Devices/Events), each written to its own clean tab — see
+    GscExportAllRequest above for the identical pattern this mirrors."""
+
+    site_id: int
+    date_range: str
+    focus_view: str = "Pages"
+    pages: list[Ga4ExportRow] = []
+    sources: list[Ga4ExportRow] = []
+    countries: list[Ga4ExportRow] = []
+    devices: list[Ga4ExportRow] = []
+    events: list[Ga4EventExportRow] = []
+    timeseries: list[Ga4DateRowOut] = []
+
+
+class Ga4ExportResult(BaseModel):
+    ok: bool
+    detail: str
+    sheet_url: Optional[str] = None
+
+
+# Module 57 — the site Overview dashboard's own "download this report in
+# Google Sheets" button (Top Search Queries / Top Traffic Pages / CTR by
+# Page / Rank Alerts — the 4-panel grid right under the Latest Digest
+# card). Reuses each panel's own already-defined row shape rather than
+# introducing a parallel one, since the export is just "whatever's
+# already on screen," not a re-fetch.
+class OverviewExportRequest(BaseModel):
+    site_id: int
+    top_queries: list[GscQueryRowOut] = []
+    top_pages: list[Ga4PageRowOut] = []
+    ctr_by_page: list[GscPageRowOut] = []
+    rank_alerts: list[RankChangeOut] = []
+
+
+class OverviewExportResult(BaseModel):
+    ok: bool
+    detail: str
+    sheet_url: Optional[str] = None
+
+
+# Module 52 — GA4's "Active users in last 30 minutes" realtime tile plus
+# its country breakdown, matching the real GA4 UI's own Home/Realtime
+# report.
+class Ga4RealtimeRowOut(BaseModel):
+    country: str
+    active_users: int
+
+
+# Module 55 — GA4's own "Events: Event name" report.
+class Ga4EventRowOut(BaseModel):
+    event_name: str
+    event_count: int
+    total_users: int
+    active_users: int
+    total_revenue: float
+    event_count_per_active_user: float
+
+
+# Module 52 follow-up — the fuller "Realtime overview" report (active
+# users per minute, plus by device/page/audience), matching the real
+# GA4 UI's dedicated Realtime page rather than just its Home tile.
+class Ga4RealtimeMinuteRowOut(BaseModel):
+    minutes_ago: int
+    active_users: int
+
+
+class Ga4RealtimeDimensionRowOut(BaseModel):
+    key: str
+    value: int
 
 
 class SitemapListRequest(BaseModel):
@@ -1442,12 +1697,17 @@ class ImageGenerateRequest(BaseModel):
 
 class SheetsShareRequest(BaseModel):
     email: str
+    # Module 56 — which of the three spreadsheets (main/gsc/ga4) to
+    # share; defaults to "main" so a pre-Module-56 client omitting this
+    # field keeps behaving exactly as before.
+    kind: str = "main"
 
 
 class SheetsAdoptRequest(BaseModel):
     # Accepts either the bare spreadsheet id or a full Google Sheets URL
     # containing it — the route extracts the id either way.
     spreadsheet_id_or_url: str
+    kind: str = "main"
 
 
 class SheetsStatusOut(BaseModel):

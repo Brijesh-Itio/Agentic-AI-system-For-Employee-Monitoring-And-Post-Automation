@@ -1198,24 +1198,35 @@ export interface SheetsStatus {
   error: string | null;
 }
 
-// Creates the Sheets command-centre spreadsheet on first call
-// (idempotent after that), sharing it with SEO_SHEETS_SHARE_EMAIL if
-// set in .env. configured=false with an error is the honest result
-// until the Sheets + Drive APIs are enabled for the Google Cloud
-// project — see api/config.py's SEO_SHEETS_SHARE_EMAIL comment.
-export const getSheetsStatus = () => api.get<SheetsStatus>("/api/seo/sheets").then((r) => r.data);
+// Module 56 — three separate spreadsheets instead of one shared one:
+// "main" (the automated daily pipeline's own logs), "gsc", and "ga4"
+// (the two interactive "Export to Sheets" dashboards). kind defaults to
+// "main" everywhere below so existing callers that never cared about
+// the split keep working unchanged.
+export type SheetsKind = "main" | "gsc" | "ga4" | "overview";
 
-export const shareSheets = (email: string) =>
-  api.post<SheetsStatus>("/api/seo/sheets/share", { email }).then((r) => r.data);
+// Creates the given kind's spreadsheet on first call (idempotent after
+// that), sharing it with SEO_SHEETS_SHARE_EMAIL if set in .env.
+// configured=false with an error is the honest result until the Sheets
+// + Drive APIs are enabled for the Google Cloud project — see
+// api/config.py's SEO_SHEETS_SHARE_EMAIL comment.
+export const getSheetsStatus = (kind: SheetsKind = "main") =>
+  api.get<SheetsStatus>("/api/seo/sheets", { params: { kind } }).then((r) => r.data);
+
+export const shareSheets = (email: string, kind: SheetsKind = "main") =>
+  api.post<SheetsStatus>("/api/seo/sheets/share", { email, kind }).then((r) => r.data);
 
 // Service accounts created after April 2025 have zero Drive storage
 // quota and can't create a new spreadsheet on their own (see api/routes
 // /seo.py's adopt_sheets_route) — this is the real path: a human
 // creates a normal Google Sheet in their own Drive, shares it with the
 // service account as Editor, then hands the app that sheet's URL/id
-// here. Accepts either a bare id or a full Google Sheets URL.
-export const adoptSheets = (spreadsheetIdOrUrl: string) =>
-  api.post<SheetsStatus>("/api/seo/sheets/adopt", { spreadsheet_id_or_url: spreadsheetIdOrUrl }).then((r) => r.data);
+// here. Accepts either a bare id or a full Google Sheets URL. Adopting
+// all three kinds means calling this three times, once per kind.
+export const adoptSheets = (spreadsheetIdOrUrl: string, kind: SheetsKind = "main") =>
+  api
+    .post<SheetsStatus>("/api/seo/sheets/adopt", { spreadsheet_id_or_url: spreadsheetIdOrUrl, kind })
+    .then((r) => r.data);
 
 export type SocialPlatform = "linkedin" | "twitter" | "instagram" | "facebook";
 export type SocialPostStatus = "draft" | "approved" | "rejected" | "posted" | "failed";
@@ -1234,6 +1245,10 @@ export interface SocialPost {
   error: string | null;
   created_at: string | null;
   posted_at: string | null;
+  // Which connected Facebook Page this posts through (module 40); null
+  // means the single default account from .env. Ignored for every other
+  // platform.
+  facebook_account_id: number | null;
 }
 
 export const generateSocialPosts = (payload: {
@@ -1243,7 +1258,24 @@ export const generateSocialPosts = (payload: {
   source_url?: string;
   image_url?: string;
   platforms: SocialPlatform[];
+  facebook_account_id?: number | null;
 }) => api.post<SocialPost[]>("/api/seo/social/generate", payload, { timeout: 120_000 }).then((r) => r.data);
+
+export interface FacebookAccount {
+  id: number;
+  label: string;
+  page_id: string;
+  created_at: string | null;
+}
+
+export const getFacebookAccounts = () =>
+  api.get<FacebookAccount[]>("/api/seo/facebook-accounts").then((r) => r.data);
+
+export const createFacebookAccount = (payload: { label: string; page_id: string; page_access_token: string }) =>
+  api.post<FacebookAccount>("/api/seo/facebook-accounts", payload).then((r) => r.data);
+
+export const deleteFacebookAccount = (accountId: number) =>
+  api.delete(`/api/seo/facebook-accounts/${accountId}`);
 
 export const getSocialPosts = (siteId: number, status?: string) =>
   api.get<SocialPost[]>("/api/seo/social", { params: { site_id: siteId, status } }).then((r) => r.data);
@@ -1567,6 +1599,9 @@ export interface IndexStatus {
   google_canonical: string | null;
   user_canonical: string | null;
   mobile_usability_verdict: string | null;
+  inspection_result_link: string | null;
+  crawled_as: string | null;
+  sitemap_json: string | null;
   checked_at: string | null;
 }
 
@@ -1610,13 +1645,308 @@ export interface GscDimensionRow {
   position: number;
 }
 
-const fetchGscDimension = (path: string, siteId: number, daysBack: number) =>
-  api.post<GscDimensionRow[]>(path, { site_id: siteId, days_back: daysBack }, { timeout: 30_000 }).then((r) => r.data);
+export interface GscLiveQueryRow {
+  query: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+}
 
-export const getGscByCountry = (siteId: number, daysBack = 30) => fetchGscDimension("/api/seo/gsc/country", siteId, daysBack);
-export const getGscByDevice = (siteId: number, daysBack = 30) => fetchGscDimension("/api/seo/gsc/device", siteId, daysBack);
-export const getGscBySearchAppearance = (siteId: number, daysBack = 30) =>
-  fetchGscDimension("/api/seo/gsc/search-appearance", siteId, daysBack);
+export interface GscLivePageRow {
+  page: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+}
+
+export interface GscDateRow {
+  date: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+}
+
+// country: an ISO 3166-1 alpha-3 code, page: an exact page URL — the
+// real Search Console UI's own "click a row to drill into it" filters,
+// applied the same way here (and combinable, matching its filter-chip
+// behavior). startDate/endDate (YYYY-MM-DD) override daysBack when both
+// are given — the "Custom" date-range option.
+export interface GscFilterParams {
+  daysBack?: number;
+  country?: string | null;
+  page?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  rowLimit?: number;
+}
+
+const fetchGscDimension = <T>(path: string, siteId: number, filters: GscFilterParams) =>
+  api
+    .post<T[]>(
+      path,
+      {
+        site_id: siteId,
+        days_back: filters.daysBack ?? 28,
+        row_limit: filters.rowLimit,
+        country: filters.country || undefined,
+        page: filters.page || undefined,
+        start_date: filters.startDate || undefined,
+        end_date: filters.endDate || undefined,
+      },
+      { timeout: 30_000 }
+    )
+    .then((r) => r.data);
+
+export const getGscQueriesLive = (siteId: number, filters: GscFilterParams = {}) =>
+  fetchGscDimension<GscLiveQueryRow>("/api/seo/gsc/queries/live", siteId, filters);
+export const getGscPagesLive = (siteId: number, filters: GscFilterParams = {}) =>
+  fetchGscDimension<GscLivePageRow>("/api/seo/gsc/pages/live", siteId, filters);
+export const getGscByCountry = (siteId: number, filters: GscFilterParams = {}) =>
+  fetchGscDimension<GscDimensionRow>("/api/seo/gsc/country", siteId, filters);
+export const getGscByDevice = (siteId: number, filters: GscFilterParams = {}) =>
+  fetchGscDimension<GscDimensionRow>("/api/seo/gsc/device", siteId, filters);
+export const getGscBySearchAppearance = (siteId: number, filters: GscFilterParams = {}) =>
+  fetchGscDimension<GscDimensionRow>("/api/seo/gsc/search-appearance", siteId, filters);
+export const getGscTimeseries = (siteId: number, filters: GscFilterParams = {}) =>
+  fetchGscDimension<GscDateRow>("/api/seo/gsc/timeseries", siteId, { rowLimit: 1000, ...filters });
+
+export interface GscExportRow {
+  label: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+}
+
+export interface GscExportResult {
+  ok: boolean;
+  detail: string;
+  sheet_url: string | null;
+}
+
+export const exportGscToSheet = (siteId: number, view: string, dateRange: string, rows: GscExportRow[]) =>
+  api
+    .post<GscExportResult>(
+      "/api/seo/gsc/export-to-sheet",
+      { site_id: siteId, view, date_range: dateRange, rows },
+      { timeout: 30_000 }
+    )
+    .then((r) => r.data);
+
+// Module 50 follow-up — exports every GSC dimension (Queries/Pages/
+// Countries/Devices/Search Appearance) in one call, each landing in its
+// own clean tab (matching the real Search Console UI's own per-dimension
+// tables), instead of only whichever single view is on screen.
+export interface GscExportAllData {
+  queries?: GscExportRow[];
+  pages?: GscExportRow[];
+  countries?: GscExportRow[];
+  devices?: GscExportRow[];
+  search_appearance?: GscExportRow[];
+  // Per-day clicks/impressions — the same data behind the in-app trend
+  // chart — used to (re)embed a real chart on its own "GSC Chart" tab,
+  // matching the real Search Console UI's own "Export > Google Sheets"
+  // layout (a Chart tab ahead of the per-dimension tabs).
+  timeseries?: GscDateRow[];
+}
+
+export const exportAllGscToSheet = (siteId: number, dateRange: string, focusView: string, data: GscExportAllData) =>
+  api
+    .post<GscExportResult>(
+      "/api/seo/gsc/export-all-to-sheet",
+      { site_id: siteId, date_range: dateRange, focus_view: focusView, ...data },
+      { timeout: 45_000 }
+    )
+    .then((r) => r.data);
+
+// ── Module 51 — GA4 dimension/timeseries live views and Sheets export,
+// mirroring the GSC block immediately above. No country/page filter
+// here — GA4's dimension pulls don't support combining filters the way
+// GSC's do. ──
+
+export interface Ga4DimensionRow {
+  key: string;
+  sessions: number;
+  bounce_rate: number;
+  conversions: number;
+  active_users: number;
+  new_users: number;
+  total_users: number;
+  event_count: number;
+  engagement_rate: number;
+  engaged_sessions: number;
+  avg_session_duration: number;
+}
+
+export interface Ga4LivePageRow {
+  page_path: string;
+  sessions: number;
+  bounce_rate: number;
+  conversions: number;
+  active_users: number;
+  new_users: number;
+  total_users: number;
+  event_count: number;
+  engagement_rate: number;
+  engaged_sessions: number;
+  avg_session_duration: number;
+}
+
+export interface Ga4DateRow {
+  date: string;
+  sessions: number;
+  bounce_rate: number;
+  conversions: number;
+  active_users: number;
+  new_users: number;
+  total_users: number;
+  event_count: number;
+  engagement_rate: number;
+  engaged_sessions: number;
+  avg_session_duration: number;
+}
+
+export interface Ga4FilterParams {
+  daysBack?: number;
+  startDate?: string | null;
+  endDate?: string | null;
+  rowLimit?: number;
+}
+
+const fetchGa4Dimension = <T>(path: string, siteId: number, filters: Ga4FilterParams) =>
+  api
+    .post<T[]>(
+      path,
+      {
+        site_id: siteId,
+        days_back: filters.daysBack ?? 28,
+        row_limit: filters.rowLimit,
+        start_date: filters.startDate || undefined,
+        end_date: filters.endDate || undefined,
+      },
+      { timeout: 30_000 }
+    )
+    .then((r) => r.data);
+
+export const getGa4PagesLive = (siteId: number, filters: Ga4FilterParams = {}) =>
+  fetchGa4Dimension<Ga4LivePageRow>("/api/seo/ga4/pages/live", siteId, filters);
+export const getGa4BySource = (siteId: number, filters: Ga4FilterParams = {}) =>
+  fetchGa4Dimension<Ga4DimensionRow>("/api/seo/ga4/sources/live", siteId, filters);
+export const getGa4ByCountry = (siteId: number, filters: Ga4FilterParams = {}) =>
+  fetchGa4Dimension<Ga4DimensionRow>("/api/seo/ga4/countries/live", siteId, filters);
+export const getGa4ByDevice = (siteId: number, filters: Ga4FilterParams = {}) =>
+  fetchGa4Dimension<Ga4DimensionRow>("/api/seo/ga4/devices/live", siteId, filters);
+export const getGa4Timeseries = (siteId: number, filters: Ga4FilterParams = {}) =>
+  fetchGa4Dimension<Ga4DateRow>("/api/seo/ga4/timeseries", siteId, { rowLimit: 1000, ...filters });
+
+// Module 55 — GA4's own "Events: Event name" report.
+export interface Ga4EventRow {
+  event_name: string;
+  event_count: number;
+  total_users: number;
+  active_users: number;
+  total_revenue: number;
+  event_count_per_active_user: number;
+}
+
+export const getGa4Events = (siteId: number, filters: Ga4FilterParams = {}) =>
+  fetchGa4Dimension<Ga4EventRow>("/api/seo/ga4/events", siteId, { rowLimit: 100, ...filters });
+
+export interface Ga4ExportRow {
+  label: string;
+  sessions: number;
+  bounce_rate: number;
+  conversions: number;
+}
+
+export interface Ga4ExportResult {
+  ok: boolean;
+  detail: string;
+  sheet_url: string | null;
+}
+
+export interface Ga4EventExportRow {
+  event_name: string;
+  event_count: number;
+  total_users: number;
+  event_count_per_active_user: number;
+  total_revenue: number;
+}
+
+export interface Ga4ExportAllData {
+  pages?: Ga4ExportRow[];
+  sources?: Ga4ExportRow[];
+  countries?: Ga4ExportRow[];
+  devices?: Ga4ExportRow[];
+  events?: Ga4EventExportRow[];
+  timeseries?: Ga4DateRow[];
+}
+
+export const exportAllGa4ToSheet = (siteId: number, dateRange: string, focusView: string, data: Ga4ExportAllData) =>
+  api
+    .post<Ga4ExportResult>(
+      "/api/seo/ga4/export-all-to-sheet",
+      { site_id: siteId, date_range: dateRange, focus_view: focusView, ...data },
+      { timeout: 45_000 }
+    )
+    .then((r) => r.data);
+
+// Module 57 — the site Overview dashboard's own "download this report"
+// button (Top Search Queries / Top Traffic Pages / CTR by Page / Rank
+// Alerts). Sends whatever's already on screen — each field reuses the
+// same row shape its panel's own query already returns.
+export interface OverviewExportData {
+  top_queries?: GscQueryRow[];
+  top_pages?: Ga4PageRow[];
+  ctr_by_page?: GscPageRow[];
+  rank_alerts?: RankChange[];
+}
+
+export interface OverviewExportResult {
+  ok: boolean;
+  detail: string;
+  sheet_url: string | null;
+}
+
+export const exportOverviewToSheet = (siteId: number, data: OverviewExportData) =>
+  api
+    .post<OverviewExportResult>("/api/seo/overview/export-to-sheet", { site_id: siteId, ...data }, { timeout: 45_000 })
+    .then((r) => r.data);
+
+// Module 52 — active users right now, by country, matching GA4's own
+// Home/Realtime report. No date range — GA4 itself defines "realtime"
+// as the trailing ~30-minute window.
+export interface Ga4RealtimeRow {
+  country: string;
+  active_users: number;
+}
+
+export const getGa4Realtime = (siteId: number) =>
+  api.get<Ga4RealtimeRow[]>("/api/seo/ga4/realtime", { params: { site_id: siteId }, timeout: 15_000 }).then((r) => r.data);
+
+// The fuller "Realtime overview" report — active users per minute, plus
+// by device/page/audience, matching GA4's own dedicated Realtime page.
+export interface Ga4RealtimeMinuteRow {
+  minutes_ago: number;
+  active_users: number;
+}
+
+export interface Ga4RealtimeDimensionRow {
+  key: string;
+  value: number;
+}
+
+export const getGa4RealtimeByMinute = (siteId: number) =>
+  api.get<Ga4RealtimeMinuteRow[]>("/api/seo/ga4/realtime/by-minute", { params: { site_id: siteId }, timeout: 15_000 }).then((r) => r.data);
+export const getGa4RealtimeByDevice = (siteId: number) =>
+  api.get<Ga4RealtimeDimensionRow[]>("/api/seo/ga4/realtime/by-device", { params: { site_id: siteId }, timeout: 15_000 }).then((r) => r.data);
+export const getGa4RealtimeByPage = (siteId: number) =>
+  api.get<Ga4RealtimeDimensionRow[]>("/api/seo/ga4/realtime/by-page", { params: { site_id: siteId }, timeout: 15_000 }).then((r) => r.data);
+export const getGa4RealtimeByAudience = (siteId: number) =>
+  api.get<Ga4RealtimeDimensionRow[]>("/api/seo/ga4/realtime/by-audience", { params: { site_id: siteId }, timeout: 15_000 }).then((r) => r.data);
 
 export interface SitemapContentType {
   type: string;

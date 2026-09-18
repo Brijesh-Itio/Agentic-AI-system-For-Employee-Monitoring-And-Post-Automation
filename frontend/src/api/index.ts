@@ -1149,46 +1149,87 @@ export interface SeoDigest {
   stats_json: string;
   slack_delivered: boolean;
   created_at: string | null;
+  emailed_at: string | null;
 }
 
 export const getSeoDigests = (siteId: number) =>
   api.get<SeoDigest[]>("/api/seo/digest", { params: { site_id: siteId } }).then((r) => r.data);
 
-// Digest generation calls the LLM factory — generous timeout for local
-// CPU inference, same reasoning as reports.dar.generate.
-export const generateSeoDigest = (siteId: number, sendToSlack = true) =>
+// Module 58 — runDate backfills a specific past day's digest instead of
+// always today's; sendEmail/emailRecipient reuse the same Gmail sender
+// already live for DAR/alert email, so "export/share" isn't Slack + a
+// Sheets tab only any more. Digest generation calls the LLM factory —
+// generous timeout for local CPU inference, same reasoning as
+// reports.dar.generate.
+export const generateSeoDigest = (
+  siteId: number,
+  opts: { sendToSlack?: boolean; runDate?: string | null; sendEmail?: boolean; emailRecipient?: string | null } = {}
+) =>
   api
     .post<SeoDigest>(
       "/api/seo/digest/generate",
-      { site_id: siteId, send_to_slack: sendToSlack },
+      {
+        site_id: siteId,
+        send_to_slack: opts.sendToSlack ?? true,
+        run_date: opts.runDate || undefined,
+        send_email: opts.sendEmail ?? false,
+        email_recipient: opts.emailRecipient || undefined,
+      },
       { timeout: 120_000 }
     )
     .then((r) => r.data);
 
+export type DigestRollupPeriod = "weekly" | "monthly" | "custom";
+
 export interface DigestRollup {
   id: number;
   site_id: number;
-  period: "weekly" | "monthly";
+  period: DigestRollupPeriod;
   period_start: string;
   period_end: string;
   narrative: string;
   stats_json: string;
   slack_delivered: boolean;
   created_at: string | null;
+  emailed_at: string | null;
 }
 
-export const getDigestRollups = (siteId: number, period?: "weekly" | "monthly") =>
+export const getDigestRollups = (siteId: number, period?: DigestRollupPeriod) =>
   api.get<DigestRollup[]>("/api/seo/digest/rollups", { params: { site_id: siteId, period } }).then((r) => r.data);
 
 // Also runs on a schedule (Monday 07:30 weekly, 1st-of-month 07:45
 // monthly) — this is the same on-demand trigger, useful for testing or
-// forcing a fresh one without waiting.
-export const generateDigestRollup = (siteId: number, period: "weekly" | "monthly", sendToSlack = true) =>
+// forcing a fresh one without waiting. Module 58 — reference_date lets
+// weekly/monthly pull a specific past week's/month's report instead of
+// only ever the current one; period "custom" with start_date/end_date is
+// a genuinely arbitrary range, not snapped to a week/month boundary at
+// all. sendEmail/emailRecipient same as generateSeoDigest above.
+export const generateDigestRollup = (
+  siteId: number,
+  period: DigestRollupPeriod,
+  opts: {
+    sendToSlack?: boolean;
+    referenceDate?: string | null;
+    startDate?: string | null;
+    endDate?: string | null;
+    sendEmail?: boolean;
+    emailRecipient?: string | null;
+  } = {}
+) =>
   api
-    .post<DigestRollup>(`/api/seo/digest/rollup/${period}`, null, {
-      params: { site_id: siteId, send_to_slack: sendToSlack },
-      timeout: 120_000,
-    })
+    .post<DigestRollup>(
+      `/api/seo/digest/rollup/${period}`,
+      {
+        site_id: siteId,
+        send_to_slack: opts.sendToSlack ?? true,
+        reference_date: opts.referenceDate || undefined,
+        start_date: opts.startDate || undefined,
+        end_date: opts.endDate || undefined,
+        send_email: opts.sendEmail ?? false,
+        email_recipient: opts.emailRecipient || undefined,
+      },
+      { timeout: 120_000 }
+    )
     .then((r) => r.data);
 
 export interface SheetsStatus {
@@ -1279,6 +1320,9 @@ export const deleteFacebookAccount = (accountId: number) =>
 
 export const getSocialPosts = (siteId: number, status?: string) =>
   api.get<SocialPost[]>("/api/seo/social", { params: { site_id: siteId, status } }).then((r) => r.data);
+
+export const updateSocialPost = (postId: number, content: string) =>
+  api.patch<SocialPost>(`/api/seo/social/${postId}`, { content }).then((r) => r.data);
 
 export const approveSocialPost = (postId: number) =>
   api.post<SocialPost>(`/api/seo/social/${postId}/approve`, {}).then((r) => r.data);

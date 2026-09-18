@@ -1,5 +1,5 @@
 import type React from "react";
-import type { FC } from "react";
+import { useRef, type FC } from "react";
 
 interface InputProps {
   type?: "text" | "number" | "email" | "password" | "date" | "time" | string;
@@ -34,6 +34,24 @@ const Input: FC<InputProps> = ({
   error = false,
   hint,
 }) => {
+  const inputRef = useRef<HTMLInputElement>(null);
+  // A date/time input's native calendar-picker icon is a small,
+  // easy-to-miss click target — clicking anywhere else in the field
+  // just places a text caret, with no visible way to open the calendar.
+  // showPicker() opens it from a click anywhere in the field instead
+  // (Chrome/Edge; browsers without it just fall through to the normal
+  // native click-the-icon behavior, unaffected).
+  const openPickerIfSupported = () => {
+    if ((type === "date" || type === "time") && typeof inputRef.current?.showPicker === "function") {
+      try {
+        inputRef.current.showPicker();
+      } catch {
+        // Some browsers throw if called too often/without a user
+        // gesture in edge cases — falls back to the native icon click.
+      }
+    }
+  };
+
   let inputClasses = ` h-11 w-full rounded-lg border appearance-none px-4 py-2.5 text-sm shadow-theme-xs placeholder:text-gray-400 focus:outline-hidden focus:ring-3  dark:bg-gray-900 dark:text-white/90 dark:placeholder:text-white/30 ${className}`;
 
   if (disabled) {
@@ -49,12 +67,14 @@ const Input: FC<InputProps> = ({
   return (
     <div className="relative">
       <input
+        ref={inputRef}
         type={type}
         id={id}
         name={name}
         placeholder={placeholder}
         value={value}
         onChange={onChange}
+        onClick={openPickerIfSupported}
         min={min}
         max={max}
         step={step}

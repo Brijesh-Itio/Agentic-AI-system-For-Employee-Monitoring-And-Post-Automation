@@ -36,6 +36,10 @@ def _build_provider(provider_name: str) -> ImageProvider:
         from ai.images.providers.puter_provider import PuterProvider
 
         return PuterProvider()
+    if provider_name == "image_worker":
+        from ai.images.providers.image_worker_provider import ImageWorkerProvider
+
+        return ImageWorkerProvider()
 
     logger.warning("Unknown image provider %r requested, falling back to fastsd", provider_name)
     return FastSdProvider()

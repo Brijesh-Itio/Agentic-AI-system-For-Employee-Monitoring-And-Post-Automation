@@ -569,6 +569,7 @@ class SeoDailyDigest(Base):
     stats_json = Column(String, nullable=False)
     slack_delivered = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime)
+    emailed_at = Column(DateTime)
 
 
 class SeoDigestRollup(Base):
@@ -582,6 +583,7 @@ class SeoDigestRollup(Base):
     stats_json = Column(String, nullable=False)
     slack_delivered = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime)
+    emailed_at = Column(DateTime)
 
 
 class SeoSocialPost(Base):

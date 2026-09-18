@@ -1230,6 +1230,13 @@ class PageTagAuditOut(BaseModel):
 class DigestGenerateRequest(BaseModel):
     site_id: int
     send_to_slack: bool = True
+    # Module 58 — lets a digest be generated/regenerated FOR a specific
+    # past day (backfilling one the automated 6am run missed or that
+    # predates this feature) instead of always today. Defaults to today
+    # so every existing caller keeps behaving exactly as before.
+    run_date: Optional[date_type] = None
+    send_email: bool = False
+    email_recipient: Optional[str] = None
 
 
 class DigestOut(BaseModel):
@@ -1242,6 +1249,23 @@ class DigestOut(BaseModel):
     stats_json: str
     slack_delivered: bool
     created_at: Optional[datetime] = None
+    emailed_at: Optional[datetime] = None
+
+
+class DigestRollupGenerateRequest(BaseModel):
+    # period is a path param on the route this pairs with, not repeated
+    # here. reference_date anchors "this week"/"this month" to a chosen
+    # day instead of always literal today (so you can pull last week's or
+    # a specific past week's/month's report); required alongside
+    # start_date/end_date when period == "custom", for an arbitrary range
+    # not snapped to a week/month boundary at all.
+    site_id: int
+    send_to_slack: bool = True
+    reference_date: Optional[date_type] = None
+    start_date: Optional[date_type] = None
+    end_date: Optional[date_type] = None
+    send_email: bool = False
+    email_recipient: Optional[str] = None
 
 
 class DigestRollupOut(BaseModel):
@@ -1256,9 +1280,14 @@ class DigestRollupOut(BaseModel):
     stats_json: str
     slack_delivered: bool
     created_at: Optional[datetime] = None
+    emailed_at: Optional[datetime] = None
 
 
 SocialPlatform = Literal["linkedin", "twitter", "instagram", "facebook"]
+
+
+class SocialPostUpdate(BaseModel):
+    content: str
 
 
 class SocialGenerateRequest(BaseModel):

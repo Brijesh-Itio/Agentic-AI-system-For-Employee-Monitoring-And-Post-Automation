@@ -14,14 +14,16 @@ narrative can't give.
 import logging
 from dataclasses import dataclass
 from datetime import date as date_cls, timedelta
-from typing import Literal
+from typing import Literal, Optional
 
 from agent import database
 from ai.llm.factory import get_provider
 
 logger = logging.getLogger(__name__)
 
-Period = Literal["weekly", "monthly"]
+# Module 58 — "custom" is a genuinely arbitrary human-picked date range,
+# not snapped to a week/month boundary the way weekly/monthly are.
+Period = Literal["weekly", "monthly", "custom"]
 
 
 @dataclass
@@ -34,35 +36,59 @@ class RollupReport:
     stats_json: str
 
 
-def _period_range(period: Period, today: date_cls) -> tuple[date_cls, date_cls]:
+def _period_range(period: Period, reference_date: date_cls) -> tuple[date_cls, date_cls]:
+    """weekly/monthly are always anchored to reference_date (defaults to
+    today at the call site below) rather than hardcoded to literal
+    "today" — lets a human pull last week's, or any specific past week's/
+    month's, report instead of only ever the current one. Not used for
+    period == "custom", which takes its start/end directly from the
+    caller instead of being derived from a single reference date."""
     if period == "weekly":
-        start = today - timedelta(days=today.weekday())  # this week's Monday
-        return start, today
-    start = today.replace(day=1)  # this month's 1st
-    return start, today
+        start = reference_date - timedelta(days=reference_date.weekday())  # that week's Monday
+        return start, reference_date
+    start = reference_date.replace(day=1)  # that month's 1st
+    return start, reference_date
 
 
-def _fallback_narrative(site_name: str, period: Period, digest_count: int) -> str:
-    span = "week" if period == "weekly" else "month"
+def _fallback_narrative(site_name: str, period: Period, digest_count: int, start: date_cls, end: date_cls) -> str:
+    span = "this week" if period == "weekly" else "this month" if period == "monthly" else f"{start.isoformat()} to {end.isoformat()}"
     return (
         f"{period.capitalize()} roll-up for {site_name}: {digest_count} daily digest(s) recorded "
-        f"this {span}. (LLM unavailable — trend narrative skipped.)"
+        f"{span}. (LLM unavailable — trend narrative skipped.)"
     )
 
 
-def generate_rollup_digest(site_id: int, site_name: str, period: Period) -> RollupReport:
+def generate_rollup_digest(
+    site_id: int,
+    site_name: str,
+    period: Period,
+    reference_date: Optional[date_cls] = None,
+    custom_start: Optional[date_cls] = None,
+    custom_end: Optional[date_cls] = None,
+) -> RollupReport:
     """Never raises — falls back to a plain factual summary if the LLM
     call fails or if no daily digests exist yet for the period, same
-    graceful-degrade convention as generate_daily_digest."""
-    today = date_cls.today()
-    start, end = _period_range(period, today)
+    graceful-degrade convention as generate_daily_digest.
+
+    reference_date (weekly/monthly only) anchors "this week"/"this
+    month" to a chosen day instead of always literal today — omit it to
+    keep today's behavior exactly as before. custom_start/custom_end are
+    required when period == "custom" (the route validates this before
+    calling); ValueError otherwise, since there's no sensible default
+    range for an explicitly custom period."""
+    if period == "custom":
+        if custom_start is None or custom_end is None:
+            raise ValueError("custom_start and custom_end are required when period == 'custom'")
+        start, end = custom_start, custom_end
+    else:
+        start, end = _period_range(period, reference_date or date_cls.today())
     daily_rows = database.list_daily_digests_between(site_id, start, end)
 
     narratives = [row["narrative"] for row in daily_rows]
     stats_json = json_dumps_digest_list(daily_rows)
 
     if not narratives:
-        narrative = _fallback_narrative(site_name, period, 0)
+        narrative = _fallback_narrative(site_name, period, 0, start, end)
     else:
         joined = "\n".join(f"- {n}" for n in narratives)
         prompt = (
@@ -75,7 +101,7 @@ def generate_rollup_digest(site_id: int, site_name: str, period: Period) -> Roll
             f"DAILY NOTES:\n{joined}"
         )
         result = get_provider(task=f"{period}_digest", site_id=site_id).generate(prompt, fast=True)
-        narrative = result.text.strip() if result.ok else _fallback_narrative(site_name, period, len(narratives))
+        narrative = result.text.strip() if result.ok else _fallback_narrative(site_name, period, len(narratives), start, end)
 
     return RollupReport(
         site_id=site_id, period=period, period_start=start.isoformat(), period_end=end.isoformat(),

@@ -249,29 +249,48 @@ class Settings(BaseSettings):
     # ── SEO Agentic AI: generic image provider layer (module 27) ──
     # Per-task overrides read IMAGE_PROVIDER_<TASK> from the environment
     # directly, same as SEO_LLM_PROVIDER_<TASK> — see ai/images/factory.py.
-    # Back on "fastsd" (zero-cost local stack, module 18.3): verified live
-    # on 2026-09-14 that this account's Puter API token gets a real 402
-    # "subscription_required" (code, plan="user_free") on chat/completions
-    # and a flat 404 (route not implemented at all) on images/generations
-    # via api.puter.com's OpenAI-compatible proxy — Puter's "free
-    # unlimited" AI marketing does not extend to headless/API-token
-    # access on the free plan. ai/images/providers/puter_provider.py is
-    # still wired and selectable (IMAGE_PROVIDER_DEFAULT=puter or a
-    # per-task override) for if/when this account gets a Puter
-    # subscription or Puter ships the images route.
-    IMAGE_PROVIDER_DEFAULT: str = "fastsd"
+    # Now "image_worker" (see ai/images/providers/image_worker_provider.py)
+    # per user request, 2026-09-17 — a personal Cloudflare Worker
+    # endpoint, verified live to return a real generated image. This
+    # single setting drives image generation for BOTH blog post featured
+    # images (ai/seo/image_pipeline.py's generate_and_publish_image) and
+    # social post images (api/routes/seo.py's generate_social_post_image_
+    # route) since both already resolve providers through this same
+    # factory — no separate wiring needed per content type.
+    # "fastsd" (zero-cost local stack, module 18.3) and "puter" (parked —
+    # see PUTER_AUTH_TOKEN's comment) both stay available via
+    # IMAGE_PROVIDER_DEFAULT or a per-task override if this worker ever
+    # goes down.
+    IMAGE_PROVIDER_DEFAULT: str = "image_worker"
     # Blank = stays off; ai/images/providers/stability_provider.py fails
     # closed with a clear error rather than silently falling back.
     STABILITY_API_KEY: str = ""
 
+    # ── Personal image-generation worker (module 27, current default) ──
+    # A single Cloudflare Worker endpoint the user runs themselves —
+    # POST {"prompt": ...} with this bearer token, raw image bytes back.
+    # Blank = ai/images/providers/image_worker_provider.py fails closed
+    # with a clear error rather than silently falling back.
+    IMAGE_WORKER_URL: str = ""
+    IMAGE_WORKER_API_KEY: str = ""
+
     # ── Puter image generation (free, user-pays-with-own-account) ──
+    # Parked as of 2026-09-14 — this account's Puter API token gets a
+    # real 402 "subscription_required" (plan="user_free") on chat/
+    # completions and a flat 404 (route not implemented at all) on
+    # images/generations via api.puter.com's OpenAI-compatible proxy —
+    # Puter's "free unlimited" AI marketing does not extend to headless/
+    # API-token access on the free plan, and the images route may not be
+    # a real product at all (their own docs only cover chat/text models).
     # Server-side use needs an auth token, not an API key: sign in at
     # https://puter.com/dashboard#account -> "API token" -> "Create
     # token". Treat it like a password — whoever holds it can act as that
     # Puter account. Blank = ai/images/providers/puter_provider.py fails
     # closed with a clear error. Calls go through Puter's plain
     # OpenAI-compatible REST endpoint (api.puter.com/puterai/openai/v1/),
-    # no SDK or Node.js needed.
+    # no SDK or Node.js needed. Still wired and selectable
+    # (IMAGE_PROVIDER_DEFAULT=puter or a per-task override) for if/when
+    # this account gets a subscription or Puter ships the images route.
     PUTER_AUTH_TOKEN: str = ""
 
     # ── SEO Agentic AI: autonomous daily scheduling (module 33) ──

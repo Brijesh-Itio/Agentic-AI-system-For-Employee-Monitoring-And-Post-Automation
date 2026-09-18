@@ -262,14 +262,19 @@ def post_to_linkedin(content: str, topic: str, image_path: Optional[Path] = None
                 # from the DOM entirely; any text typed beforehand is silently
                 # discarded, not merged back in.
                 if image_path is not None and image_path.exists():
-                    # The file input doesn't exist in the DOM at all until "Add
-                    # media" is clicked — LinkedIn renders it lazily rather than
-                    # keeping a hidden input around. Not independently
-                    # re-verified live against the current iframe-based
-                    # composer (only the text-post path below was); if this
-                    # step breaks, treat it the same way — inspect
-                    # compose_frame's real DOM rather than guess a new class.
-                    compose_frame.get_by_label("Add media", exact=False).click(timeout=NAV_TIMEOUT_MS)
+                    # The file input doesn't exist in the DOM at all until the
+                    # media button is clicked — LinkedIn renders it lazily
+                    # rather than keeping a hidden input around. Fixed
+                    # 2026-09-17: this button's accessible label was "Add
+                    # media" at some earlier point but is now just "Media"
+                    # (verified live via a real headless run — dumped every
+                    # compose-toolbar button's aria-label directly rather than
+                    # guessing from a screenshot; a real failure in production
+                    # was timing out on the old label). Everything after this
+                    # click (the file input, the "Next" button) was verified
+                    # working as-is in that same live run — only this one
+                    # label had drifted.
+                    compose_frame.get_by_label("Media", exact=True).click(timeout=NAV_TIMEOUT_MS)
                     compose_frame.set_input_files('input[type="file"]', str(image_path), timeout=NAV_TIMEOUT_MS)
                     page.wait_for_timeout(2_000)  # let the image preview upload/render
                     compose_frame.get_by_role("button", name="Next", exact=True).click(timeout=NAV_TIMEOUT_MS)

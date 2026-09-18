@@ -52,6 +52,7 @@ from api.schemas import (
     CmsStatusOut,
     ContentAnalyzeRequest,
     DigestGenerateRequest,
+    DigestRollupGenerateRequest,
     DigestOut,
     DigestRollupOut,
     FaqPairOut,
@@ -152,6 +153,7 @@ from api.schemas import (
     SshStatusOut,
     SocialGenerateRequest,
     SocialPostOut,
+    SocialPostUpdate,
     FacebookAccountCreate,
     FacebookAccountOut,
     StructureReportOut,
@@ -168,6 +170,7 @@ from ai.seo.blog_content import generate_blog_post
 from ai.seo.content_structure import analyze_structure, generate_faq
 from ai.seo.daily_digest import generate_daily_digest
 from ai.seo.image_pipeline import generate_and_publish_image, upload_image_bytes
+from ai.seo.image_prompt import derive_image_prompt
 from ai.seo.interlink_engine import find_related_pages, index_page
 from ai.seo.issue_remediation import generate_ai_suggestion, generate_fix_value
 from ai.seo.outreach_drafter import draft_outreach_email
@@ -2011,11 +2014,17 @@ def apply_technical_issue_fix_route(issue_id: int, db: Session = Depends(get_db)
 
 @router.post("/digest/generate", response_model=DigestOut, status_code=201)
 def generate_digest_route(payload: DigestGenerateRequest, db: Session = Depends(get_db)):
+    """Module 58 — payload.run_date (default today) lets this backfill a
+    specific past day's digest instead of always today's. payload.
+    send_email/email_recipient reuse the same Gmail SMTP sender already
+    live for DAR/alert/campaign email (automation/email/sender.py) —
+    export/share was previously Slack + a Sheets tab only, no email."""
     site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
-    digest = generate_daily_digest(payload.site_id, site.name)
+    run_date = payload.run_date or date_cls.today()
+    digest = generate_daily_digest(payload.site_id, site.name, run_date=run_date)
     stats_json = json.dumps(
         {
             "pending_issues": digest.stats.pending_issues,
@@ -2031,12 +2040,19 @@ def generate_digest_route(payload: DigestGenerateRequest, db: Session = Depends(
     if payload.send_to_slack:
         slack_delivered = send_slack_message(f"*SEO Digest — {site.name}*\n{digest.narrative}")
 
-    database.save_daily_digest(payload.site_id, date_cls.today(), digest.narrative, stats_json, slack_delivered)
+    database.save_daily_digest(payload.site_id, run_date, digest.narrative, stats_json, slack_delivered)
+
+    if payload.send_email:
+        from automation.email.sender import send_raw_email
+
+        recipient = payload.email_recipient or settings.REPORT_RECIPIENT_EMAIL or settings.GMAIL_ADDRESS
+        if recipient and send_raw_email(recipient, f"SEO Digest — {site.name} ({run_date.isoformat()})", digest.narrative):
+            database.mark_daily_digest_emailed(payload.site_id, run_date)
 
     db.expire_all()
     return (
         db.query(SeoDailyDigest)
-        .filter(SeoDailyDigest.site_id == payload.site_id, SeoDailyDigest.run_date == date_cls.today())
+        .filter(SeoDailyDigest.site_id == payload.site_id, SeoDailyDigest.run_date == run_date)
         .first()
     )
 
@@ -2053,35 +2069,57 @@ def list_digests_route(site_id: int, limit: int = 30, db: Session = Depends(get_
 
 
 @router.post("/digest/rollup/{period}", response_model=DigestRollupOut, status_code=201)
-def generate_digest_rollup_route(period: str, site_id: int, send_to_slack: bool = True, db: Session = Depends(get_db)):
+def generate_digest_rollup_route(period: str, payload: DigestRollupGenerateRequest, db: Session = Depends(get_db)):
     """Module 36 — the "every Monday, full week summary" / "monthly
     board report" the blueprint described but nothing ever generated.
     Same manual-trigger-plus-scheduled-cron pattern as /jobs/run-daily-
     cycle: api/main.py's scheduler calls this same function on its own
-    schedule, and this lets it be run on demand too."""
-    if period not in ("weekly", "monthly"):
-        raise HTTPException(status_code=400, detail="period must be 'weekly' or 'monthly'")
-    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
-    if site is None:
-        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+    schedule, and this lets it be run on demand too.
 
-    report = generate_rollup_digest(site_id, site.name, period)
+    Module 58 — period == "custom" takes an arbitrary payload.start_date/
+    end_date range, not snapped to a week/month boundary; weekly/monthly
+    accept an optional payload.reference_date to pull a specific past
+    week's/month's report instead of only ever the current one. This
+    used to be query-params-only (site_id/send_to_slack); now a body,
+    since there are too many optional fields for that to stay readable."""
+    if period not in ("weekly", "monthly", "custom"):
+        raise HTTPException(status_code=400, detail="period must be 'weekly', 'monthly', or 'custom'")
+    if period == "custom" and (payload.start_date is None or payload.end_date is None):
+        raise HTTPException(status_code=400, detail="start_date and end_date are required when period is 'custom'")
+    site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
+
+    report = generate_rollup_digest(
+        payload.site_id, site.name, period,
+        reference_date=payload.reference_date, custom_start=payload.start_date, custom_end=payload.end_date,
+    )
     slack_delivered = False
-    if send_to_slack:
+    if payload.send_to_slack:
         slack_delivered = send_slack_message(f"*SEO {period.capitalize()} Roll-Up — {site.name}*\n{report.narrative}")
 
+    period_start = date_cls.fromisoformat(report.period_start)
+    period_end = date_cls.fromisoformat(report.period_end)
     database.save_digest_rollup(
-        site_id, period, date_cls.fromisoformat(report.period_start), date_cls.fromisoformat(report.period_end),
-        report.narrative, report.stats_json, slack_delivered,
+        payload.site_id, period, period_start, period_end, report.narrative, report.stats_json, slack_delivered,
     )
+
+    if payload.send_email:
+        from automation.email.sender import send_raw_email
+
+        recipient = payload.email_recipient or settings.REPORT_RECIPIENT_EMAIL or settings.GMAIL_ADDRESS
+        subject = f"SEO {period.capitalize()} Roll-Up — {site.name} ({report.period_start} to {report.period_end})"
+        if recipient and send_raw_email(recipient, subject, report.narrative):
+            database.mark_digest_rollup_emailed(payload.site_id, period, period_start, period_end)
 
     db.expire_all()
     return (
         db.query(SeoDigestRollup)
         .filter(
-            SeoDigestRollup.site_id == site_id,
+            SeoDigestRollup.site_id == payload.site_id,
             SeoDigestRollup.period == period,
-            SeoDigestRollup.period_start == date_cls.fromisoformat(report.period_start),
+            SeoDigestRollup.period_start == period_start,
+            SeoDigestRollup.period_end == period_end,
         )
         .first()
     )
@@ -2223,7 +2261,7 @@ def generate_social_post_image_route(post_id: int, payload: ImageGenerateRequest
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
 
-    prompt = payload.prompt or row.content[:200]
+    prompt = payload.prompt or derive_image_prompt(row.content, site_id=row.site_id) or row.content[:200]
     result = generate_and_publish_image(site, prompt, task=f"social_{row.platform}")
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
@@ -2263,6 +2301,23 @@ def list_social_posts_route(site_id: int, status: Optional[str] = None, limit: i
     if status is not None:
         query = query.filter(SeoSocialPost.status == status)
     return query.order_by(SeoSocialPost.created_at.desc()).limit(limit).all()
+
+
+@router.patch("/social/{post_id}", response_model=SocialPostOut)
+def update_social_post_route(post_id: int, payload: SocialPostUpdate, db: Session = Depends(get_db)):
+    """Manual edit of an AI-generated draft — content is a starting point,
+    not final; a human can revise wording before approving. Blocked once
+    a post is already 'posted' (it's live, editing the record wouldn't
+    change what's actually on the platform)."""
+    row = db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No social post {post_id}")
+    if row.status == "posted":
+        raise HTTPException(status_code=409, detail="Can't edit a post that's already been published")
+
+    database.update_social_post_content(post_id, payload.content)
+    db.expire_all()
+    return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
 
 
 @router.post("/social/{post_id}/approve", response_model=SocialPostOut)
@@ -2581,7 +2636,7 @@ def generate_blog_post_image_route(post_id: int, payload: ImageGenerateRequest, 
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
 
-    prompt = payload.prompt or row.title
+    prompt = payload.prompt or derive_image_prompt(row.content, title=row.title, site_id=row.site_id) or row.title
     result = generate_and_publish_image(site, prompt, task="blog_post")
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
@@ -2781,7 +2836,8 @@ def publish_blog_post_route(post_id: int, db: Session = Depends(get_db)):
     image_url = row.image_url
     if not image_url:
         try:
-            image_result = generate_and_publish_image(site, row.title, task="blog_post")
+            image_prompt = derive_image_prompt(row.content, title=row.title, site_id=row.site_id) or row.title
+            image_result = generate_and_publish_image(site, image_prompt, task="blog_post")
             if image_result.ok:
                 image_url = image_result.url
                 database.set_blog_post_image(post_id, image_url)

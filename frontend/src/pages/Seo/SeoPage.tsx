@@ -159,6 +159,7 @@ import {
   SheetsKind,
   indexPageForInterlinks,
   getSocialPosts,
+  updateSocialPost,
   getFacebookAccounts,
   createFacebookAccount,
   deleteFacebookAccount,
@@ -1829,8 +1830,15 @@ function SheetsConnectCard({ kind, title, description }: { kind: SheetsKind; tit
 
 function ReportingPanel({ siteId }: { siteId: number }) {
   const toast = useToast();
-  const [rollupPeriod, setRollupPeriod] = useState<"weekly" | "monthly">("weekly");
+  const [rollupPeriod, setRollupPeriod] = useState<DigestRollupPeriod>("weekly");
   const [rollup, setRollup] = useState<DigestRollup | null>(null);
+  // Module 58 — referenceDate anchors weekly/monthly to a chosen past
+  // day instead of always literal today; customStart/customEnd are a
+  // genuinely arbitrary range, only used when rollupPeriod === "custom".
+  const [referenceDate, setReferenceDate] = useState("");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [rollupEmailAddr, setRollupEmailAddr] = useState("");
 
   const rollupsQuery = useQuery({
     queryKey: ["seo", "digest-rollups", siteId, rollupPeriod],
@@ -1838,16 +1846,51 @@ function ReportingPanel({ siteId }: { siteId: number }) {
   });
   const latestSaved = rollupsQuery.data?.[0] ?? null;
 
+  const customRangeReady = rollupPeriod !== "custom" || (!!customStart && !!customEnd);
+  const rollupOpts = () => ({
+    referenceDate: rollupPeriod !== "custom" ? referenceDate || null : null,
+    startDate: rollupPeriod === "custom" ? customStart || null : null,
+    endDate: rollupPeriod === "custom" ? customEnd || null : null,
+  });
+
   const rollupMutation = useMutation({
-    mutationFn: () => generateDigestRollup(siteId, rollupPeriod),
+    mutationFn: () => generateDigestRollup(siteId, rollupPeriod, rollupOpts()),
     onSuccess: (data) => {
       setRollup(data);
-      toast.success(`${rollupPeriod === "weekly" ? "Weekly" : "Monthly"} roll-up generated.`);
+      toast.success(`${rollupPeriod === "weekly" ? "Weekly" : rollupPeriod === "monthly" ? "Monthly" : "Custom"} roll-up generated.`);
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Roll-up generation failed.")),
   });
 
+  // Module 58 — export/share was previously Slack + a Sheets tab only;
+  // reuses the same Gmail sender already live for DAR/alert email.
+  const rollupEmailMutation = useMutation({
+    mutationFn: () => generateDigestRollup(siteId, rollupPeriod, { ...rollupOpts(), sendEmail: true, emailRecipient: rollupEmailAddr || null }),
+    onSuccess: (data) => {
+      setRollup(data);
+      if (data.emailed_at) toast.success(`Roll-up emailed${rollupEmailAddr ? ` to ${rollupEmailAddr}` : ""}.`);
+      else toast.error("Roll-up generated but the email failed — check GMAIL_ADDRESS/GMAIL_APP_PASSWORD in .env.");
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Email failed.")),
+  });
+
   const shown = rollup ?? latestSaved;
+
+  const downloadRollup = () => {
+    if (!shown) return;
+    const blob = new Blob(
+      [`SEO ${shown.period} roll-up — ${shown.period_start} to ${shown.period_end}\n\n${shown.narrative}`],
+      { type: "text/plain;charset=utf-8;" }
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `seo-rollup-${shown.period}-${shown.period_start}-to-${shown.period_end}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
   const serviceAccountLine = (
     <>
       Google gives service accounts no Drive storage of their own, so create a blank sheet yourself, share it with{" "}
@@ -1891,14 +1934,32 @@ function ReportingPanel({ siteId }: { siteId: number }) {
             Trend summary across this period's daily digests. Also runs automatically (Monday mornings / 1st of
             month).
           </p>
-          <div className="mb-3 flex gap-2">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
             <Button size="sm" variant={rollupPeriod === "weekly" ? "default" : "outline"} onClick={() => { setRollupPeriod("weekly"); setRollup(null); }}>
               Weekly
             </Button>
             <Button size="sm" variant={rollupPeriod === "monthly" ? "default" : "outline"} onClick={() => { setRollupPeriod("monthly"); setRollup(null); }}>
               Monthly
             </Button>
-            <Button size="sm" onClick={() => rollupMutation.mutate()} disabled={rollupMutation.isPending}>
+            <Button size="sm" variant={rollupPeriod === "custom" ? "default" : "outline"} onClick={() => { setRollupPeriod("custom"); setRollup(null); }}>
+              Custom
+            </Button>
+            {rollupPeriod === "custom" ? (
+              <>
+                <Input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className="max-w-40" />
+                <span className="text-theme-xs text-gray-400">to</span>
+                <Input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className="max-w-40" />
+              </>
+            ) : (
+              <Input
+                type="date"
+                value={referenceDate}
+                onChange={(e) => setReferenceDate(e.target.value)}
+                className="max-w-40"
+                title={`Pull a specific past ${rollupPeriod === "weekly" ? "week's" : "month's"} report instead of the current one`}
+              />
+            )}
+            <Button size="sm" onClick={() => rollupMutation.mutate()} disabled={rollupMutation.isPending || !customRangeReady}>
               {rollupMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
               Generate now
             </Button>
@@ -1906,7 +1967,26 @@ function ReportingPanel({ siteId }: { siteId: number }) {
           {rollupsQuery.isLoading ? (
             <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
           ) : shown ? (
-            <p className="whitespace-pre-line text-theme-sm text-gray-700 dark:text-gray-300">{shown.narrative}</p>
+            <>
+              <p className="whitespace-pre-line text-theme-sm text-gray-700 dark:text-gray-300">{shown.narrative}</p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {shown.emailed_at && <Badge variant="success">Emailed</Badge>}
+                <Button size="sm" variant="outline" onClick={downloadRollup}>
+                  <Download className="h-3.5 w-3.5" />
+                  Download
+                </Button>
+                <Input
+                  value={rollupEmailAddr}
+                  onChange={(e) => setRollupEmailAddr(e.target.value)}
+                  placeholder="Email address (optional)"
+                  className="max-w-52"
+                />
+                <Button size="sm" variant="outline" onClick={() => rollupEmailMutation.mutate()} disabled={rollupEmailMutation.isPending || !customRangeReady}>
+                  {rollupEmailMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
+                  Email
+                </Button>
+              </div>
+            </>
           ) : (
             <p className="text-theme-sm text-gray-400">No roll-up generated yet.</p>
           )}
@@ -1936,6 +2016,8 @@ function OverviewTab({
   const queryClient = useQueryClient();
   const toast = useToast();
   const [issueFilter, setIssueFilter] = useState<IssueFilter>("pending");
+  const [digestRunDate, setDigestRunDate] = useState("");
+  const [digestEmailAddr, setDigestEmailAddr] = useState("");
 
   const digestsQuery = useQuery({ queryKey: ["seo", "digests", siteId], queryFn: () => getSeoDigests(siteId) });
   const latestDigest = digestsQuery.data?.[0] ?? null;
@@ -1985,13 +2067,42 @@ function OverviewTab({
   });
 
   const digestMutation = useMutation({
-    mutationFn: () => generateSeoDigest(siteId),
+    mutationFn: () => generateSeoDigest(siteId, { runDate: digestRunDate || null }),
     onSuccess: () => {
-      toast.success("Digest generated.");
+      toast.success(digestRunDate ? `Digest generated for ${digestRunDate}.` : "Digest generated.");
       queryClient.invalidateQueries({ queryKey: ["seo", "digests", siteId] });
     },
     onError: () => toast.error("Digest generation failed — check that Ollama is running."),
   });
+
+  // Module 58 — export/share was previously Slack + a Sheets tab only;
+  // this reuses the same Gmail sender already live for DAR/alert email
+  // instead of building a second one. Regenerates (same as "Generate
+  // Digest" above) rather than re-sending a stale cached narrative.
+  const digestEmailMutation = useMutation({
+    mutationFn: () => generateSeoDigest(siteId, { runDate: digestRunDate || null, sendEmail: true, emailRecipient: digestEmailAddr || null }),
+    onSuccess: (data) => {
+      if (data.emailed_at) toast.success(`Digest emailed${digestEmailAddr ? ` to ${digestEmailAddr}` : ""}.`);
+      else toast.error("Digest generated but the email failed — check GMAIL_ADDRESS/GMAIL_APP_PASSWORD in .env.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "digests", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Email failed.")),
+  });
+
+  const downloadDigest = () => {
+    if (!latestDigest) return;
+    const blob = new Blob([`SEO Digest — ${site.name} (${latestDigest.run_date})\n\n${latestDigest.narrative}`], {
+      type: "text/plain;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `seo-digest-${site.name.replace(/[^a-z0-9]+/gi, "-")}-${latestDigest.run_date}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   const approveMutation = useMutation({
     mutationFn: (issueId: number) => approveTechnicalIssue(issueId),
@@ -2106,7 +2217,7 @@ function OverviewTab({
         />
       </div>
 
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Button onClick={() => auditMutation.mutate()} disabled={auditMutation.isPending}>
           {auditMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
           Run Technical Audit
@@ -2115,23 +2226,45 @@ function OverviewTab({
           {digestMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
           Generate Digest
         </Button>
+        <Input
+          type="date"
+          value={digestRunDate}
+          onChange={(e) => setDigestRunDate(e.target.value)}
+          className="max-w-40"
+          title="Backfill a specific past day instead of today"
+        />
       </div>
 
       <PageTagAuditCard siteId={siteId} />
 
       <Card>
         <CardContent className="p-6">
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
               <Sparkles className="h-4 w-4 text-brand-500" />
               Latest Digest
             </h2>
             {latestDigest && (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-theme-xs text-gray-400">{latestDigest.run_date}</span>
                 <Badge variant={latestDigest.slack_delivered ? "success" : "outline"}>
                   {latestDigest.slack_delivered ? "Sent to Slack" : "Not sent to Slack"}
                 </Badge>
+                {latestDigest.emailed_at && <Badge variant="success">Emailed</Badge>}
+                <Button size="sm" variant="outline" onClick={downloadDigest}>
+                  <Download className="h-3.5 w-3.5" />
+                  Download
+                </Button>
+                <Input
+                  value={digestEmailAddr}
+                  onChange={(e) => setDigestEmailAddr(e.target.value)}
+                  placeholder="Email address (optional)"
+                  className="max-w-52"
+                />
+                <Button size="sm" variant="outline" onClick={() => digestEmailMutation.mutate()} disabled={digestEmailMutation.isPending}>
+                  {digestEmailMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
+                  Email
+                </Button>
               </div>
             )}
           </div>
@@ -2915,6 +3048,19 @@ function SocialTab({ siteId }: { siteId: number }) {
     mutationFn: (id: number) => rejectSocialPost(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] }),
   });
+
+  const [editingPostId, setEditingPostId] = useState<number | null>(null);
+  const [editedContent, setEditedContent] = useState("");
+  const updateMutation = useMutation({
+    mutationFn: ({ id, content }: { id: number; content: string }) => updateSocialPost(id, content),
+    onSuccess: () => {
+      toast.success("Post updated.");
+      setEditingPostId(null);
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't save this edit.")),
+  });
+
   const publishMutation = useMutation({
     mutationFn: (id: number) => publishSocialPost(id),
     onSuccess: (result) => {
@@ -3192,30 +3338,77 @@ function SocialTab({ siteId }: { siteId: number }) {
                       }}
                     />
                   )}
-                  <p className="whitespace-pre-line text-theme-sm text-gray-700 dark:text-gray-300">{post.content}</p>
+                  {editingPostId === post.id ? (
+                    <div className="space-y-2">
+                      <textarea
+                        value={editedContent}
+                        onChange={(e) => setEditedContent(e.target.value)}
+                        rows={6}
+                        className="w-full rounded-lg border border-gray-300 bg-transparent p-3 text-theme-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+                      />
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => updateMutation.mutate({ id: post.id, content: editedContent })}
+                          disabled={updateMutation.isPending || !editedContent.trim()}
+                        >
+                          {updateMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                          Save
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => setEditingPostId(null)}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="whitespace-pre-line text-theme-sm text-gray-700 dark:text-gray-300">{post.content}</p>
+                  )}
                   {post.platform === "instagram" && !post.image_url && (
                     <p className="mt-1 text-theme-xs text-warning-500">
                       No image URL — this post can't be published to Instagram until one is added.
                     </p>
                   )}
                   {post.error && <p className="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">{post.error}</p>}
-                  {post.status === "draft" && (
+                  {post.status !== "posted" && editingPostId !== post.id && (
                     <div className="mt-3 flex flex-wrap gap-2">
-                      <Button size="sm" variant="outline" onClick={() => approveMutation.mutate(post.id)}>
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        Approve
+                      {post.status === "draft" && (
+                        <>
+                          <Button size="sm" variant="outline" onClick={() => approveMutation.mutate(post.id)}>
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            Approve
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => rejectMutation.mutate(post.id)}>
+                            <XCircle className="h-3.5 w-3.5" />
+                            Reject
+                          </Button>
+                        </>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setEditingPostId(post.id);
+                          setEditedContent(post.content);
+                        }}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit
                       </Button>
-                      <Button size="sm" variant="outline" onClick={() => rejectMutation.mutate(post.id)}>
-                        <XCircle className="h-3.5 w-3.5" />
-                        Reject
-                      </Button>
+                    </div>
+                  )}
+                  {post.status === "draft" && editingPostId !== post.id && (
+                    <div className="mt-2 flex flex-wrap gap-2">
                       <Button
                         size="sm"
                         variant="outline"
                         onClick={() => imageMutation.mutate(post.id)}
-                        disabled={imageMutation.isPending}
+                        disabled={imageMutation.isPending && imageMutation.variables === post.id}
                       >
-                        {imageMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}
+                        {imageMutation.isPending && imageMutation.variables === post.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <ImageIcon className="h-3.5 w-3.5" />
+                        )}
                         {post.image_url ? "Regenerate image" : "Generate image"}
                       </Button>
                       <input
@@ -3235,21 +3428,29 @@ function SocialTab({ siteId }: { siteId: number }) {
                         size="sm"
                         variant="outline"
                         onClick={() => uploadInputRefs.current[post.id]?.click()}
-                        disabled={uploadImageMutation.isPending}
+                        disabled={uploadImageMutation.isPending && uploadImageMutation.variables?.id === post.id}
                       >
-                        {uploadImageMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}
+                        {uploadImageMutation.isPending && uploadImageMutation.variables?.id === post.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <ImageIcon className="h-3.5 w-3.5" />
+                        )}
                         {post.image_url ? "Replace image" : "Upload image"}
                       </Button>
                     </div>
                   )}
-                  {(post.status === "approved" || post.status === "failed") && (
+                  {(post.status === "approved" || post.status === "failed") && editingPostId !== post.id && (
                     <Button
                       size="sm"
                       className="mt-3"
                       onClick={() => publishMutation.mutate(post.id)}
-                      disabled={publishMutation.isPending}
+                      disabled={publishMutation.isPending && publishMutation.variables === post.id}
                     >
-                      {publishMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                      {publishMutation.isPending && publishMutation.variables === post.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Send className="h-3.5 w-3.5" />
+                      )}
                       {post.status === "failed" ? "Retry publish" : "Publish"}
                     </Button>
                   )}

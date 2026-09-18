@@ -284,17 +284,6 @@ layer(base);
   background-color: #344054;
 }
 
-@layer utilities {
-  /* For Remove Date Icon */
-  input[type="date"]::-webkit-inner-spin-button,
-  input[type="time"]::-webkit-inner-spin-button,
-  input[type="date"]::-webkit-calendar-picker-indicator,
-  input[type="time"]::-webkit-calendar-picker-indicator {
-    display: none;
-    -webkit-appearance: none;
-  }
-}
-
 .tableCheckbox:checked ~ span span {
   @apply opacity-100;
 }
@@ -693,23 +682,18 @@ span.flatpickr-weekday,
   @apply text-sm font-medium text-gray-500 dark:text-gray-400;
 }
 
+/* Opt-in hide for a date/time input's native picker icon — for a
+   component that renders its own overlay icon/label in its place (see
+   Flatpickr's DatePicker, which draws its own CalenderIcon). The native
+   icon is visible by default on every plain <input type="date"|"time">
+   elsewhere in the app (a previous blanket rule here hid it app-wide,
+   which silently broke click-to-open-calendar on every native date
+   input that had no such overlay — e.g. every "Custom" date-range
+   filter across the SEO page). */
 .input-date-icon::-webkit-inner-spin-button,
 .input-date-icon::-webkit-calendar-picker-indicator {
   opacity: 0;
   -webkit-appearance: none;
-}
-
-/* Scoped opt-out of the global "hide date/time picker icon" rule above
-   (section 283-292): those inputs are always paired with a custom overlay
-   icon/label built by their component, so hiding the native affordance is
-   correct there. Plain <input type="time"> fields with no such overlay
-   (e.g. the DAR task-log form) need the native picker button visible —
-   otherwise there is zero visual cue that typing digits is expected. */
-.time-picker-input::-webkit-calendar-picker-indicator {
-  display: block;
-  -webkit-appearance: auto;
-  opacity: 1;
-  cursor: pointer;
 }
 
 .swiper-button-prev svg,

@@ -100,10 +100,20 @@ def _fallback_narrative(site_name: str, stats: DigestStats) -> str:
     )
 
 
-def generate_daily_digest(site_id: int, site_name: str) -> DigestReport:
+def generate_daily_digest(site_id: int, site_name: str, run_date: Optional[date_cls] = None) -> DigestReport:
     """Never raises — a digest is always produced, LLM-written when
-    possible, factually assembled when not."""
+    possible, factually assembled when not.
+
+    run_date (defaults to today) lets a digest be generated FOR a chosen
+    past day — backfilling one the automated run missed, for instance —
+    rather than every call always being pinned to literal today. The
+    underlying stats are still always "the latest available data" (this
+    was never a point-in-time historical snapshot even for today's own
+    digest), so a backfilled digest is honestly a "report as of now,
+    filed under this date," not a reconstruction of what things looked
+    like back then."""
     stats = _gather_stats(site_id)
+    effective_date = run_date or date_cls.today()
 
     prompt = (
         f"You are an autonomous SEO operations agent writing a short daily status digest "
@@ -122,5 +132,5 @@ def generate_daily_digest(site_id: int, site_name: str) -> DigestReport:
     narrative = result.text.strip() if result.ok else _fallback_narrative(site_name, stats)
 
     return DigestReport(
-        site_id=site_id, run_date=date_cls.today().isoformat(), narrative=narrative, stats=stats
+        site_id=site_id, run_date=effective_date.isoformat(), narrative=narrative, stats=stats
     )

@@ -714,18 +714,24 @@ CREATE INDEX IF NOT EXISTS idx_seo_daily_digests_site ON seo_daily_digests(site_
 -- would collide the moment a weekly rollup's period_start date matches
 -- some daily digest's own run_date (e.g. any digest generated on a
 -- Monday). period_start/period_end are the calendar range this rollup
--- covers, not "the date it ran."
+-- covers, not "the date it ran." Module 58 added the 'custom' period
+-- (an arbitrary human-picked date range, not snapped to a week/month)
+-- and widened UNIQUE to include period_end, since period_start alone no
+-- longer uniquely identifies a custom range the way it does for
+-- weekly/monthly — see _migrate_digest_rollups_allow_custom_period for
+-- how an existing installation's table gets upgraded to this shape.
 CREATE TABLE IF NOT EXISTS seo_digest_rollups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
-    period TEXT NOT NULL CHECK(period IN ('weekly', 'monthly')),
+    period TEXT NOT NULL CHECK(period IN ('weekly', 'monthly', 'custom')),
     period_start DATE NOT NULL,
     period_end DATE NOT NULL,
     narrative TEXT NOT NULL,
     stats_json TEXT NOT NULL,
     slack_delivered INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(site_id, period, period_start)
+    emailed_at DATETIME,
+    UNIQUE(site_id, period, period_start, period_end)
 );
 
 CREATE INDEX IF NOT EXISTS idx_seo_digest_rollups_site ON seo_digest_rollups(site_id, period);
@@ -1055,6 +1061,17 @@ _SEO_INDEX_STATUS_EXTRA_COLUMNS = {
     "crawled_as": "TEXT",
 }
 
+# Module 58 — email-share for the daily digest / weekly-monthly-custom
+# roll-up, matching the same emailed_at convention already used for
+# dar_reports (automation/email/sender.py's send_dar_email updates it the
+# same way after a successful send).
+_SEO_DAILY_DIGESTS_EXTRA_COLUMNS = {
+    "emailed_at": "DATETIME",
+}
+_SEO_DIGEST_ROLLUPS_EXTRA_COLUMNS = {
+    "emailed_at": "DATETIME",
+}
+
 
 # Semrush Rank added after seo_semrush_metrics already shipped — same
 # additive-column convention as _SEO_SITES_EXTRA_COLUMNS above.
@@ -1098,6 +1115,56 @@ def _ensure_extra_columns(conn: sqlite3.Connection, table: str, columns: dict) -
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
 
+def _migrate_digest_rollups_allow_custom_period(conn: sqlite3.Connection) -> None:
+    """Module 58 — seo_digest_rollups originally only allowed
+    period IN ('weekly', 'monthly') via a CHECK constraint, and was
+    UNIQUE(site_id, period, period_start) only. Adding a true "custom"
+    date-range period (module 58's fix for "every report endpoint
+    hardcodes today") needs both widened: the CHECK to admit 'custom',
+    and the UNIQUE to also include period_end — otherwise two different
+    custom ranges that happen to start on the same day would collide and
+    silently overwrite each other, unlike weekly/monthly where
+    period_start alone already identifies the period. SQLite can't ALTER
+    a CHECK/UNIQUE constraint in place, so this recreates the table when
+    the old constraint is still in effect — never destroys data, every
+    existing row is copied across before the old table is dropped. Safe
+    to call on every startup: a no-op once already migrated (checked via
+    sqlite_master's stored CREATE TABLE text) or on a fresh install
+    (SCHEMA above already creates the widened version directly)."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='seo_digest_rollups'").fetchone()
+    if row is None or "'custom'" in row["sql"]:
+        return
+
+    conn.executescript(
+        """
+        ALTER TABLE seo_digest_rollups RENAME TO seo_digest_rollups_old;
+        CREATE TABLE seo_digest_rollups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_id INTEGER NOT NULL REFERENCES seo_sites(id) ON DELETE CASCADE,
+            period TEXT NOT NULL CHECK(period IN ('weekly', 'monthly', 'custom')),
+            period_start DATE NOT NULL,
+            period_end DATE NOT NULL,
+            narrative TEXT NOT NULL,
+            stats_json TEXT NOT NULL,
+            slack_delivered INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            emailed_at DATETIME,
+            UNIQUE(site_id, period, period_start, period_end)
+        );
+        INSERT INTO seo_digest_rollups
+            (id, site_id, period, period_start, period_end, narrative, stats_json, slack_delivered, created_at)
+        SELECT id, site_id, period, period_start, period_end, narrative, stats_json, slack_delivered, created_at
+        FROM seo_digest_rollups_old;
+        DROP TABLE seo_digest_rollups_old;
+        CREATE INDEX IF NOT EXISTS idx_seo_digest_rollups_site ON seo_digest_rollups(site_id, period);
+        """
+    )
+    logger.info(
+        "Migrated seo_digest_rollups: period CHECK now allows 'custom', UNIQUE widened to include period_end, "
+        "added emailed_at"
+    )
+
+
 def init_db() -> None:
     """Create all tables/indexes this agent module needs. Safe to call repeatedly."""
     conn = get_connection()
@@ -1116,6 +1183,14 @@ def init_db() -> None:
             _ensure_extra_columns(conn, "seo_social_posts", _SEO_SOCIAL_POSTS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_blog_posts", _SEO_BLOG_POSTS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_index_status", _SEO_INDEX_STATUS_EXTRA_COLUMNS)
+            _ensure_extra_columns(conn, "seo_daily_digests", _SEO_DAILY_DIGESTS_EXTRA_COLUMNS)
+            # Runs before the generic additive-column pass below: it
+            # recreates seo_digest_rollups from scratch (CHECK/UNIQUE
+            # can't be ALTERed in SQLite) and already bakes emailed_at
+            # into that recreated table, so _ensure_extra_columns for
+            # this table is a no-op on both a migrated and a fresh install.
+            _migrate_digest_rollups_allow_custom_period(conn)
+            _ensure_extra_columns(conn, "seo_digest_rollups", _SEO_DIGEST_ROLLUPS_EXTRA_COLUMNS)
             conn.commit()
             logger.info("Local SQLite schema ready at %s", LOCAL_DB_PATH)
         except Exception:
@@ -2463,6 +2538,14 @@ def list_daily_digests_between(site_id: int, start: date_cls, end: date_cls):
     ).fetchall()
 
 
+def mark_daily_digest_emailed(site_id: int, run_date: date_cls) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_daily_digests SET emailed_at = CURRENT_TIMESTAMP WHERE site_id = ? AND run_date = ?",
+            (site_id, run_date.isoformat()),
+        )
+
+
 # ── seo_digest_rollups — module 36 ──
 
 def save_digest_rollup(
@@ -2474,13 +2557,23 @@ def save_digest_rollup(
             """
             INSERT INTO seo_digest_rollups (site_id, period, period_start, period_end, narrative, stats_json, slack_delivered)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(site_id, period, period_start) DO UPDATE SET
-                period_end = excluded.period_end,
+            ON CONFLICT(site_id, period, period_start, period_end) DO UPDATE SET
                 narrative = excluded.narrative,
                 stats_json = excluded.stats_json,
                 slack_delivered = excluded.slack_delivered
             """,
             (site_id, period, period_start.isoformat(), period_end.isoformat(), narrative, stats_json, 1 if slack_delivered else 0),
+        )
+
+
+def mark_digest_rollup_emailed(site_id: int, period: str, period_start: date_cls, period_end: date_cls) -> None:
+    with write_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE seo_digest_rollups SET emailed_at = CURRENT_TIMESTAMP
+            WHERE site_id = ? AND period = ? AND period_start = ? AND period_end = ?
+            """,
+            (site_id, period, period_start.isoformat(), period_end.isoformat()),
         )
 
 
@@ -2603,6 +2696,14 @@ def get_social_post(post_id: int):
 def set_social_post_status(post_id: int, status: str) -> bool:
     with write_cursor() as cur:
         cur.execute("UPDATE seo_social_posts SET status = ? WHERE id = ?", (status, post_id))
+        return cur.rowcount > 0
+
+
+def update_social_post_content(post_id: int, content: str) -> bool:
+    """Manual post-generation edit — the AI draft is a starting point, not
+    the final word; a human can revise the wording before approving it."""
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_social_posts SET content = ? WHERE id = ?", (content, post_id))
         return cur.rowcount > 0
 
 

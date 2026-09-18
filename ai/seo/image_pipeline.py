@@ -23,12 +23,15 @@ access configured, upload failure) comes back as a clear ImagePublishResult
 with ok=False and a specific reason, matching this codebase's
 graceful-degrade convention throughout.
 """
+import io
 import logging
 import re
 import time
 import urllib.parse
 from dataclasses import dataclass
 from typing import Optional
+
+from PIL import Image
 
 from ai.images.factory import get_provider as get_image_provider
 from automation.seo.server_access import client_for_site
@@ -37,6 +40,53 @@ from automation.seo.webp_converter import convert_to_webp
 logger = logging.getLogger(__name__)
 
 UPLOAD_SUBDIR = "wp-content/uploads/seo-agent"
+
+# Facebook and LinkedIn both recommend a ~1.91:1 landscape crop for a
+# feed post's image (1200x630 / 1200x627) — a real, specific requirement,
+# not an arbitrary choice. This can't be satisfied by asking the image
+# provider for that size: verified live that the active provider
+# (ai/images/providers/image_worker_provider.py) silently ignores
+# width/height entirely and always returns a flat 1024x1024 square
+# regardless of what's requested, and FastSD/Stability/Puter offer no
+# stronger guarantee either. Enforcing the platform's real resolution
+# has to happen here, after generation, not by trusting the provider.
+_PLATFORM_IMAGE_DIMENSIONS = {
+    "facebook": (1200, 630),
+    "linkedin": (1200, 627),
+}
+
+
+def _standard_dimensions_for_task(task: str) -> Optional[tuple[int, int]]:
+    for platform, dims in _PLATFORM_IMAGE_DIMENSIONS.items():
+        if task.endswith(platform):
+            return dims
+    return None
+
+
+def _resize_to_standard(image_bytes: bytes, target_size: tuple[int, int]) -> bytes:
+    """Center-crops to the target aspect ratio, then resizes to the exact
+    target dimensions — so the result is always precisely target_size,
+    never a random size dictated by whatever the provider happened to
+    generate."""
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    target_w, target_h = target_size
+    target_ratio = target_w / target_h
+    src_w, src_h = image.size
+    src_ratio = src_w / src_h
+
+    if src_ratio > target_ratio:
+        new_w = round(src_h * target_ratio)
+        offset = (src_w - new_w) // 2
+        image = image.crop((offset, 0, offset + new_w, src_h))
+    else:
+        new_h = round(src_w / target_ratio)
+        offset = (src_h - new_h) // 2
+        image = image.crop((0, offset, src_w, offset + new_h))
+
+    image = image.resize(target_size, Image.LANCZOS)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 # Verified live against a real cPanel host this session: the FTP
 # account's root is NOT the web document root (files uploaded straight
@@ -144,7 +194,9 @@ def _publish_webp_bytes(site, webp_bytes: bytes, name_hint: str, *, provider: Op
 
 def generate_and_publish_image(site, prompt: str, *, task: str = "seo_content") -> ImagePublishResult:
     provider = get_image_provider(task)
-    result = provider.generate(prompt)
+    standard_size = _standard_dimensions_for_task(task)
+    request_width, request_height = standard_size or (1024, 1024)
+    result = provider.generate(prompt, width=request_width, height=request_height)
     if not result.ok:
         return ImagePublishResult(
             ok=False,
@@ -154,7 +206,19 @@ def generate_and_publish_image(site, prompt: str, *, task: str = "seo_content") 
             "STABILITY_API_KEY, or run a local FastSD server, then retry.",
         )
 
-    webp = convert_to_webp(result.image_bytes)
+    image_bytes = result.image_bytes
+    if standard_size:
+        try:
+            image_bytes = _resize_to_standard(image_bytes, standard_size)
+        except Exception:
+            logger.exception(
+                "Failed to resize image to standard %s dimensions for task %r — using provider's original size",
+                standard_size,
+                task,
+            )
+            image_bytes = result.image_bytes
+
+    webp = convert_to_webp(image_bytes)
     if webp is None:
         return ImagePublishResult(ok=False, provider=provider.name, error="WebP conversion failed — see server logs")
 

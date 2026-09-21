@@ -99,6 +99,22 @@ touch the tracking/AI pipeline, and all of which are off unless you configure th
 
 ## Getting started
 
+### Quick start (one script)
+
+Install [Python 3.11+](https://www.python.org/downloads/), [Node.js 18+](https://nodejs.org) and
+[Ollama](https://ollama.com), clone the repo, then run:
+
+```
+start.bat                          # Windows: installs whatever is missing, then runs everything
+python3 scripts/setup.py --start   # macOS / Linux: same thing
+```
+
+The first run creates the virtual environment, installs the Python libraries and the Playwright browser,
+installs the dashboard packages, creates `.env` (with a random `SECRET_KEY`) and the database, and pulls
+the Ollama models. Every later run skips straight to starting the API (`:8000`) and dashboard (`:5173`).
+Options: `--agent` (also run the desktop agent), `--skip-models`, `--api-port N`. `setup.bat` installs
+without starting; `setup.bat --check` reports what is missing. The manual steps are below.
+
 ### Prerequisites
 
 - Python 3.11+ (Windows, for the desktop agent — `pywin32` is Windows-only)

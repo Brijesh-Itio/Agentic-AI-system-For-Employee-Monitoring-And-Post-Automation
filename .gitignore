@@ -11,6 +11,8 @@ agent/data/
 *.db-journal
 *.db-wal
 *.db-shm
+# ...except the credential-free data snapshot
+!db_snapshot/workpulse.clean.db
 
 # Logs
 *.log

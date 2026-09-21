@@ -72,6 +72,7 @@ import { linter, lintGutter, Diagnostic } from "@codemirror/lint";
 import { syntaxTree } from "@codemirror/language";
 import { useTheme } from "@/context/ThemeContext";
 import { useToast } from "@/context/ToastContext";
+import { serverErrorDetail } from "@/utils/serverError";
 import {
   adoptSheets,
   applyTechnicalIssueFix,
@@ -762,10 +763,6 @@ function formatUtcTimestamp(value: string | null): string {
   if (!value) return "unknown time";
   const date = new Date(value.endsWith("Z") ? value : `${value}Z`);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function serverErrorDetail(err: unknown, fallback: string): string {
-  return (err as AxiosError<{ detail?: string }>).response?.data?.detail || fallback;
 }
 
 // Only meaningful for .html/.htm — a .php file's real output only
@@ -2129,12 +2126,20 @@ function OverviewTab({
 
   const approveMutation = useMutation({
     mutationFn: (issueId: number) => approveTechnicalIssue(issueId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] }),
+    onSuccess: () => {
+      toast.success("Issue approved.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't approve this issue.")),
   });
 
   const rejectMutation = useMutation({
     mutationFn: (issueId: number) => rejectTechnicalIssue(issueId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] }),
+    onSuccess: () => {
+      toast.info("Issue rejected.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't reject this issue.")),
   });
 
   const resolveMutation = useMutation({
@@ -2143,6 +2148,7 @@ function OverviewTab({
       toast.success("Marked as fixed.");
       queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
     },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't mark this issue as fixed.")),
   });
 
   const editTargetMutation = useMutation({
@@ -2182,6 +2188,7 @@ function OverviewTab({
       }
       queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
     },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't apply the fix.")),
   });
 
   const aiSuggestionMutation = useMutation({
@@ -2953,11 +2960,19 @@ function MetaRewriteQueuePanel({ siteId }: { siteId: number }) {
 
   const approveMutation = useMutation({
     mutationFn: (id: number) => approveMetaRewrite(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "meta-rewrites", siteId] }),
+    onSuccess: () => {
+      toast.success("Meta rewrite approved.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "meta-rewrites", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't approve this meta rewrite.")),
   });
   const rejectMutation = useMutation({
     mutationFn: (id: number) => rejectMetaRewrite(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "meta-rewrites", siteId] }),
+    onSuccess: () => {
+      toast.info("Meta rewrite rejected.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "meta-rewrites", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't reject this meta rewrite.")),
   });
 
   return (
@@ -3068,11 +3083,19 @@ function SocialTab({ siteId }: { siteId: number }) {
 
   const approveMutation = useMutation({
     mutationFn: (id: number) => approveSocialPost(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] }),
+    onSuccess: () => {
+      toast.success("Post approved.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't approve this post.")),
   });
   const rejectMutation = useMutation({
     mutationFn: (id: number) => rejectSocialPost(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] }),
+    onSuccess: () => {
+      toast.info("Post rejected.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't reject this post.")),
   });
 
   const [editingPostId, setEditingPostId] = useState<number | null>(null);
@@ -3206,6 +3229,7 @@ function SocialTab({ siteId }: { siteId: number }) {
       }
       queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
     },
+    onError: (err) => toast.error(serverErrorDetail(err, "Publishing failed.")),
   });
 
   // Instagram has no text-only post type — this is what actually lets
@@ -4202,11 +4226,19 @@ function BlogTab({ siteId }: { siteId: number }) {
 
   const approveMutation = useMutation({
     mutationFn: (id: number) => approveBlogPost(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] }),
+    onSuccess: () => {
+      toast.success("Post approved.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't approve this post.")),
   });
   const rejectMutation = useMutation({
     mutationFn: (id: number) => rejectBlogPost(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] }),
+    onSuccess: () => {
+      toast.info("Post rejected.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't reject this post.")),
   });
   const publishMutation = useMutation({
     mutationFn: (id: number) => publishBlogPost(id),
@@ -4218,6 +4250,7 @@ function BlogTab({ siteId }: { siteId: number }) {
       }
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
+    onError: (err) => toast.error(serverErrorDetail(err, "Publishing to the CMS failed.")),
   });
 
   const goLiveMutation = useMutation({
@@ -4230,6 +4263,7 @@ function BlogTab({ siteId }: { siteId: number }) {
       }
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't make it live.")),
   });
 
   // Module 59 — per-post scheduling. scheduleDrafts holds the pending
@@ -6768,6 +6802,7 @@ function IndexingTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
       }
       queryClient.invalidateQueries({ queryKey: ["seo", "indexing-submissions", siteId] });
     },
+    onError: (err) => toast.error(serverErrorDetail(err, "Indexing submission failed.")),
   });
 
   // "Request again" on a specific inspected URL's own card — separate
@@ -6780,6 +6815,7 @@ function IndexingTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
       else toast.info(result.error || "Submission failed — see the log below.");
       queryClient.invalidateQueries({ queryKey: ["seo", "indexing-submissions", siteId] });
     },
+    onError: (err) => toast.error(serverErrorDetail(err, "Indexing submission failed.")),
   });
 
   return (

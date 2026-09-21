@@ -6,6 +6,7 @@ import { Button } from "@/components/shadcn/button";
 import { Badge } from "@/components/shadcn/badge";
 import { createLead, deleteLead, getLeads, runLeadResearch, type LeadInput } from "@/api";
 import { useToast } from "@/context/ToastContext";
+import { serverErrorDetail } from "@/utils/serverError";
 
 const inputClass =
   "rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200";
@@ -41,7 +42,11 @@ export default function LeadsPanel() {
 
   const researchMutation = useMutation({
     mutationFn: (targetProfile: string) => runLeadResearch(targetProfile),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["leads"] }),
+    onSuccess: () => {
+      toast.success("Lead research finished — new leads are in the list.");
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Lead research failed.")),
   });
 
   return (

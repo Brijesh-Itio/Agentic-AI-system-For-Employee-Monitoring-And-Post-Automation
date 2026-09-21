@@ -20,6 +20,7 @@ import { isAxiosError } from "axios";
 import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
 import { Badge } from "@/components/shadcn/badge";
+import { useToast } from "@/context/ToastContext";
 import {
   applyRedirect,
   createRedirect,
@@ -97,6 +98,7 @@ function formatDate(value: string | null): string {
 /** SEO page tab — global 301/302 redirect rules served by the API (api/routes/redirects.py). */
 export default function RedirectionTab() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [sourceUrl, setSourceUrl] = useState("");
   const [targetUrl, setTargetUrl] = useState("");
   const [statusCode, setStatusCode] = useState<RedirectStatusCode>(301);
@@ -143,6 +145,7 @@ export default function RedirectionTab() {
     onError: (err) => {
       setNotice(null);
       setFormError(errorMessage(err));
+      toast.error(errorMessage(err));
     },
   });
 
@@ -150,6 +153,8 @@ export default function RedirectionTab() {
     mutationFn: (id: number) => applyRedirect(id),
     onSuccess: (saved) => {
       const outcome = outcomeOf(saved, "applied");
+      if (outcome.ok) toast.success(outcome.text);
+      else toast.error(outcome.text);
       dropTestResult(saved.id);
       if (outcome.ok) {
         setFormError(null);
@@ -163,6 +168,7 @@ export default function RedirectionTab() {
     onError: (err) => {
       setNotice(null);
       setFormError(errorMessage(err));
+      toast.error(errorMessage(err));
     },
   });
 
@@ -173,11 +179,13 @@ export default function RedirectionTab() {
       dropTestResult(id);
       setFormError(null);
       setNotice("Redirect deleted.");
+      toast.success("Redirect deleted.");
       queryClient.invalidateQueries({ queryKey: ["redirects"] });
     },
     onError: (err) => {
       setNotice(null);
       setFormError(errorMessage(err));
+      toast.error(errorMessage(err));
     },
   });
 
@@ -220,8 +228,10 @@ export default function RedirectionTab() {
       await navigator.clipboard.writeText(row.live_url);
       setFormError(null);
       setNotice(`Copied ${row.live_url}`);
+      toast.success("Link copied to clipboard.");
     } catch {
       setNotice(`Copy failed — the link is ${row.live_url}`);
+      toast.error("Couldn't copy the link — select it manually.");
     }
   };
 

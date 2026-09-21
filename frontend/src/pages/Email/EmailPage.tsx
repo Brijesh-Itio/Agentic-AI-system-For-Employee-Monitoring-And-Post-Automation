@@ -9,6 +9,8 @@ import { Badge } from "@/components/shadcn/badge";
 import LeadsPanel from "@/components/Email/LeadsPanel";
 import EmailTemplatesPanel from "@/components/Email/EmailTemplatesPanel";
 import { useAuth } from "@/context/AuthContext";
+import { useToast } from "@/context/ToastContext";
+import { serverErrorDetail } from "@/utils/serverError";
 import { getCampaignLog, getCampaignStats, runEmailCampaign, runFollowUps } from "@/api";
 
 type Tab = "campaigns" | "leads" | "templates";
@@ -17,17 +19,30 @@ export default function EmailPage() {
   const { isHr } = useAuth();
   const [tab, setTab] = useState<Tab>("campaigns");
   const queryClient = useQueryClient();
+  const toast = useToast();
 
   const statsQuery = useQuery({ queryKey: ["email", "stats"], queryFn: getCampaignStats });
   const logQuery = useQuery({ queryKey: ["email", "log"], queryFn: getCampaignLog });
 
   const campaignMutation = useMutation({
     mutationFn: () => runEmailCampaign(),
+    onSuccess: (r) => {
+      const summary = `Campaign: ${r.sent} sent, ${r.failed} failed (${r.attempted} attempted).`;
+      if (r.failed === 0) toast.success(summary);
+      else toast.info(summary);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Campaign run failed — check the backend is reachable.")),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["email"] }),
   });
 
   const followUpMutation = useMutation({
     mutationFn: () => runFollowUps(),
+    onSuccess: (r) => {
+      const summary = `Follow-ups: ${r.sent} sent, ${r.failed} failed (${r.attempted} attempted).`;
+      if (r.failed === 0) toast.success(summary);
+      else toast.info(summary);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Follow-up run failed — check the backend is reachable.")),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["email"] }),
   });
 

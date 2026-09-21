@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Briefcase, Clock, ExternalLink, Loader2, Sparkles } from "lucide-react";
 
@@ -6,10 +6,13 @@ import PageMeta from "../../components/common/PageMeta";
 import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
 import { Badge } from "@/components/shadcn/badge";
+import { useToast } from "@/context/ToastContext";
+import { serverErrorDetail } from "@/utils/serverError";
 import { getJobStatus, getLinkedInPosts, getLinkedInStatus, postToLinkedInNow } from "@/api";
 
 export default function LinkedInPage() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [topic, setTopic] = useState("");
   const statusQuery = useQuery({ queryKey: ["linkedin", "status"], queryFn: getLinkedInStatus });
@@ -36,8 +39,25 @@ export default function LinkedInPage() {
     onSuccess: (job) => {
       setActiveJobId(job.id);
       setTopic("");
+      toast.info("LinkedIn post started — writing, generating an image, then posting.");
     },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't start the LinkedIn post.")),
   });
+
+  // The pipeline runs for minutes and the page can be scrolled/switched
+  // away meanwhile, so the finish (or failure) gets its own notice rather
+  // than only updating the card. One toast per job id — the polling query
+  // re-delivers the same terminal state on every refetch.
+  const notifiedJobRef = useRef<string | null>(null);
+  useEffect(() => {
+    const job = jobQuery.data;
+    if (!job || notifiedJobRef.current === job.id) return;
+    if (job.status === "completed") toast.success("Posted to LinkedIn successfully.");
+    else if (job.status === "failed") toast.error(job.result || "The LinkedIn post failed.");
+    else if (job.status === "cancelled") toast.info("The LinkedIn post was cancelled.");
+    else return;
+    notifiedJobRef.current = job.id;
+  }, [jobQuery.data, toast]);
 
   const status = statusQuery.data;
   const activeJob = jobQuery.data;

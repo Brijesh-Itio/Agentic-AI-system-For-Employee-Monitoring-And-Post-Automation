@@ -3,6 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlarmClock, Bell, BellRing, Focus, Frown, HeartPulse, PartyPopper, Users, X } from "lucide-react";
 import { Dropdown } from "../ui/dropdown/Dropdown";
 import { getAlerts, getUnreadAlertCount, dismissAlert, type Alert, type AlertType } from "@/api";
+import { useToast } from "@/context/ToastContext";
+import { serverErrorDetail } from "@/utils/serverError";
 
 const REFRESH_INTERVAL_MS = 30_000;
 
@@ -28,6 +30,7 @@ function relativeTime(iso: string): string {
 export default function NotificationDropdown() {
   const [isOpen, setIsOpen] = useState(false);
   const queryClient = useQueryClient();
+  const toast = useToast();
 
   const unreadQuery = useQuery({
     queryKey: ["alerts", "unread-count"],
@@ -46,6 +49,7 @@ export default function NotificationDropdown() {
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
       queryClient.invalidateQueries({ queryKey: ["alerts", "unread-count"] });
     },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't dismiss this notification.")),
   });
 
   const unreadCount = unreadQuery.data ?? 0;

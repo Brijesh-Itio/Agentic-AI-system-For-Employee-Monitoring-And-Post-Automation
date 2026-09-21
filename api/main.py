@@ -12,7 +12,9 @@ from contextlib import asynccontextmanager
 import urllib3.util.connection as urllib3_connection
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from agent.logging_config import setup_logging
 from api.config import settings
@@ -31,6 +33,7 @@ from api.routes import (
     leads,
     linkedin,
     productivity,
+    redirects,
     reports,
     seo,
     sso,
@@ -67,6 +70,25 @@ def _run_server_file_backup_cleanup() -> None:
     removed = purge_old_server_file_backups(retention_days=15)
     if removed:
         logger.info("Server file backup cleanup: removed %d backup row(s) older than 15 days", removed)
+
+
+def _run_scheduled_social_posts() -> None:
+    """Module 41 — auto-publishes every approved social post whose
+    scheduled_for has arrived. Housekeeping-tier, not gated behind
+    SEO_AUTOMATION_ENABLED, same reasoning as the backup cleanup above:
+    this only acts on posts a human already approved and scheduled,
+    it doesn't run the SEO pipeline itself."""
+    from ai.seo.social_scheduler import run_due_scheduled_posts
+
+    run_due_scheduled_posts()
+
+
+def _run_scheduled_blog_posts() -> None:
+    """Module 59 — same as _run_scheduled_social_posts above, for blog
+    posts (ai/seo/blog_scheduler.py)."""
+    from ai.seo.blog_scheduler import run_due_scheduled_posts as run_due_scheduled_blog_posts
+
+    run_due_scheduled_blog_posts()
 
 
 def _run_digest_rollup(period: str) -> None:
@@ -112,6 +134,33 @@ async def lifespan(app: FastAPI):
         id="server_file_backup_cleanup",
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+
+    # Module 41 — checks every 5 minutes for approved social posts whose
+    # scheduled time has arrived and publishes them for real. 5 minutes
+    # is frequent enough that "post at 10:00" actually goes out close to
+    # 10:00, without polling so often it's indistinguishable from a
+    # request-driven check.
+    seo_scheduler.add_job(
+        _run_scheduled_social_posts,
+        trigger="interval",
+        minutes=5,
+        id="scheduled_social_posts",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+    # Module 59 — checks every 1 minute for approved blog posts whose
+    # scheduled_at has arrived and publishes them for real — tighter than
+    # the social-post scheduler above so "publish at 16:59" actually goes
+    # out within a minute of 16:59, not up to 5 minutes late.
+    seo_scheduler.add_job(
+        _run_scheduled_blog_posts,
+        trigger="interval",
+        minutes=1,
+        id="scheduled_blog_posts",
+        replace_existing=True,
+        misfire_grace_time=60,
     )
 
     # Module 36 — weekly (every Monday) and monthly (1st of month) digest
@@ -194,6 +243,19 @@ app.include_router(holidays.router)
 app.include_router(email_templates.router)
 app.include_router(dar_entries.router)
 app.include_router(seo.router)
+app.include_router(redirects.router)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def not_found_or_redirect(request, exc: StarletteHTTPException):
+    """URL Redirection tab — a 404 means no real route matched, so this is
+    where a user-defined 301/302 rule gets its chance before the usual
+    "Not Found" JSON (see api/routes/redirects.py)."""
+    if exc.status_code == 404:
+        response = await redirects.serve_redirect(request)
+        if response is not None:
+            return response
+    return await http_exception_handler(request, exc)
 
 
 @app.get("/")

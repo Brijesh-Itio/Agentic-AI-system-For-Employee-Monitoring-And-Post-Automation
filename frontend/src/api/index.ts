@@ -1244,7 +1244,7 @@ export interface SheetsStatus {
 // (the two interactive "Export to Sheets" dashboards). kind defaults to
 // "main" everywhere below so existing callers that never cared about
 // the split keep working unchanged.
-export type SheetsKind = "main" | "gsc" | "ga4" | "overview";
+export type SheetsKind = "main" | "gsc" | "ga4" | "overview" | "social" | "blog";
 
 // Creates the given kind's spreadsheet on first call (idempotent after
 // that), sharing it with SEO_SHEETS_SHARE_EMAIL if set in .env.
@@ -1290,6 +1290,9 @@ export interface SocialPost {
   // means the single default account from .env. Ignored for every other
   // platform.
   facebook_account_id: number | null;
+  // Module 41 — set means "auto-publish at this time once approved";
+  // null means manual-publish-only.
+  scheduled_for: string | null;
 }
 
 export const generateSocialPosts = (payload: {
@@ -1301,6 +1304,51 @@ export const generateSocialPosts = (payload: {
   platforms: SocialPlatform[];
   facebook_account_id?: number | null;
 }) => api.post<SocialPost[]>("/api/seo/social/generate", payload, { timeout: 120_000 }).then((r) => r.data);
+
+export const scheduleSocialPost = (postId: number, scheduledFor: string | null) =>
+  api.post<SocialPost>(`/api/seo/social/${postId}/schedule`, { scheduled_for: scheduledFor }).then((r) => r.data);
+
+export interface SocialBulkActionResult {
+  post_id: number;
+  ok: boolean;
+  detail: string;
+}
+
+export const bulkApproveSocialPosts = (postIds: number[]) =>
+  api.post<SocialBulkActionResult[]>("/api/seo/social/bulk-approve", { post_ids: postIds }).then((r) => r.data);
+
+export const bulkPublishSocialPosts = (postIds: number[]) =>
+  api
+    .post<SocialBulkActionResult[]>("/api/seo/social/bulk-publish", { post_ids: postIds }, { timeout: 180_000 })
+    .then((r) => r.data);
+
+export const bulkGenerateSocialPosts = (payload: {
+  site_id: number;
+  topics: string[];
+  platforms: SocialPlatform[];
+  image_url?: string;
+  facebook_account_id?: number | null;
+}) => api.post<SocialPost[]>("/api/seo/social/bulk-generate", payload, { timeout: 0 }).then((r) => r.data);
+
+export const generateSocialCalendar = (payload: {
+  site_id: number;
+  topics: string[];
+  platforms: SocialPlatform[];
+  start_date: string;
+  days: number;
+  post_time: string;
+  image_url?: string;
+  facebook_account_id?: number | null;
+}) => api.post<SocialPost[]>("/api/seo/social/generate-calendar", payload, { timeout: 0 }).then((r) => r.data);
+
+export interface SocialExportResult {
+  ok: boolean;
+  detail: string;
+  sheet_url: string | null;
+}
+
+export const exportSocialPostsToSheet = (siteId: number) =>
+  api.post<SocialExportResult>("/api/seo/social/export-to-sheet", { site_id: siteId }).then((r) => r.data);
 
 export interface FacebookAccount {
   id: number;
@@ -1569,6 +1617,36 @@ export interface WebsiteTraffic {
 export const getWebsiteTraffic = (siteId: number, website: string) =>
   api
     .post<WebsiteTraffic>("/api/seo/backlinks/website-traffic", { site_id: siteId, website }, { timeout: 45_000 })
+    .then((r) => r.data);
+
+// semrush-seo3's /competitor.php — returned a provider-side 401 for every
+// domain when first tested; the provider fixed it and it was re-verified
+// live. bounce_rate is already a percentage (30.7 = 30.7%), time_on_site is
+// seconds, and share/traffic_sources values are 0-1 fractions.
+export interface CompetitorAnalysis {
+  domain: string;
+  title: string;
+  description: string;
+  global_rank: number | null;
+  country_rank: number | null;
+  registration_time: string;
+  expiration_time: string;
+  snapshot_date: string;
+  engagement: {
+    total_visits: number | null;
+    time_on_site: number | null;
+    pages_per_visit: number | null;
+    bounce_rate: number | null;
+  };
+  monthly_visits: Record<string, number>;
+  traffic_sources: Record<string, number>;
+  top_countries: { country_code: string; share: number | null }[];
+  top_keywords: { keyword: string; search_volume: number | null; estimated_value: number | null; cpc: number | null }[];
+}
+
+export const getCompetitorAnalysis = (siteId: number, website: string) =>
+  api
+    .post<CompetitorAnalysis>("/api/seo/backlinks/competitor-analysis", { site_id: siteId, website }, { timeout: 60_000 })
     .then((r) => r.data);
 
 // ── Module 32 — PageSpeed resource audit + Indexing Status ──
@@ -2072,6 +2150,7 @@ export interface BlogPost {
   error: string | null;
   created_at: string | null;
   published_at: string | null;
+  scheduled_at: string | null;
 }
 
 // A real, full-length post via the slower/better model (module 25's
@@ -2110,6 +2189,52 @@ export const publishBlogPost = (postId: number) =>
 // open WordPress/Webflow's own admin to hit Publish there.
 export const goLiveBlogPost = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/go-live`, {}, { timeout: 30_000 }).then((r) => r.data);
+
+// Module 59 — bulk generation, content-calendar generation, scheduling,
+// and bulk approve/publish for blog posts, mirroring the equivalent
+// social-post functions (module 41) directly above.
+export const scheduleBlogPost = (postId: number, scheduledAt: string | null) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/schedule`, { scheduled_at: scheduledAt }).then((r) => r.data);
+
+export interface BlogBulkActionResult {
+  post_id: number;
+  ok: boolean;
+  detail: string;
+}
+
+export const bulkApproveBlogPosts = (postIds: number[]) =>
+  api.post<BlogBulkActionResult[]>("/api/seo/blog/bulk-approve", { post_ids: postIds }).then((r) => r.data);
+
+export const bulkPublishBlogPosts = (postIds: number[]) =>
+  api
+    .post<BlogBulkActionResult[]>("/api/seo/blog/bulk-publish", { post_ids: postIds }, { timeout: 0 })
+    .then((r) => r.data);
+
+export const bulkGenerateBlogPosts = (payload: {
+  site_id: number;
+  topics: string[];
+  min_words?: number;
+  generate_image?: boolean;
+}) => api.post<BlogPost[]>("/api/seo/blog/bulk-generate", payload, { timeout: 0 }).then((r) => r.data);
+
+export const generateBlogCalendar = (payload: {
+  site_id: number;
+  topics: string[];
+  start_date: string;
+  days: number;
+  post_time: string;
+  min_words?: number;
+  generate_image?: boolean;
+}) => api.post<BlogPost[]>("/api/seo/blog/generate-calendar", payload, { timeout: 0 }).then((r) => r.data);
+
+export interface BlogExportResult {
+  ok: boolean;
+  detail: string;
+  sheet_url: string | null;
+}
+
+export const exportBlogPostsToSheet = (siteId: number) =>
+  api.post<BlogExportResult>("/api/seo/blog/export-to-sheet", { site_id: siteId }).then((r) => r.data);
 
 // Generates a featured image (via the app's image provider factory),
 // converts it to WebP, uploads it to the site's own server (Server
@@ -2260,3 +2385,66 @@ export const getContentBackups = (siteId: number, cmsPostId?: string) =>
 
 export const getContentBackup = (backupId: number) =>
   api.get<ContentBackup>(`/api/seo/webp-convert/backups/${backupId}`).then((r) => r.data);
+
+// ── URL Redirection (api/routes/redirects.py) ──
+
+export type RedirectStatusCode = 301 | 302;
+
+// "served" = this API answers the URL, "synced" = written into the site's own
+// .htaccess and verified live, "pending" = not applied yet, "failed" = applying
+// was rolled back, "unmanaged" = nothing enforces it yet.
+export type RedirectSyncStatus = "served" | "synced" | "pending" | "failed" | "unmanaged";
+
+export interface UrlRedirect {
+  id: number;
+  source_url: string;
+  source_host: string | null;
+  source_path: string;
+  target_url: string;
+  status_code: RedirectStatusCode;
+  hit_count: number;
+  last_hit_at: string | null;
+  created_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  live_url: string;
+  sync_status: RedirectSyncStatus;
+  sync_message: string;
+  synced_at: string | null;
+  apply_site: string | null;
+}
+
+export interface RedirectInput {
+  source_url: string;
+  target_url: string;
+  status_code: RedirectStatusCode;
+}
+
+export interface RedirectTestResult {
+  ok: boolean;
+  probed_url: string;
+  status_code: number | null;
+  location: string | null;
+  message: string;
+}
+
+export const getRedirects = () => api.get<UrlRedirect[]>("/api/redirects").then((r) => r.data);
+
+// Saving/removing a rule for a real site writes its .htaccess over FTP/SFTP and
+// verifies it with live requests — allow well beyond the default 15s timeout.
+const REDIRECT_SYNC_TIMEOUT_MS = 120_000;
+
+export const createRedirect = (payload: RedirectInput) =>
+  api.post<UrlRedirect>("/api/redirects", payload, { timeout: REDIRECT_SYNC_TIMEOUT_MS }).then((r) => r.data);
+
+export const updateRedirect = (id: number, payload: Partial<RedirectInput>) =>
+  api.put<UrlRedirect>(`/api/redirects/${id}`, payload, { timeout: REDIRECT_SYNC_TIMEOUT_MS }).then((r) => r.data);
+
+export const deleteRedirect = (id: number) =>
+  api.delete(`/api/redirects/${id}`, { timeout: REDIRECT_SYNC_TIMEOUT_MS });
+
+export const applyRedirect = (id: number) =>
+  api.post<UrlRedirect>(`/api/redirects/${id}/apply`, null, { timeout: REDIRECT_SYNC_TIMEOUT_MS }).then((r) => r.data);
+
+export const testRedirect = (id: number) =>
+  api.post<RedirectTestResult>(`/api/redirects/${id}/test`, null, { timeout: 20_000 }).then((r) => r.data);

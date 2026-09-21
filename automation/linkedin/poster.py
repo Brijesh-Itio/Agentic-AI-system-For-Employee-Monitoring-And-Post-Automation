@@ -177,6 +177,33 @@ def _wait_for_compose_frame(page: Page, timeout_ms: int):
     raise PlaywrightTimeoutError(f"compose iframe (sharing/compose) never attached within {timeout_ms}ms")
 
 
+def _open_composer(page: Page, timeout_ms: int):
+    """Click "Start a post" and wait for the compose iframe to attach,
+    retrying the click itself (not just the wait) up to 3 total attempts.
+    Fixed 2026-09-18: a scheduled/unattended publish hit a real, one-off
+    case where the click didn't open the composer at all (confirmed by a
+    failure screenshot showing the untouched feed, "Start a post" bar
+    still idle) — re-running the identical click immediately afterward
+    worked fine, so this was LinkedIn being momentarily slow/unresponsive
+    to that one click, not a broken selector. A scheduled post has no
+    human present to notice and click "Retry publish", so it needs to
+    absorb this kind of transient miss on its own rather than fail the
+    whole run over what a second click would have fixed. Safe to retry
+    the click itself: nothing has been typed or attached yet at this
+    point, so a retry can't produce a duplicate post."""
+    last_error: Optional[PlaywrightTimeoutError] = None
+    for attempt in range(1, 4):
+        try:
+            page.get_by_text("Start a post", exact=False).first.click(timeout=timeout_ms)
+            return _wait_for_compose_frame(page, timeout_ms)
+        except PlaywrightTimeoutError as exc:
+            last_error = exc
+            logger.warning(
+                "LinkedIn poster: compose frame didn't attach on attempt %d/3 (%s) — retrying", attempt, exc
+            )
+    raise last_error
+
+
 def _extract_post_id(page: Page) -> Optional[str]:
     """Best-effort: LinkedIn doesn't redirect to the new post's URL, so
     this reads the most recent activity URN from the feed's own DOM
@@ -243,8 +270,7 @@ def post_to_linkedin(content: str, topic: str, image_path: Optional[Path] = None
                 # class hashes that change on every deploy (verified live via
                 # DOM inspection — the old share-box-feed-entry__trigger class
                 # no longer exists) — its visible text is the stable target.
-                page.get_by_text("Start a post", exact=False).first.click(timeout=NAV_TIMEOUT_MS)
-
+                #
                 # LinkedIn now renders the whole composer inside an iframe at
                 # linkedin.com/sharing/compose (verified live: page.locator
                 # against the top-level page found 0 of every editor/button
@@ -254,7 +280,9 @@ def post_to_linkedin(content: str, topic: str, image_path: Optional[Path] = None
                 # and times out — which is exactly what was happening before
                 # this fix (Locator.wait_for: Timeout ... exceeded, waiting for
                 # a selector that only ever existed one frame away).
-                compose_frame = _wait_for_compose_frame(page, NAV_TIMEOUT_MS)
+                # _open_composer retries the click itself, not just the wait —
+                # see its own docstring for why that matters for unattended runs.
+                compose_frame = _open_composer(page, NAV_TIMEOUT_MS)
 
                 # Image attach MUST happen before typing, not after: verified
                 # live that clicking "Add media" swaps the whole composer for a

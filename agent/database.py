@@ -354,6 +354,25 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 
+-- URL Redirection manager — 301/302 rules served by the API's 404 fallback
+-- (api/routes/redirects.py). source_host NULL = matches any Host header;
+-- source_path is stored normalised (leading "/", no trailing "/").
+CREATE TABLE IF NOT EXISTS url_redirects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_url TEXT NOT NULL,
+    source_host TEXT,
+    source_path TEXT NOT NULL,
+    target_url TEXT NOT NULL,
+    status_code INTEGER NOT NULL CHECK (status_code IN (301, 302)),
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    last_hit_at DATETIME,
+    created_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_url_redirects_source
+    ON url_redirects(COALESCE(source_host, ''), source_path);
+
 -- Module 7 extension — department-custom DAR templates & structured entries
 -- (see DEVELOPMENT.md, "Module 7 extension"). Purely additive: dar_reports/
 -- the narrative generator above are untouched by any of this.
@@ -1075,6 +1094,15 @@ _SEO_DIGEST_ROLLUPS_EXTRA_COLUMNS = {
 
 # Semrush Rank added after seo_semrush_metrics already shipped — same
 # additive-column convention as _SEO_SITES_EXTRA_COLUMNS above.
+# URL Redirection — result of writing a rule into the target site's own
+# .htaccess (api/routes/redirects.py). NULL = never attempted; the API works
+# out "served by this API" / "pending" / "unmanaged" from the rule itself.
+_URL_REDIRECTS_EXTRA_COLUMNS = {
+    "sync_status": "TEXT",
+    "sync_message": "TEXT",
+    "synced_at": "DATETIME",
+}
+
 _SEO_SEMRUSH_METRICS_EXTRA_COLUMNS = {
     "semrush_rank": "INTEGER",
 }
@@ -1090,6 +1118,15 @@ _SEO_SOCIAL_POSTS_EXTRA_COLUMNS = {
     # publishes through when more than one is configured. NULL = use the
     # single default account from .env (see that table's own comment).
     "facebook_account_id": "INTEGER",
+    # Module 41 — when set AND status='approved', the scheduler job
+    # (ai/seo/social_scheduler.py, registered in api/main.py) auto-
+    # publishes this post once scheduled_for arrives. NULL means no
+    # schedule — same manual-publish-only behaviour as before this
+    # module. Stored as "YYYY-MM-DD HH:MM:SS" (space-separated, via
+    # datetime.isoformat(sep=" ")) specifically so plain string
+    # comparison against the same format sorts/compares correctly for
+    # the "is it due yet" query — never format this column differently.
+    "scheduled_for": "DATETIME",
 }
 
 # Module 36 — blog posts shipped without a featured-image field; added
@@ -1105,6 +1142,16 @@ _SEO_BLOG_POSTS_EXTRA_COLUMNS = {
     "slug": "TEXT",
     "tags": "TEXT",
     "categories": "TEXT",
+    # Module 59 — same scheduling convention as seo_social_posts.
+    # scheduled_for (module 41): when set AND status='approved', the
+    # scheduler job (ai/seo/blog_scheduler.py, registered in api/main.py)
+    # auto-publishes this post once scheduled_at arrives. NULL means no
+    # schedule — manual-publish-only, same as before this module. Stored
+    # as "YYYY-MM-DD HH:MM:SS" (space-separated) for the same reason
+    # documented on seo_social_posts.scheduled_for — plain string
+    # comparison against that exact format is what the "is it due yet"
+    # query relies on.
+    "scheduled_at": "DATETIME",
 }
 
 
@@ -1178,6 +1225,7 @@ def init_db() -> None:
             _ensure_extra_columns(conn, "dar_entries", _DAR_ENTRIES_EXTRA_COLUMNS)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_dar_entries_task ON dar_entries(task_id)")
             _ensure_extra_columns(conn, "seo_sites", _SEO_SITES_EXTRA_COLUMNS)
+            _ensure_extra_columns(conn, "url_redirects", _URL_REDIRECTS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_technical_issues", _SEO_TECHNICAL_ISSUES_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_semrush_metrics", _SEO_SEMRUSH_METRICS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_social_posts", _SEO_SOCIAL_POSTS_EXTRA_COLUMNS)
@@ -2755,6 +2803,30 @@ def delete_facebook_account(account_id: int) -> bool:
         return cur.rowcount > 0
 
 
+# ── seo_social_posts scheduling/bulk actions — module 41 ──
+
+def set_social_post_schedule(post_id: int, scheduled_for: Optional[str]) -> bool:
+    """scheduled_for must already be formatted "YYYY-MM-DD HH:MM:SS"
+    (space-separated) — see _SEO_SOCIAL_POSTS_EXTRA_COLUMNS's comment on
+    why the format has to match list_due_scheduled_social_posts' query
+    exactly. None clears an existing schedule."""
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_social_posts SET scheduled_for = ? WHERE id = ?", (scheduled_for, post_id))
+        return cur.rowcount > 0
+
+
+def list_due_scheduled_social_posts():
+    """Every approved post whose scheduled_for has arrived — what the
+    scheduler job (ai/seo/social_scheduler.py) auto-publishes."""
+    conn = get_connection()
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    return conn.execute(
+        "SELECT * FROM seo_social_posts WHERE status = 'approved' AND scheduled_for IS NOT NULL "
+        "AND scheduled_for <= ? ORDER BY scheduled_for ASC",
+        (now,),
+    ).fetchall()
+
+
 # ── seo_backlink_mentions — module 31 ──
 
 def upsert_backlink_mentions(site_id: int, mentions: list) -> int:
@@ -3020,6 +3092,39 @@ def mark_blog_post_failed(post_id: int, error: str) -> None:
 def set_blog_post_image(post_id: int, image_url: str) -> None:
     with write_cursor() as cur:
         cur.execute("UPDATE seo_blog_posts SET image_url = ? WHERE id = ?", (image_url, post_id))
+
+
+# ── seo_blog_posts scheduling — module 59, same shape as seo_social_
+# posts scheduling/bulk actions (module 41) above ──
+
+def set_blog_post_schedule(post_id: int, scheduled_at: Optional[str]) -> bool:
+    """scheduled_at must already be formatted "YYYY-MM-DD HH:MM:SS"
+    (space-separated) — see _SEO_BLOG_POSTS_EXTRA_COLUMNS's comment on
+    why the format has to match list_due_scheduled_blog_posts' query
+    exactly. None clears an existing schedule."""
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET scheduled_at = ? WHERE id = ?", (scheduled_at, post_id))
+        return cur.rowcount > 0
+
+
+def list_due_scheduled_blog_posts():
+    """Every due post the scheduler job (ai/seo/blog_scheduler.py) needs
+    to act on — two different starting states, both real: 'approved'
+    (never published — the scheduler creates the CMS draft AND takes it
+    live) and 'published' (already sitting as a CMS draft from an
+    earlier manual Publish — a human then scheduled just the go-live
+    moment for it, so the scheduler only needs the go-live step, not a
+    second CMS post). Live-verified this second case was silently
+    dropped before this fix: scheduling an already-published post's
+    go-live time did nothing, because this query only ever matched
+    'approved'."""
+    conn = get_connection()
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    return conn.execute(
+        "SELECT * FROM seo_blog_posts WHERE status IN ('approved', 'published') AND scheduled_at IS NOT NULL "
+        "AND scheduled_at <= ? ORDER BY scheduled_at ASC",
+        (now,),
+    ).fetchall()
 
 
 # ── seo_meta_rewrite_queue — CTR opportunity detection ──

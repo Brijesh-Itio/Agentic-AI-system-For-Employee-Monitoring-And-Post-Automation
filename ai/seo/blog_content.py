@@ -13,6 +13,7 @@ api/routes/seo.py's /blog/generate — checks a real, complete document
 instead of one that would always fail its own H1-count rule.
 """
 import logging
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -43,7 +44,10 @@ def generate_blog_post(
         "TITLE: <the post title, no HTML>\n"
         "EXCERPT: <a 1-2 sentence summary, no HTML>\n"
         "CONTENT: <the full post body as HTML — exactly one <h1> matching the title, "
-        "3 or more <h2> sections, <p> paragraphs, no <html>/<body> wrapper tags>"
+        "3 or more <h2> sections, <p> paragraphs, no <html>/<body> wrapper tags. "
+        "Use real HTML tags for ALL formatting — <strong> for bold, <em> for italics, "
+        "<ul><li> for lists. Never use markdown syntax like **bold**, *italic*, or "
+        "\"- item\" bullet dashes anywhere in the output.>"
     )
     result = get_provider(task="blog_post", site_id=site_id).generate(prompt, fast=False)
     if not result.ok:
@@ -55,7 +59,33 @@ def generate_blog_post(
         logger.warning("Blog post generation returned unparseable output for topic %r: %r", topic, result.text[:300])
         return None
 
-    return parsed
+    return BlogPostDraft(
+        title=_clean_markdown_artifacts(parsed.title),
+        excerpt=_clean_markdown_artifacts(parsed.excerpt),
+        content_html=_clean_markdown_artifacts(parsed.content_html),
+    )
+
+
+def _clean_markdown_artifacts(text: str) -> str:
+    """The prompt above explicitly asks for real HTML tags, not
+    markdown — but LLMs slip into markdown syntax anyway even when told
+    not to (verified live: published posts showing literal "**Grammarly**"
+    instead of bold text). This is a defensive normalization pass, not a
+    general markdown parser — the content is already real HTML for
+    structure (h1/h2/p, per the prompt), so this only converts the
+    specific inline-emphasis patterns actually observed, leaving any
+    genuine HTML already present untouched."""
+    # **bold** / __bold__ -> <strong>bold</strong> (checked before single
+    # */_ so "**x**" doesn't first get mangled by the single-char rules).
+    text = re.sub(r"\*\*(\S.*?\S|\S)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"__(\S.*?\S|\S)__", r"<strong>\1</strong>", text)
+    # *italic* / _italic_ -> <em>italic</em>. Requires a non-space right
+    # after the opening marker so it doesn't fire on a stray "*" used as
+    # a literal asterisk (e.g. a footnote marker) or on already-consumed
+    # ** pairs (those are gone by this point).
+    text = re.sub(r"\*(\S.*?\S|\S)\*", r"<em>\1</em>", text)
+    text = re.sub(r"(?<![a-zA-Z0-9])_(\S.*?\S|\S)_(?![a-zA-Z0-9])", r"<em>\1</em>", text)
+    return text
 
 
 def _parse_sections(text: str) -> Optional[BlogPostDraft]:

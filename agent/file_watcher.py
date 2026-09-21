@@ -34,7 +34,7 @@ _DEBOUNCE_SECONDS = 5.0
 
 class _FileActivityHandler(FileSystemEventHandler):
     def __init__(self, watched_root: str, user_id: str):
-        self.watched_root = watched_root
+        self.watched_root = watched_root    
         self.user_id = user_id
         self._last_logged: dict[str, float] = {}
 

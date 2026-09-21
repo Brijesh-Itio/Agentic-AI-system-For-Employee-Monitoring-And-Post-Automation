@@ -52,13 +52,17 @@ TIMEOUT_SECONDS = 30
 # be auto-created by this app — each is adopted the same way, just
 # against its own kind. Every per-spreadsheet setting below is keyed by
 # kind rather than being a single flat constant.
-SPREADSHEET_KINDS = ("main", "gsc", "ga4", "overview")
+SPREADSHEET_KINDS = ("main", "gsc", "ga4", "overview", "social", "blog")
 
 SPREADSHEET_ID_SETTING_KEYS = {
     "main": "seo_sheets_spreadsheet_id",
     "gsc": "seo_sheets_gsc_spreadsheet_id",
     "ga4": "seo_sheets_ga4_spreadsheet_id",
     "overview": "seo_sheets_overview_spreadsheet_id",
+    # Module 41 — the Social tab's own "Export to Sheet" button.
+    "social": "seo_sheets_social_spreadsheet_id",
+    # Module 59 — the Blog tab's own "Export to Sheet" button.
+    "blog": "seo_sheets_blog_spreadsheet_id",
 }
 # Comma-joined tab names already confirmed present in the spreadsheet —
 # lets get_or_create_spreadsheet skip the extra spreadsheets.get/
@@ -70,12 +74,16 @@ SPREADSHEET_TABS_ENSURED_SETTING_KEYS = {
     "gsc": "seo_sheets_gsc_tabs_ensured",
     "ga4": "seo_sheets_ga4_tabs_ensured",
     "overview": "seo_sheets_overview_tabs_ensured",
+    "social": "seo_sheets_social_tabs_ensured",
+    "blog": "seo_sheets_blog_tabs_ensured",
 }
 SPREADSHEET_TITLES = {
     "main": "WorkPulse AI — SEO Command Centre",
     "gsc": "WorkPulse AI — Search Console",
     "ga4": "WorkPulse AI — Analytics (GA4)",
     "overview": "WorkPulse AI — Overview Report",
+    "social": "WorkPulse AI — Social Media Calendar",
+    "blog": "WorkPulse AI — Blog Calendar",
 }
 # The tab a bare "open spreadsheet" link should deep-link into for each
 # kind — see _sheet_open_url in api/routes/seo.py.
@@ -84,6 +92,8 @@ SPREADSHEET_DEFAULT_TAB = {
     "gsc": "GSC Queries",
     "ga4": "GA4 Pages",
     "overview": "Overview Top Queries",
+    "social": "Social Posts",
+    "blog": "Blog Posts",
 }
 
 _MAIN_TABS = [
@@ -153,12 +163,39 @@ _GA4_TABS = [
     "GA4 Events",
 ]
 
-TABS_BY_KIND = {"main": _MAIN_TABS, "gsc": _GSC_TABS, "ga4": _GA4_TABS, "overview": _OVERVIEW_TABS}
+# Module 41 — the Social tab's own "Export to Sheet" button: "Social
+# Posts" is one flat snapshot of every generated post (title/excerpt,
+# platform, status, schedule, reference/source URL) for a site; the four
+# per-platform tabs are the exact same rows, split out one tab per
+# platform (same shape as GSC Queries/Pages/Countries/Devices being
+# separate tabs over the same underlying GSC data) so a user can jump
+# straight to e.g. "LinkedIn" instead of scanning the Platform column in
+# the combined tab. All overwritten on each export, never appended — a
+# re-export always reflects current post state (an approval/publish/
+# reschedule since the last export), not a stale copy.
+_SOCIAL_TABS = ["Social Posts", "Facebook", "Instagram", "LinkedIn", "Twitter"]
+
+# Module 59 — the Blog tab's own "Export to Sheet" button: one flat
+# snapshot of every generated blog post (title, status, category, tags,
+# slug, scheduled time, and its CMS/live link once published) — same
+# overwrite-on-export convention as _SOCIAL_TABS above, its own dedicated
+# spreadsheet since a blog post's fields (category/tags/slug/CMS link)
+# don't map onto the social tab's shape.
+_BLOG_TABS = ["Blog Posts"]
+
+TABS_BY_KIND = {
+    "main": _MAIN_TABS,
+    "gsc": _GSC_TABS,
+    "ga4": _GA4_TABS,
+    "overview": _OVERVIEW_TABS,
+    "social": _SOCIAL_TABS,
+    "blog": _BLOG_TABS,
+}
 # Every tab name across all kinds, flattened — used by
 # _ensure_tab_headers/_TAB_KIND below, which don't care which kind a tab
 # belongs to, just whether it's present in the spreadsheet they're
 # looking at.
-TABS = _MAIN_TABS + _GSC_TABS + _GA4_TABS + _OVERVIEW_TABS
+TABS = _MAIN_TABS + _GSC_TABS + _GA4_TABS + _OVERVIEW_TABS + _SOCIAL_TABS + _BLOG_TABS
 # Reverse lookup so append_rows/overwrite_rows/write_chart_tab can take
 # just a tab name (same call signature every existing caller already
 # uses) and resolve which spreadsheet it actually belongs in, instead of
@@ -225,7 +262,46 @@ TAB_HEADERS = {
     "GA4 Countries": ["Country", "Sessions", "Bounce Rate", "Conversions"],
     "GA4 Devices": ["Device", "Sessions", "Bounce Rate", "Conversions"],
     "GA4 Events": ["Event Name", "Event Count", "Total Users", "Event Count Per Active User", "Total Revenue"],
+    "Social Posts": [
+        "Title",
+        "Platform",
+        "Content",
+        "Status",
+        "Scheduled Time",
+        "Posted At",
+        "Reference URL",
+        "External Post ID",
+        "Created At",
+    ],
 }
+# The four per-platform tabs (Facebook/Instagram/LinkedIn/Twitter) share
+# one header shape — no Platform column, since the tab itself says which
+# platform this is.
+_SOCIAL_PLATFORM_TAB_HEADER = [
+    "Title",
+    "Content",
+    "Status",
+    "Scheduled Time",
+    "Posted At",
+    "Reference URL",
+    "External Post ID",
+    "Created At",
+]
+for _platform_tab in ("Facebook", "Instagram", "LinkedIn", "Twitter"):
+    TAB_HEADERS[_platform_tab] = _SOCIAL_PLATFORM_TAB_HEADER
+
+TAB_HEADERS["Blog Posts"] = [
+    "Title",
+    "Status",
+    "Category",
+    "Tags",
+    "Author",
+    "Slug",
+    "Primary Keyword",
+    "Scheduled Time",
+    "Link (CMS draft / live once published)",
+    "Created At",
+]
 
 
 def _headers(token: str) -> dict:
@@ -647,6 +723,72 @@ def overwrite_rows(sheet_name: str, header: list, rows: list) -> bool:
         return True
     except Exception:
         logger.exception("Failed to overwrite %r with %d row(s)", sheet_name, len(rows))
+        return False
+
+
+def format_tab_top_aligned(sheet_name: str) -> bool:
+    """Sets vertical alignment to TOP for every cell in this tab. Fixed
+    2026-09-18 for the Social Posts tab specifically: its Content column
+    holds real multi-paragraph post text, which makes Google Sheets
+    auto-expand that row far past one line — under Sheets' default
+    bottom alignment, every OTHER single-line value in that same row
+    (Platform, Status, dates) sinks to the very bottom of the tall row,
+    effectively invisible without scrolling inside the cell (verified
+    live from a real exported sheet — "linkedin" was genuinely there,
+    just many pixels below the visible area). Top-aligning puts every
+    value right next to the first line of Content instead, where it's
+    actually readable at a glance. Never raises — returns False on any
+    failure, same convention as overwrite_rows/append_rows; a formatting
+    failure never undoes the already-written data."""
+    kind = _kind_for_tab(sheet_name)
+    spreadsheet_id = database.get_app_setting(SPREADSHEET_ID_SETTING_KEYS[kind])
+    if not spreadsheet_id:
+        return False
+
+    token = get_access_token(SCOPES)
+    if token is None:
+        return False
+
+    try:
+        meta_response = requests.get(f"{SHEETS_BASE_URL}/{spreadsheet_id}", headers=_headers(token), timeout=TIMEOUT_SECONDS)
+        meta_response.raise_for_status()
+        meta = meta_response.json()
+    except Exception:
+        logger.exception("format_tab_top_aligned: could not read spreadsheet %s metadata", spreadsheet_id)
+        return False
+
+    sheet_id = next(
+        (s["properties"]["sheetId"] for s in meta.get("sheets", []) if s["properties"]["title"] == sheet_name), None
+    )
+    if sheet_id is None:
+        logger.warning("format_tab_top_aligned: tab %r not found in spreadsheet %s", sheet_name, spreadsheet_id)
+        return False
+
+    def _do_format():
+        response = requests.post(
+            f"{SHEETS_BASE_URL}/{spreadsheet_id}:batchUpdate",
+            json={
+                "requests": [
+                    {
+                        "repeatCell": {
+                            "range": {"sheetId": sheet_id},
+                            "cell": {"userEnteredFormat": {"verticalAlignment": "TOP"}},
+                            "fields": "userEnteredFormat.verticalAlignment",
+                        }
+                    }
+                ]
+            },
+            headers=_headers(token),
+            timeout=TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return response
+
+    try:
+        with_retry(_do_format, max_attempts=3, retry_on=(requests.RequestException,))
+        return True
+    except Exception:
+        logger.exception("format_tab_top_aligned: batchUpdate failed for %r", sheet_name)
         return False
 
 

@@ -923,6 +923,49 @@ class WebsiteTrafficOut(BaseModel):
     sample_keywords: list[SampleKeywordOut] = []
 
 
+class CompetitorAnalysisRequest(BaseModel):
+    site_id: int
+    website: str
+
+
+# Every provider-sourced number is Optional[float], never int — the same
+# semrush-seo3 host returned a fractional value (dr: 0.3) that crashed an
+# `int` field's response validation earlier in this integration.
+class CompetitorEngagementOut(BaseModel):
+    total_visits: Optional[float] = None
+    time_on_site: Optional[float] = None
+    pages_per_visit: Optional[float] = None
+    bounce_rate: Optional[float] = None
+
+
+class CompetitorCountryOut(BaseModel):
+    country_code: str
+    share: Optional[float] = None
+
+
+class CompetitorKeywordOut(BaseModel):
+    keyword: str
+    search_volume: Optional[float] = None
+    estimated_value: Optional[float] = None
+    cpc: Optional[float] = None
+
+
+class CompetitorAnalysisOut(BaseModel):
+    domain: str
+    title: str = ""
+    description: str = ""
+    global_rank: Optional[float] = None
+    country_rank: Optional[float] = None
+    registration_time: str = ""
+    expiration_time: str = ""
+    snapshot_date: str = ""
+    engagement: CompetitorEngagementOut = CompetitorEngagementOut()
+    monthly_visits: dict[str, float] = {}
+    traffic_sources: dict[str, float] = {}
+    top_countries: list[CompetitorCountryOut] = []
+    top_keywords: list[CompetitorKeywordOut] = []
+
+
 class SemrushMetricsOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -1320,6 +1363,61 @@ class SocialPostOut(BaseModel):
     created_at: Optional[datetime] = None
     posted_at: Optional[datetime] = None
     facebook_account_id: Optional[int] = None
+    # Module 41 — set means "auto-publish at this time once approved";
+    # None means manual-publish-only (unchanged pre-module-41 behaviour).
+    scheduled_for: Optional[datetime] = None
+
+
+class SocialScheduleRequest(BaseModel):
+    # None clears an existing schedule, going back to manual-publish-only.
+    scheduled_for: Optional[datetime] = None
+
+
+class SocialBulkIdsRequest(BaseModel):
+    post_ids: list[int]
+
+
+class SocialBulkActionResultOut(BaseModel):
+    post_id: int
+    ok: bool
+    detail: str
+
+
+class SocialBulkGenerateRequest(BaseModel):
+    site_id: int
+    # One entry per line in the frontend's textarea — each becomes its
+    # own set of draft posts (one per selected platform), same as
+    # calling /social/generate once per topic but in a single request.
+    topics: list[str]
+    platforms: list[SocialPlatform] = ["linkedin"]
+    image_url: Optional[str] = None
+    facebook_account_id: Optional[int] = None
+
+
+class SocialCalendarGenerateRequest(BaseModel):
+    site_id: int
+    # Cycles through these if there are more calendar days than topics —
+    # a real, if repetitive, way to fill 30 days from a handful of topics
+    # rather than requiring one topic per day up front.
+    topics: list[str]
+    platforms: list[SocialPlatform] = ["linkedin"]
+    start_date: date_type
+    days: int = 30
+    # "HH:MM", the local time of day each day's post(s) get scheduled
+    # for — one fixed time per day, not a per-platform/per-post spread.
+    post_time: str = "10:00"
+    image_url: Optional[str] = None
+    facebook_account_id: Optional[int] = None
+
+
+class SocialExportRequest(BaseModel):
+    site_id: int
+
+
+class SocialExportResult(BaseModel):
+    ok: bool
+    detail: str
+    sheet_url: Optional[str] = None
 
 
 class FacebookAccountCreate(BaseModel):
@@ -1783,6 +1881,62 @@ class BlogPostOut(BaseModel):
     error: Optional[str] = None
     created_at: Optional[datetime] = None
     published_at: Optional[datetime] = None
+    scheduled_at: Optional[datetime] = None
+
+
+# Module 59 — bulk generation, content-calendar generation, scheduling,
+# and bulk approve/publish for blog posts, the same shapes as the
+# equivalent seo_social_posts request/response models (module 41)
+# directly above their own routes in api/routes/seo.py.
+class BlogScheduleRequest(BaseModel):
+    # None clears an existing schedule, going back to manual-publish-only.
+    scheduled_at: Optional[datetime] = None
+
+
+class BlogBulkIdsRequest(BaseModel):
+    post_ids: list[int]
+
+
+class BlogBulkActionResultOut(BaseModel):
+    post_id: int
+    ok: bool
+    detail: str
+
+
+class BlogBulkGenerateRequest(BaseModel):
+    site_id: int
+    # One entry per line in the frontend's textarea — each becomes its
+    # own full draft post (title/excerpt/content + structure check),
+    # same as calling /blog/generate once per topic but in one request.
+    topics: list[str]
+    min_words: int = 600
+    # A real AI-generated featured image for every post, not just text —
+    # slower per post but matches /blog/{id}/publish's own auto-image
+    # behavior instead of leaving every bulk post imageless until
+    # reviewed individually.
+    generate_image: bool = True
+
+
+class BlogCalendarGenerateRequest(BaseModel):
+    site_id: int
+    # Cycles through these if there are more calendar days than topics.
+    topics: list[str]
+    start_date: date_type
+    days: int = 30
+    # "HH:MM", the local time of day each day's post gets scheduled for.
+    post_time: str = "10:00"
+    min_words: int = 600
+    generate_image: bool = True
+
+
+class BlogExportRequest(BaseModel):
+    site_id: int
+
+
+class BlogExportResult(BaseModel):
+    ok: bool
+    detail: str
+    sheet_url: Optional[str] = None
 
 
 class WebpConvertRequest(BaseModel):
@@ -1836,3 +1990,49 @@ class ContentBackupSummaryOut(BaseModel):
 
 class ContentBackupOut(ContentBackupSummaryOut):
     original_content: str
+
+
+class RedirectCreate(BaseModel):
+    source_url: str
+    target_url: str
+    status_code: Literal[301, 302] = 301
+
+
+class RedirectUpdate(BaseModel):
+    source_url: Optional[str] = None
+    target_url: Optional[str] = None
+    status_code: Optional[Literal[301, 302]] = None
+
+
+class RedirectOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source_url: str
+    source_host: Optional[str] = None
+    source_path: str
+    target_url: str
+    status_code: int
+    hit_count: int = 0
+    last_hit_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    live_url: str = ""
+    # How this rule is actually enforced: "served" (this API answers the
+    # URL itself), "synced" (written into the site's own .htaccess and
+    # verified live), "pending" (a matching site with server access exists
+    # but the rule isn't applied yet), "failed" (applying was tried and
+    # rolled back), "unmanaged" (nothing is enforcing it yet).
+    sync_status: Optional[str] = None  # always filled in by api/routes/redirects.py:_to_out
+    sync_message: Optional[str] = None
+    synced_at: Optional[datetime] = None
+    apply_site: Optional[str] = None
+
+
+class RedirectTestResult(BaseModel):
+    ok: bool
+    probed_url: str
+    status_code: Optional[int] = None
+    location: Optional[str] = None
+    message: str

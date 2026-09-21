@@ -1,13 +1,19 @@
 import { Fragment, FormEvent, ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import FullCalendar from "@fullcalendar/react";
+import dayGridPlugin from "@fullcalendar/daygrid";
+import interactionPlugin from "@fullcalendar/interaction";
+import type { EventClickArg, EventDropArg, EventInput } from "@fullcalendar/core";
 import {
   AlertTriangle,
   ArrowUp,
   Award,
   BarChart3,
+  CalendarIcon,
   CaseSensitive,
   CheckCircle2,
+  ClockIcon,
   ChevronDown,
   ChevronUp,
   Download,
@@ -32,6 +38,7 @@ import {
   Replace,
   ReplaceAll,
   RotateCcw,
+  Route,
   Search,
   Send,
   Server,
@@ -116,6 +123,7 @@ import {
   getBulkDomainAuthority,
   getKeywordInsights,
   getWebsiteTraffic,
+  getCompetitorAnalysis,
   getGscByCountry,
   getGscByDevice,
   getGscBySearchAppearance,
@@ -160,6 +168,12 @@ import {
   indexPageForInterlinks,
   getSocialPosts,
   updateSocialPost,
+  scheduleSocialPost,
+  bulkApproveSocialPosts,
+  bulkPublishSocialPosts,
+  bulkGenerateSocialPosts,
+  generateSocialCalendar,
+  exportSocialPostsToSheet,
   getFacebookAccounts,
   createFacebookAccount,
   deleteFacebookAccount,
@@ -186,6 +200,13 @@ import {
   PageSpeedResult,
   PageSpeedStrategy,
   goLiveBlogPost,
+  scheduleBlogPost,
+  bulkApproveBlogPosts,
+  bulkPublishBlogPosts,
+  bulkGenerateBlogPosts,
+  generateBlogCalendar,
+  exportBlogPostsToSheet,
+  BlogBulkActionResult,
   publishBlogPost,
   publishSocialPost,
   pullBacklinks,
@@ -220,8 +241,9 @@ import {
   updateSeoSiteGoogleConfig,
   updateSeoSiteSshConfig,
 } from "@/api";
+import RedirectionTab from "@/pages/Redirection/RedirectionTab";
 
-type Tab = "overview" | "performance" | "search-console" | "analytics" | "indexing" | "social" | "blog" | "backlinks";
+type Tab = "overview" | "performance" | "search-console" | "analytics" | "indexing" | "social" | "blog" | "backlinks" | "redirection";
 type IssueFilter = "pending" | "approved" | "rejected" | "resolved" | "all";
 
 // lucide-react 1.x dropped every brand/logo icon (trademark policy), so
@@ -302,6 +324,7 @@ const TABS: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "social", label: "Social", icon: Share2 },
   { id: "blog", label: "Blog", icon: FileText },
   { id: "backlinks", label: "Backlinks", icon: Link2 },
+  { id: "redirection", label: "Redirection", icon: Route },
 ];
 
 const jobStatusVariant: Record<string, "warning" | "success" | "outline" | "destructive"> = {
@@ -3013,6 +3036,9 @@ function SocialTab({ siteId }: { siteId: number }) {
   const [imageUrl, setImageUrl] = useState("");
   const [selectedPlatforms, setSelectedPlatforms] = useState<SocialPlatform[]>(["linkedin"]);
   const [facebookAccountId, setFacebookAccountId] = useState<number | "">("");
+  // The 128px card thumbnail is too small to actually judge a generated/
+  // uploaded image — clicking it opens this full-size preview instead.
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
 
   const postsQuery = useQuery({ queryKey: ["seo", "social", siteId], queryFn: () => getSocialPosts(siteId) });
   const posts = postsQuery.data ?? [];
@@ -3061,6 +3087,115 @@ function SocialTab({ siteId }: { siteId: number }) {
     onError: (err) => toast.error(serverErrorDetail(err, "Couldn't save this edit.")),
   });
 
+  // Module 41 — per-post scheduling. scheduleDrafts holds the pending
+  // datetime-local input value per post id, separate from what's saved
+  // on the server, so typing doesn't fire a request per keystroke.
+  const [scheduleDrafts, setScheduleDrafts] = useState<Record<number, string>>({});
+  const scheduleMutation = useMutation({
+    mutationFn: ({ id, scheduledFor }: { id: number; scheduledFor: string | null }) =>
+      scheduleSocialPost(id, scheduledFor),
+    onSuccess: (_result, variables) => {
+      toast.success(variables.scheduledFor ? "Post scheduled." : "Schedule cleared.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't update the schedule.")),
+  });
+
+  // Bulk selection + bulk actions.
+  const [selectedPostIds, setSelectedPostIds] = useState<number[]>([]);
+  const togglePostSelected = (id: number) => {
+    setSelectedPostIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const summarizeBulkResults = (results: { ok: boolean; detail: string }[], verb: string) => {
+    const succeeded = results.filter((r) => r.ok).length;
+    const failed = results.length - succeeded;
+    if (failed === 0) {
+      toast.success(`${verb} ${succeeded} post(s).`);
+    } else {
+      toast.info(`${verb} ${succeeded} of ${results.length} post(s) — ${failed} failed, see individual posts for details.`);
+    }
+  };
+
+  const bulkApproveMutation = useMutation({
+    mutationFn: () => bulkApproveSocialPosts(selectedPostIds),
+    onSuccess: (results) => {
+      summarizeBulkResults(results, "Approved");
+      setSelectedPostIds([]);
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Bulk approve failed.")),
+  });
+
+  const bulkPublishMutation = useMutation({
+    mutationFn: () => bulkPublishSocialPosts(selectedPostIds),
+    onSuccess: (results) => {
+      summarizeBulkResults(results, "Published");
+      setSelectedPostIds([]);
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Bulk publish failed.")),
+  });
+
+  // Bulk topic-based generation — reuses the same platform/image/account
+  // selection as the single-topic generator above, just with a list of
+  // topics instead of one page_title/content_excerpt pair.
+  const [bulkTopics, setBulkTopics] = useState("");
+  const bulkGenerateMutation = useMutation({
+    mutationFn: () =>
+      bulkGenerateSocialPosts({
+        site_id: siteId,
+        topics: bulkTopics.split("\n").map((t) => t.trim()).filter(Boolean),
+        platforms: selectedPlatforms,
+        image_url: imageUrl.trim() || undefined,
+        facebook_account_id: facebookAccountId === "" ? undefined : facebookAccountId,
+      }),
+    onSuccess: (created) => {
+      toast.success(`Generated ${created.length} post(s) from the given topics.`);
+      setBulkTopics("");
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Bulk generation failed — check that Ollama is running.")),
+  });
+
+  // 30-day (or however many) content calendar — its own topic list and
+  // platform selection, independent of the single/bulk generators above,
+  // since a calendar run is a distinct, larger action a user configures
+  // separately.
+  const [calendarTopics, setCalendarTopics] = useState("");
+  const [calendarPlatforms, setCalendarPlatforms] = useState<SocialPlatform[]>(["linkedin"]);
+  const [calendarStartDate, setCalendarStartDate] = useState("");
+  const [calendarDays, setCalendarDays] = useState(30);
+  const [calendarPostTime, setCalendarPostTime] = useState("10:00");
+  const toggleCalendarPlatform = (p: SocialPlatform) => {
+    setCalendarPlatforms((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
+  };
+  const calendarMutation = useMutation({
+    mutationFn: () =>
+      generateSocialCalendar({
+        site_id: siteId,
+        topics: calendarTopics.split("\n").map((t) => t.trim()).filter(Boolean),
+        platforms: calendarPlatforms,
+        start_date: calendarStartDate,
+        days: calendarDays,
+        post_time: calendarPostTime,
+      }),
+    onSuccess: (created) => {
+      toast.success(`Generated a ${calendarDays}-day calendar: ${created.length} post(s), scheduled and awaiting review.`);
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Calendar generation failed — check that Ollama is running.")),
+  });
+
+  const exportMutation = useMutation({
+    mutationFn: () => exportSocialPostsToSheet(siteId),
+    onSuccess: (result) => {
+      if (result.ok) toast.success(result.detail);
+      else toast.error(result.detail);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Export failed.")),
+  });
+
   const publishMutation = useMutation({
     mutationFn: (id: number) => publishSocialPost(id),
     onSuccess: (result) => {
@@ -3078,8 +3213,9 @@ function SocialTab({ siteId }: { siteId: number }) {
   // hand-paste an image URL from somewhere else first.
   const imageMutation = useMutation({
     mutationFn: (id: number) => generateSocialPostImage(id),
-    onSuccess: () => {
+    onSuccess: (result) => {
       toast.success("Image generated and uploaded to the site.");
+      if (result.image_url) setPreviewImageUrl(result.image_url);
       queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Image generation failed.")),
@@ -3087,8 +3223,9 @@ function SocialTab({ siteId }: { siteId: number }) {
 
   const uploadImageMutation = useMutation({
     mutationFn: ({ id, file }: { id: number; file: File }) => uploadSocialPostImage(id, file),
-    onSuccess: () => {
+    onSuccess: (result) => {
       toast.success("Image uploaded to the site.");
+      if (result.image_url) setPreviewImageUrl(result.image_url);
       queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Image upload failed.")),
@@ -3294,15 +3431,210 @@ function SocialTab({ siteId }: { siteId: number }) {
             {generateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
             Generate
           </Button>
+
+          <div className="mt-6 border-t border-gray-100 pt-6 dark:border-gray-800">
+            <h3 className="mb-2 text-theme-sm font-semibold text-gray-900 dark:text-white">
+              Or bulk-generate from multiple topics
+            </h3>
+            <p className="mb-3 text-theme-xs text-gray-400">
+              One topic per line — generates a post for each topic, on every platform selected above.
+            </p>
+            <textarea
+              value={bulkTopics}
+              onChange={(e) => setBulkTopics(e.target.value)}
+              rows={4}
+              placeholder={"Why local AI removes per-token cost\nHow agentic automation differs from a chatbot\n..."}
+              className="w-full rounded-lg border border-gray-300 bg-transparent p-3 text-theme-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+            />
+            <Button
+              className="mt-3"
+              variant="outline"
+              onClick={() => bulkGenerateMutation.mutate()}
+              disabled={bulkGenerateMutation.isPending || !bulkTopics.trim() || selectedPlatforms.length === 0}
+            >
+              {bulkGenerateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Bulk generate
+            </Button>
+            {(() => {
+              const topicCount = bulkTopics.split("\n").map((t) => t.trim()).filter(Boolean).length;
+              const combos = topicCount * selectedPlatforms.length;
+              if (combos === 0) return null;
+              return (
+                <p className="mt-2 text-theme-xs text-gray-400">
+                  {combos} post(s) to generate ({topicCount} topic(s) × {selectedPlatforms.length} platform(s)) — each
+                  takes roughly 45–90s on local AI, so this can take a while for a longer list. It keeps running in the
+                  background even if this feels slow; check the Posts list below once it's done.
+                </p>
+              );
+            })()}
+          </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardContent className="p-6">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
-            <Share2 className="h-4 w-4 text-brand-500" />
-            Posts
+            <CalendarIcon className="h-4 w-4 text-brand-500" />
+            Generate a content calendar
           </h2>
+          <p className="mb-4 text-theme-xs text-gray-400">
+            Cycles through the topics below across the date range, one post per platform per day — lands as drafts,
+            pre-scheduled for each day, awaiting your review and approval before anything auto-publishes.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <Label htmlFor="calendar-topics">Topics (one per line, cycles if fewer than days)</Label>
+              <textarea
+                id="calendar-topics"
+                value={calendarTopics}
+                onChange={(e) => setCalendarTopics(e.target.value)}
+                rows={4}
+                className="w-full rounded-lg border border-gray-300 bg-transparent p-3 text-theme-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+              />
+            </div>
+            <div>
+              <Label htmlFor="calendar-start">Start date</Label>
+              <Input id="calendar-start" type="date" value={calendarStartDate} onChange={(e) => setCalendarStartDate(e.target.value)} />
+            </div>
+            <div>
+              <Label htmlFor="calendar-time">Post time (local)</Label>
+              <Input id="calendar-time" type="time" value={calendarPostTime} onChange={(e) => setCalendarPostTime(e.target.value)} />
+            </div>
+            <div>
+              <Label htmlFor="calendar-days">Number of days</Label>
+              <Input
+                id="calendar-days"
+                type="number"
+                min="1"
+                max="90"
+                value={calendarDays}
+                onChange={(e) => setCalendarDays(Number(e.target.value) || 1)}
+              />
+            </div>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {ALL_PLATFORMS.map((p) => {
+              const PlatformIcon = PLATFORM_ICONS[p];
+              return (
+                <button
+                  key={p}
+                  onClick={() => toggleCalendarPlatform(p)}
+                  className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-theme-xs font-medium capitalize transition-colors ${
+                    calendarPlatforms.includes(p)
+                      ? "border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-500/15 dark:text-brand-300"
+                      : "border-gray-300 text-gray-600 dark:border-gray-700 dark:text-gray-300"
+                  }`}
+                >
+                  <PlatformIcon className="h-3.5 w-3.5" />
+                  {p}
+                </button>
+              );
+            })}
+          </div>
+          <Button
+            className="mt-4"
+            onClick={() => calendarMutation.mutate()}
+            disabled={
+              calendarMutation.isPending ||
+              !calendarTopics.trim() ||
+              !calendarStartDate ||
+              calendarPlatforms.length === 0 ||
+              calendarDays < 1
+            }
+          >
+            {calendarMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarIcon className="h-4 w-4" />}
+            Generate {calendarDays}-day calendar
+          </Button>
+          {calendarMutation.isPending && (
+            <p className="mt-2 text-theme-xs text-gray-400">
+              Generating {calendarDays} day(s) × {calendarPlatforms.length} platform(s) — this can take a while for a
+              full 30-day calendar.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <SheetsConnectCard
+        kind="social"
+        title="Social Media Calendar (Google Sheets)"
+        description={
+          <>
+            Connect a sheet to export every generated post — title, platform, content, status, scheduled time, posted
+            time, and reference/source URL — into one "Social Posts" tab. Google gives service accounts no Drive
+            storage of their own, so create a blank sheet yourself, share it with{" "}
+            <span className="font-mono">workpulse-seo-agent@workpulse-ai-506706.iam.gserviceaccount.com</span> as
+            Editor, and paste its link below.
+          </>
+        }
+      />
+      <Card>
+        <CardContent className="p-6">
+          <h2 className="mb-2 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <History className="h-4 w-4 text-brand-500" />
+            Export posts to Sheet
+          </h2>
+          <p className="mb-4 text-theme-xs text-gray-400">
+            Writes every generated post for this site into the connected sheet above — a fresh snapshot each time,
+            replacing whatever was there before.
+          </p>
+          <Button onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}>
+            {exportMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <History className="h-4 w-4" />}
+            Export to Sheet
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-6">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+                <Share2 className="h-4 w-4 text-brand-500" />
+                Posts
+              </h2>
+              {posts.some((p) => p.status !== "posted") && (
+                <label className="flex items-center gap-1.5 text-theme-xs text-gray-400">
+                  <input
+                    type="checkbox"
+                    checked={
+                      posts.filter((p) => p.status !== "posted").length > 0 &&
+                      posts.filter((p) => p.status !== "posted").every((p) => selectedPostIds.includes(p.id))
+                    }
+                    onChange={(e) =>
+                      setSelectedPostIds(e.target.checked ? posts.filter((p) => p.status !== "posted").map((p) => p.id) : [])
+                    }
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                  Select all
+                </label>
+              )}
+            </div>
+            {selectedPostIds.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-theme-xs text-gray-400">{selectedPostIds.length} selected</span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => bulkApproveMutation.mutate()}
+                  disabled={bulkApproveMutation.isPending}
+                >
+                  {bulkApproveMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                  Bulk approve
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => bulkPublishMutation.mutate()}
+                  disabled={bulkPublishMutation.isPending}
+                >
+                  {bulkPublishMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                  Bulk publish
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setSelectedPostIds([])}>
+                  Clear selection
+                </Button>
+              </div>
+            )}
+          </div>
           {postsQuery.isLoading ? (
             <div className="flex h-24 items-center justify-center text-gray-400">
               <Loader2 className="h-5 w-5 animate-spin" />
@@ -3314,6 +3646,13 @@ function SocialTab({ siteId }: { siteId: number }) {
               {posts.map((post) => (
                 <div key={post.id} className="rounded-lg border border-gray-100 p-4 dark:border-gray-800">
                   <div className="mb-1.5 flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedPostIds.includes(post.id)}
+                      onChange={() => togglePostSelected(post.id)}
+                      disabled={post.status === "posted"}
+                      className="h-4 w-4 rounded border-gray-300"
+                    />
                     <Badge variant="outline" className="capitalize">
                       {(() => {
                         const PlatformIcon = PLATFORM_ICONS[post.platform];
@@ -3329,14 +3668,21 @@ function SocialTab({ siteId }: { siteId: number }) {
                     )}
                   </div>
                   {post.image_url && (
-                    <img
-                      src={post.image_url}
-                      alt=""
-                      className="mb-2 h-32 w-32 rounded-md object-cover"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = "none";
-                      }}
-                    />
+                    <button
+                      type="button"
+                      onClick={() => setPreviewImageUrl(post.image_url)}
+                      className="mb-2 block"
+                      title="Click to preview full size"
+                    >
+                      <img
+                        src={post.image_url}
+                        alt=""
+                        className="h-32 w-32 rounded-md object-cover transition-opacity hover:opacity-80"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).style.display = "none";
+                        }}
+                      />
+                    </button>
                   )}
                   {editingPostId === post.id ? (
                     <div className="space-y-2">
@@ -3394,6 +3740,45 @@ function SocialTab({ siteId }: { siteId: number }) {
                         <Pencil className="h-3.5 w-3.5" />
                         Edit
                       </Button>
+                    </div>
+                  )}
+                  {post.status !== "posted" && editingPostId !== post.id && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {post.scheduled_for ? (
+                        <>
+                          <Badge variant="outline">
+                            <ClockIcon className="h-3 w-3" />
+                            Scheduled: {new Date(post.scheduled_for).toLocaleString()}
+                          </Badge>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => scheduleMutation.mutate({ id: post.id, scheduledFor: null })}
+                            disabled={scheduleMutation.isPending}
+                          >
+                            <XCircle className="h-3.5 w-3.5" />
+                            Clear schedule
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <input
+                            type="datetime-local"
+                            value={scheduleDrafts[post.id] ?? ""}
+                            onChange={(e) => setScheduleDrafts((prev) => ({ ...prev, [post.id]: e.target.value }))}
+                            className="h-9 rounded-lg border border-gray-300 bg-transparent px-3 text-theme-xs text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+                          />
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => scheduleMutation.mutate({ id: post.id, scheduledFor: scheduleDrafts[post.id] })}
+                            disabled={scheduleMutation.isPending || !scheduleDrafts[post.id]}
+                          >
+                            <ClockIcon className="h-3.5 w-3.5" />
+                            Schedule
+                          </Button>
+                        </>
+                      )}
                     </div>
                   )}
                   {post.status === "draft" && editingPostId !== post.id && (
@@ -3460,6 +3845,28 @@ function SocialTab({ siteId }: { siteId: number }) {
           )}
         </CardContent>
       </Card>
+
+      {previewImageUrl && (
+        <div
+          className="fixed inset-0 z-999 flex items-center justify-center bg-black/70 p-6"
+          onClick={() => setPreviewImageUrl(null)}
+        >
+          <button
+            type="button"
+            onClick={() => setPreviewImageUrl(null)}
+            className="absolute right-6 top-6 rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
+            aria-label="Close preview"
+          >
+            <XCircle className="h-6 w-6" />
+          </button>
+          <img
+            src={previewImageUrl}
+            alt="Post image preview"
+            className="max-h-[85vh] max-w-[90vw] rounded-lg object-contain"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
     </>
   );
 }
@@ -3475,11 +3882,15 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
   const [ogTags, setOgTags] = useState<OgTags | null>(null);
   const [related, setRelated] = useState<RelatedPage[] | null>(null);
   const [faqs, setFaqs] = useState<FaqPair[] | null>(null);
+  // The old UI only showed the image URL as a text link — no way to
+  // actually see what was generated/uploaded without opening a new tab.
+  const [showImagePreview, setShowImagePreview] = useState(false);
 
   const imageMutation = useMutation({
     mutationFn: () => generateBlogPostImage(post.id, imagePrompt.trim() || undefined),
     onSuccess: () => {
       toast.success("Image generated and uploaded to the site.");
+      setShowImagePreview(true);
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Image generation failed.")),
@@ -3489,6 +3900,7 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
     mutationFn: (file: File) => uploadBlogPostImage(post.id, file),
     onSuccess: () => {
       toast.success("Image uploaded to the site.");
+      setShowImagePreview(true);
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Image upload failed.")),
@@ -3544,9 +3956,37 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
       <div>
         <p className="mb-1.5 text-theme-xs font-medium text-gray-500 dark:text-gray-400">Featured image</p>
         {post.image_url && (
-          <a href={post.image_url} target="_blank" rel="noreferrer" className="mb-1.5 block truncate text-theme-xs text-brand-600 underline dark:text-brand-400">
-            {post.image_url}
-          </a>
+          <button type="button" onClick={() => setShowImagePreview(true)} className="mb-1.5 block" title="Click to preview full size">
+            <img
+              src={post.image_url}
+              alt=""
+              className="h-24 w-24 rounded-md object-cover transition-opacity hover:opacity-80"
+              onError={(e) => {
+                (e.target as HTMLImageElement).style.display = "none";
+              }}
+            />
+          </button>
+        )}
+        {showImagePreview && post.image_url && (
+          <div
+            className="fixed inset-0 z-999 flex items-center justify-center bg-black/70 p-6"
+            onClick={() => setShowImagePreview(false)}
+          >
+            <button
+              type="button"
+              onClick={() => setShowImagePreview(false)}
+              className="absolute right-6 top-6 rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
+              aria-label="Close preview"
+            >
+              <XCircle className="h-6 w-6" />
+            </button>
+            <img
+              src={post.image_url}
+              alt="Featured image preview"
+              className="max-h-[85vh] max-w-[90vw] rounded-lg object-contain"
+              onClick={(e) => e.stopPropagation()}
+            />
+          </div>
         )}
         <div className="flex flex-wrap gap-2">
           <Input
@@ -3712,6 +4152,7 @@ function BlogTab({ siteId }: { siteId: number }) {
   const [editSlug, setEditSlug] = useState("");
   const [editTags, setEditTags] = useState("");
   const [editCategories, setEditCategories] = useState("");
+  const [previewPost, setPreviewPost] = useState<BlogPost | null>(null);
 
   const postsQuery = useQuery({ queryKey: ["seo", "blog", siteId], queryFn: () => getBlogPosts(siteId) });
   const posts = postsQuery.data ?? [];
@@ -3791,6 +4232,133 @@ function BlogTab({ siteId }: { siteId: number }) {
     },
   });
 
+  // Module 59 — per-post scheduling. scheduleDrafts holds the pending
+  // datetime-local input value per post id, separate from what's saved
+  // on the server, so typing doesn't fire a request per keystroke —
+  // same pattern as the social-post scheduler above.
+  const [scheduleDrafts, setScheduleDrafts] = useState<Record<number, string>>({});
+  const scheduleMutation = useMutation({
+    mutationFn: ({ id, scheduledAt }: { id: number; scheduledAt: string | null }) => scheduleBlogPost(id, scheduledAt),
+    onSuccess: (_result, variables) => {
+      toast.success(variables.scheduledAt ? "Post scheduled." : "Schedule cleared.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't update the schedule.")),
+  });
+
+  // Bulk selection + bulk actions.
+  const [selectedPostIds, setSelectedPostIds] = useState<number[]>([]);
+  const togglePostSelected = (id: number) => {
+    setSelectedPostIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const summarizeBulkResults = (results: BlogBulkActionResult[], verb: string) => {
+    const succeeded = results.filter((r) => r.ok).length;
+    const failed = results.length - succeeded;
+    if (failed === 0) {
+      toast.success(`${verb} ${succeeded} post(s).`);
+    } else {
+      toast.info(`${verb} ${succeeded} of ${results.length} post(s) — ${failed} failed, see individual posts for details.`);
+    }
+  };
+
+  const bulkApproveMutation = useMutation({
+    mutationFn: () => bulkApproveBlogPosts(selectedPostIds),
+    onSuccess: (results) => {
+      summarizeBulkResults(results, "Approved");
+      setSelectedPostIds([]);
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Bulk approve failed.")),
+  });
+
+  const bulkPublishMutation = useMutation({
+    mutationFn: () => bulkPublishBlogPosts(selectedPostIds),
+    onSuccess: (results) => {
+      summarizeBulkResults(results, "Published");
+      setSelectedPostIds([]);
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Bulk publish failed.")),
+  });
+
+  // Bulk topic-based generation — one full draft (+ image, if enabled)
+  // per topic line.
+  const [bulkTopics, setBulkTopics] = useState("");
+  const [bulkGenerateImages, setBulkGenerateImages] = useState(true);
+  const bulkGenerateMutation = useMutation({
+    mutationFn: () =>
+      bulkGenerateBlogPosts({
+        site_id: siteId,
+        topics: bulkTopics.split("\n").map((t) => t.trim()).filter(Boolean),
+        generate_image: bulkGenerateImages,
+      }),
+    onSuccess: (created) => {
+      toast.success(`Generated ${created.length} post(s) from the given topics.`);
+      setBulkTopics("");
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Bulk generation failed — check that Ollama is running.")),
+  });
+
+  // Content calendar — cycles topics across a date range, one post per
+  // day, pre-scheduled and awaiting review/approval before the
+  // scheduler will auto-publish any of them.
+  const [calendarTopics, setCalendarTopics] = useState("");
+  const [calendarStartDate, setCalendarStartDate] = useState("");
+  const [calendarDays, setCalendarDays] = useState(7);
+  const [calendarPostTime, setCalendarPostTime] = useState("10:00");
+  const [calendarGenerateImages, setCalendarGenerateImages] = useState(true);
+  const calendarMutation = useMutation({
+    mutationFn: () =>
+      generateBlogCalendar({
+        site_id: siteId,
+        topics: calendarTopics.split("\n").map((t) => t.trim()).filter(Boolean),
+        start_date: calendarStartDate,
+        days: calendarDays,
+        post_time: calendarPostTime,
+        generate_image: calendarGenerateImages,
+      }),
+    onSuccess: (created) => {
+      toast.success(`Generated a ${calendarDays}-day calendar: ${created.length} post(s), scheduled and awaiting review.`);
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Calendar generation failed — check that Ollama is running.")),
+  });
+
+  const exportMutation = useMutation({
+    mutationFn: () => exportBlogPostsToSheet(siteId),
+    onSuccess: (result) => {
+      if (result.ok) toast.success(result.detail);
+      else toast.error(result.detail);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Export failed.")),
+  });
+
+  // Visual month-grid calendar (FullCalendar, same library Calendar.tsx
+  // uses) — every scheduled post becomes an event on its scheduled_at
+  // date, color-coded by status via the same .fc-bg-* classes that page
+  // already defines in index.css. Dragging an event to a new day
+  // reschedules it for the same time of day on the new date.
+  const scheduledPosts = posts.filter((p) => p.scheduled_at);
+  const calendarEvents: EventInput[] = scheduledPosts.map((p) => ({
+    id: String(p.id),
+    title: p.title,
+    start: p.scheduled_at!,
+    extendedProps: { calendar: p.status === "live" ? "Success" : p.status === "approved" ? "Primary" : p.status === "failed" ? "Danger" : "Warning" },
+  }));
+  const handleCalendarEventClick = (info: EventClickArg) => {
+    const post = posts.find((p) => String(p.id) === info.event.id);
+    if (post) setPreviewPost(post);
+  };
+  const handleCalendarEventDrop = (info: EventDropArg) => {
+    const postId = Number(info.event.id);
+    const newStart = info.event.start;
+    if (!newStart) return;
+    const iso = new Date(newStart.getTime() - newStart.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+    scheduleMutation.mutate({ id: postId, scheduledAt: iso });
+  };
+
   return (
     <>
       <Card>
@@ -3831,15 +4399,230 @@ function BlogTab({ siteId }: { siteId: number }) {
               A full post takes a minute or two — this uses the slower, higher-quality model on purpose.
             </p>
           )}
+
+          <div className="mt-6 border-t border-gray-100 pt-6 dark:border-gray-800">
+            <h3 className="mb-2 text-theme-sm font-semibold text-gray-900 dark:text-white">
+              Or bulk-generate from multiple topics
+            </h3>
+            <p className="mb-3 text-theme-xs text-gray-400">
+              One topic per line — generates a full post (and, if checked below, a featured image) for each.
+            </p>
+            <textarea
+              value={bulkTopics}
+              onChange={(e) => setBulkTopics(e.target.value)}
+              rows={4}
+              placeholder={"Why remote teams need activity tracking software\nHow to reduce merchant account chargebacks\n..."}
+              className="w-full rounded-lg border border-gray-300 bg-transparent p-3 text-theme-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+            />
+            <label className="mt-3 flex items-center gap-2 text-theme-xs text-gray-500 dark:text-gray-400">
+              <input
+                type="checkbox"
+                checked={bulkGenerateImages}
+                onChange={(e) => setBulkGenerateImages(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              Generate a featured image for each post
+            </label>
+            <Button
+              className="mt-3"
+              variant="outline"
+              onClick={() => bulkGenerateMutation.mutate()}
+              disabled={bulkGenerateMutation.isPending || !bulkTopics.trim()}
+            >
+              {bulkGenerateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Bulk generate
+            </Button>
+            {(() => {
+              const topicCount = bulkTopics.split("\n").map((t) => t.trim()).filter(Boolean).length;
+              if (topicCount === 0) return null;
+              return (
+                <p className="mt-2 text-theme-xs text-gray-400">
+                  {topicCount} post(s) to generate — each takes 1-3 minutes for the text alone
+                  {bulkGenerateImages ? ", plus up to another minute for its image" : ""}, so a longer list can take a
+                  while. It keeps running server-side even if this feels slow; check the Drafts list below once it's
+                  done.
+                </p>
+              );
+            })()}
+          </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardContent className="p-6">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
-            <FileText className="h-4 w-4 text-brand-500" />
-            Drafts
+            <CalendarIcon className="h-4 w-4 text-brand-500" />
+            Generate a content calendar
           </h2>
+          <p className="mb-4 text-theme-xs text-gray-400">
+            Cycles through the topics below across the date range, one post per day — lands as drafts, pre-scheduled
+            for each day, awaiting your review and approval before anything auto-publishes.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <Label htmlFor="blog-calendar-topics">Topics (one per line, cycles if fewer than days)</Label>
+              <textarea
+                id="blog-calendar-topics"
+                value={calendarTopics}
+                onChange={(e) => setCalendarTopics(e.target.value)}
+                rows={4}
+                className="w-full rounded-lg border border-gray-300 bg-transparent p-3 text-theme-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+              />
+            </div>
+            <div>
+              <Label htmlFor="blog-calendar-start">Start date</Label>
+              <Input id="blog-calendar-start" type="date" value={calendarStartDate} onChange={(e) => setCalendarStartDate(e.target.value)} />
+            </div>
+            <div>
+              <Label htmlFor="blog-calendar-time">Post time (local)</Label>
+              <Input id="blog-calendar-time" type="time" value={calendarPostTime} onChange={(e) => setCalendarPostTime(e.target.value)} />
+            </div>
+            <div>
+              <Label htmlFor="blog-calendar-days">Number of days</Label>
+              <Input
+                id="blog-calendar-days"
+                type="number"
+                min="1"
+                max="30"
+                value={calendarDays}
+                onChange={(e) => setCalendarDays(Number(e.target.value) || 1)}
+              />
+            </div>
+            <label className="flex items-center gap-2 self-end pb-2.5 text-theme-xs text-gray-500 dark:text-gray-400">
+              <input
+                type="checkbox"
+                checked={calendarGenerateImages}
+                onChange={(e) => setCalendarGenerateImages(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              Generate a featured image for each post
+            </label>
+          </div>
+          <Button
+            className="mt-4"
+            onClick={() => calendarMutation.mutate()}
+            disabled={calendarMutation.isPending || !calendarTopics.trim() || !calendarStartDate || calendarDays < 1}
+          >
+            {calendarMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarIcon className="h-4 w-4" />}
+            Generate {calendarDays}-day calendar
+          </Button>
+          {calendarMutation.isPending && (
+            <p className="mt-2 text-theme-xs text-gray-400">
+              Generating {calendarDays} day(s) — a full post (and image) per day, so this can take a while for a
+              longer calendar.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {scheduledPosts.length > 0 && (
+        <Card>
+          <CardContent className="p-6">
+            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+              <CalendarIcon className="h-4 w-4 text-brand-500" />
+              Content Calendar
+            </h2>
+            <p className="mb-4 text-theme-xs text-gray-400">
+              Every scheduled post, by date — yellow: draft, blue: approved, green: live, red: failed. Click a post to
+              preview it; drag it to a new day to reschedule (keeps the same time of day).
+            </p>
+            <div className="custom-calendar">
+              <FullCalendar
+                plugins={[dayGridPlugin, interactionPlugin]}
+                initialView="dayGridMonth"
+                headerToolbar={{ left: "prev,next", center: "title", right: "" }}
+                events={calendarEvents}
+                editable
+                eventClick={handleCalendarEventClick}
+                eventDrop={handleCalendarEventDrop}
+                height="auto"
+                eventContent={(info) => {
+                  const colorClass = `fc-bg-${(info.event.extendedProps.calendar as string).toLowerCase()}`;
+                  return (
+                    <div className={`event-fc-color flex fc-event-main ${colorClass} p-1 rounded-sm`}>
+                      <div className="fc-daygrid-event-dot"></div>
+                      <div className="fc-event-title truncate">{info.event.title}</div>
+                    </div>
+                  );
+                }}
+              />
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <SheetsConnectCard
+        kind="blog"
+        title="Blog Calendar (Google Sheets)"
+        description={
+          <>
+            Connect a sheet to export every generated post — title, status, category, tags, author, slug, primary
+            keyword, scheduled time, and its CMS-draft/live link once published — into one "Blog Posts" tab. Google gives
+            service accounts no Drive storage of their own, so create a blank sheet yourself, share it with{" "}
+            <span className="font-mono">workpulse-seo-agent@workpulse-ai-506706.iam.gserviceaccount.com</span> as
+            Editor, and paste its link below.
+          </>
+        }
+      />
+      <Card>
+        <CardContent className="p-6">
+          <h2 className="mb-2 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <History className="h-4 w-4 text-brand-500" />
+            Export posts to Sheet
+          </h2>
+          <p className="mb-4 text-theme-xs text-gray-400">
+            Writes every generated post for this site into the connected sheet above — a fresh snapshot each time,
+            replacing whatever was there before.
+          </p>
+          <Button onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}>
+            {exportMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <History className="h-4 w-4" />}
+            Export to Sheet
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-6">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+                <FileText className="h-4 w-4 text-brand-500" />
+                Drafts
+              </h2>
+              {posts.some((p) => p.status !== "live") && (
+                <label className="flex items-center gap-1.5 text-theme-xs text-gray-400">
+                  <input
+                    type="checkbox"
+                    checked={
+                      posts.filter((p) => p.status !== "live").length > 0 &&
+                      posts.filter((p) => p.status !== "live").every((p) => selectedPostIds.includes(p.id))
+                    }
+                    onChange={(e) =>
+                      setSelectedPostIds(e.target.checked ? posts.filter((p) => p.status !== "live").map((p) => p.id) : [])
+                    }
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                  Select all
+                </label>
+              )}
+            </div>
+            {selectedPostIds.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-theme-xs text-gray-400">{selectedPostIds.length} selected</span>
+                <Button size="sm" variant="outline" onClick={() => bulkApproveMutation.mutate()} disabled={bulkApproveMutation.isPending}>
+                  {bulkApproveMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                  Bulk approve
+                </Button>
+                <Button size="sm" onClick={() => bulkPublishMutation.mutate()} disabled={bulkPublishMutation.isPending}>
+                  {bulkPublishMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                  Bulk publish
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setSelectedPostIds([])}>
+                  Clear selection
+                </Button>
+              </div>
+            )}
+          </div>
           {postsQuery.isLoading ? (
             <div className="flex h-24 items-center justify-center text-gray-400">
               <Loader2 className="h-5 w-5 animate-spin" />
@@ -3853,10 +4636,24 @@ function BlogTab({ siteId }: { siteId: number }) {
                 return (
                   <div key={post.id} className="rounded-lg border border-gray-100 p-4 dark:border-gray-800">
                     <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                      {post.status !== "live" && (
+                        <input
+                          type="checkbox"
+                          checked={selectedPostIds.includes(post.id)}
+                          onChange={() => togglePostSelected(post.id)}
+                          className="h-4 w-4 rounded border-gray-300"
+                        />
+                      )}
                       <Badge variant={blogStatusVariant[post.status]}>{post.status}</Badge>
                       {post.structure_passed !== null && (
                         <Badge variant={post.structure_passed ? "success" : "warning"}>
                           {post.structure_passed ? "structure OK" : `${issues.length} structure issue(s)`}
+                        </Badge>
+                      )}
+                      {post.scheduled_at && (
+                        <Badge variant="outline">
+                          <ClockIcon className="h-3 w-3" />
+                          Scheduled {new Date(post.scheduled_at).toLocaleString()}
                         </Badge>
                       )}
                       {post.cms_post_link && (
@@ -3903,6 +4700,10 @@ function BlogTab({ siteId }: { siteId: number }) {
                       </div>
                     )}
                     <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <Button size="sm" variant="outline" onClick={() => setPreviewPost(post)}>
+                        <FileSearch className="h-3.5 w-3.5" />
+                        Preview
+                      </Button>
                       <Button size="sm" variant="outline" onClick={() => setExpandedId(expandedId === post.id ? null : post.id)}>
                         {expandedId === post.id ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                         {expandedId === post.id ? "Hide content" : "View content"}
@@ -3942,6 +4743,39 @@ function BlogTab({ siteId }: { siteId: number }) {
                         </Button>
                       )}
                     </div>
+                    {post.status !== "live" && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        {post.scheduled_at ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => scheduleMutation.mutate({ id: post.id, scheduledAt: null })}
+                            disabled={scheduleMutation.isPending}
+                          >
+                            <XCircle className="h-3.5 w-3.5" />
+                            Clear schedule
+                          </Button>
+                        ) : (
+                          <>
+                            <input
+                              type="datetime-local"
+                              value={scheduleDrafts[post.id] ?? ""}
+                              onChange={(e) => setScheduleDrafts((prev) => ({ ...prev, [post.id]: e.target.value }))}
+                              className="h-9 rounded-lg border border-gray-300 bg-transparent px-3 text-theme-xs text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+                            />
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => scheduleMutation.mutate({ id: post.id, scheduledAt: scheduleDrafts[post.id] })}
+                              disabled={scheduleMutation.isPending || !scheduleDrafts[post.id]}
+                            >
+                              <ClockIcon className="h-3.5 w-3.5" />
+                              Schedule
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    )}
                     {expandedId === post.id && editingId === post.id ? (
                       <div className="mt-3 space-y-3 rounded-md bg-gray-50 p-4 dark:bg-white/5">
                         <div>
@@ -4021,7 +4855,47 @@ function BlogTab({ siteId }: { siteId: number }) {
       </Card>
 
       <ContentStructureChecker />
+
+      {previewPost && <BlogPreviewModal post={previewPost} onClose={() => setPreviewPost(null)} />}
     </>
+  );
+}
+
+// Module 59 — rendered draft preview: what the post will actually look
+// like (title, featured image, formatted body) before publishing or
+// scheduling it, rather than the plain raw-HTML toggle "View content"
+// already gives. Same lightweight fixed-overlay pattern as the social
+// tab's image-preview overlay above, not the shared Modal component —
+// consistent with how this file already does a one-off preview popup.
+function BlogPreviewModal({ post, onClose }: { post: BlogPost; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-999 flex items-start justify-center overflow-y-auto bg-black/70 p-6" onClick={onClose}>
+      <div
+        className="my-8 w-full max-w-3xl rounded-2xl bg-white p-8 shadow-xl dark:bg-gray-900"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <Badge variant={blogStatusVariant[post.status]}>{post.status}</Badge>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/10 dark:hover:text-gray-300"
+            aria-label="Close preview"
+          >
+            <XCircle className="h-5 w-5" />
+          </button>
+        </div>
+        {post.image_url && (
+          <img src={post.image_url} alt="" className="mb-5 h-64 w-full rounded-lg object-cover" />
+        )}
+        <h1 className="mb-2 text-2xl font-bold text-gray-900 dark:text-white">{post.title}</h1>
+        {post.excerpt && <p className="mb-5 text-base text-gray-500 dark:text-gray-400">{post.excerpt}</p>}
+        <div
+          className="prose prose-sm max-w-none dark:prose-invert"
+          dangerouslySetInnerHTML={{ __html: sanitizeBlogHtml(post.content) }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -7116,6 +7990,198 @@ function WebsiteTrafficCard({ siteId, siteUrl }: { siteId: number; siteUrl: stri
   );
 }
 
+// The provider returns ISO 3166-1 alpha-2 codes ("US", "MA"); Intl turns
+// them into real names without a hand-written lookup table, falling back
+// to the raw code if the runtime can't resolve one.
+function regionName(code: string): string {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "region" }).of(code.toUpperCase()) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+function formatCompactNumber(n: number | null | undefined): string {
+  return n == null ? "—" : new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(n);
+}
+
+function CompetitorAnalysisCard({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
+  const toast = useToast();
+  const [website, setWebsite] = useState(siteUrl);
+
+  const analyzeMutation = useMutation({
+    mutationFn: () => getCompetitorAnalysis(siteId, website.trim()),
+    onError: (err) => toast.error(serverErrorDetail(err, "Competitor analysis failed.")),
+  });
+  const data = analyzeMutation.data;
+
+  const monthlySeries = data
+    ? Object.entries(data.monthly_visits)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([month, visits]) => ({ month: month.slice(0, 7), visits }))
+    : [];
+  const sourceEntries = data ? Object.entries(data.traffic_sources).sort(([, a], [, b]) => b - a) : [];
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+          <Award className="h-4 w-4 text-brand-500" />
+          Competitor Analysis (RapidAPI)
+        </h2>
+        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          Estimated visits, engagement, 12-month visit trend, traffic sources, top countries and top keywords for any
+          domain — point it at a competitor to compare against your own site.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Input value={website} onChange={(e) => setWebsite(e.target.value)} placeholder="https://competitor.com" className="max-w-sm" />
+          <Button size="sm" onClick={() => analyzeMutation.mutate()} disabled={analyzeMutation.isPending || !website.trim()}>
+            {analyzeMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Analyze
+          </Button>
+        </div>
+
+        {data && (
+          <div className="mt-5 space-y-5">
+            <div>
+              <p className="font-medium text-gray-900 dark:text-white">{data.title || data.domain}</p>
+              {data.description && (
+                <p className="mt-0.5 text-theme-xs text-gray-500 dark:text-gray-400">{data.description.trim()}</p>
+              )}
+              <p className="mt-1 text-theme-xs text-gray-400">
+                {data.domain}
+                {data.snapshot_date ? ` · data as of ${data.snapshot_date}` : ""}
+                {data.registration_time ? ` · registered ${data.registration_time.slice(0, 10)}` : ""}
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <div>
+                <p className="text-theme-xs text-gray-400">Monthly visits</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">{formatCompactNumber(data.engagement.total_visits)}</p>
+              </div>
+              <div>
+                <p className="text-theme-xs text-gray-400">Bounce rate</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                  {data.engagement.bounce_rate != null ? `${data.engagement.bounce_rate.toFixed(1)}%` : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-theme-xs text-gray-400">Pages / visit</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                  {data.engagement.pages_per_visit != null ? data.engagement.pages_per_visit.toFixed(2) : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-theme-xs text-gray-400">Time on site</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                  {data.engagement.time_on_site != null ? `${Math.round(data.engagement.time_on_site)}s` : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-theme-xs text-gray-400">Global rank</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                  {data.global_rank != null ? `#${data.global_rank.toLocaleString()}` : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-theme-xs text-gray-400">Country rank</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                  {data.country_rank != null ? `#${data.country_rank.toLocaleString()}` : "—"}
+                </p>
+              </div>
+            </div>
+
+            {monthlySeries.length > 0 && (
+              <div>
+                <p className="mb-2 text-theme-xs text-gray-400">Monthly visits — last {monthlySeries.length} months</p>
+                <div className="h-48">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={monthlySeries}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                      <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                      <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatCompactNumber(v)} width={44} />
+                      <Tooltip formatter={(v: number) => [v.toLocaleString(), "Visits"]} />
+                      <Bar dataKey="visits" fill="#465fff" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
+
+            <div className="grid gap-5 lg:grid-cols-2">
+              {sourceEntries.length > 0 && (
+                <div>
+                  <p className="mb-2 text-theme-xs text-gray-400">Traffic sources</p>
+                  <div className="space-y-2">
+                    {sourceEntries.map(([source, share]) => (
+                      <div key={source}>
+                        <div className="mb-0.5 flex justify-between text-theme-xs">
+                          <span className="capitalize text-gray-700 dark:text-gray-300">{source.replace(/([A-Z])/g, " $1")}</span>
+                          <span className="text-gray-500 dark:text-gray-400">{(share * 100).toFixed(1)}%</span>
+                        </div>
+                        <div className="h-1.5 rounded-full bg-gray-100 dark:bg-gray-800">
+                          <div className="h-1.5 rounded-full bg-brand-500" style={{ width: `${Math.min(100, share * 100)}%` }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {data.top_countries.length > 0 && (
+                <div>
+                  <p className="mb-2 text-theme-xs text-gray-400">Top countries</p>
+                  <div className="space-y-2">
+                    {data.top_countries.map((c) => (
+                      <div key={c.country_code}>
+                        <div className="mb-0.5 flex justify-between text-theme-xs">
+                          <span className="text-gray-700 dark:text-gray-300">{regionName(c.country_code)}</span>
+                          <span className="text-gray-500 dark:text-gray-400">
+                            {c.share != null ? `${(c.share * 100).toFixed(1)}%` : "—"}
+                          </span>
+                        </div>
+                        <div className="h-1.5 rounded-full bg-gray-100 dark:bg-gray-800">
+                          <div className="h-1.5 rounded-full bg-brand-500" style={{ width: `${Math.min(100, (c.share ?? 0) * 100)}%` }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {data.top_keywords.length > 0 && (
+              <div className="overflow-x-auto">
+                <p className="mb-2 text-theme-xs text-gray-400">Top keywords</p>
+                <table className="w-full text-left text-theme-sm">
+                  <thead>
+                    <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                      <th className="py-2 pr-3 font-medium">Keyword</th>
+                      <th className="py-2 pr-3 font-medium">Search volume</th>
+                      <th className="py-2 pr-3 font-medium">Est. traffic value</th>
+                      <th className="py-2 font-medium">CPC</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.top_keywords.map((k, i) => (
+                      <tr key={i} className="border-b border-gray-50 dark:border-gray-800/50">
+                        <td className="py-2 pr-3 text-gray-700 dark:text-gray-300">{k.keyword}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{k.search_volume?.toLocaleString() ?? "—"}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{k.estimated_value?.toLocaleString() ?? "—"}</td>
+                        <td className="py-2 text-gray-500 dark:text-gray-400">{k.cpc != null ? `$${k.cpc}` : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function BacklinksTab({ siteId, siteName, siteUrl }: { siteId: number; siteName: string; siteUrl: string }) {
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -7153,6 +8219,7 @@ function BacklinksTab({ siteId, siteName, siteUrl }: { siteId: number; siteName:
       <DomainAuthorityCard siteId={siteId} siteUrl={siteUrl} />
       <KeywordInsightsCard />
       <WebsiteTrafficCard siteId={siteId} siteUrl={siteUrl} />
+      <CompetitorAnalysisCard siteId={siteId} siteUrl={siteUrl} />
       <Card>
         <CardContent className="p-6">
         <div className="mb-4 flex items-center justify-between">
@@ -7206,8 +8273,31 @@ function BacklinksTab({ siteId, siteName, siteUrl }: { siteId: number; siteName:
   );
 }
 
+// Remembers which site was selected across a page refresh — without
+// this, siteId always starts null and the effect below picks
+// sites[0] (the most recently created site) every single reload,
+// silently discarding whatever site a human actually had open.
+const SELECTED_SITE_STORAGE_KEY = "workpulse-seo-selected-site-id";
+
+function readStoredSiteId(): number | null {
+  try {
+    const stored = localStorage.getItem(SELECTED_SITE_STORAGE_KEY);
+    return stored ? Number(stored) : null;
+  } catch {
+    return null; // private browsing / storage blocked — falls back to sites[0], same as before
+  }
+}
+
 export default function SeoPage() {
-  const [siteId, setSiteId] = useState<number | null>(null);
+  const [siteId, setSiteIdState] = useState<number | null>(readStoredSiteId);
+  const setSiteId = (id: number) => {
+    setSiteIdState(id);
+    try {
+      localStorage.setItem(SELECTED_SITE_STORAGE_KEY, String(id));
+    } catch {
+      // storage unavailable — selection just won't survive a reload this time
+    }
+  };
   const [tab, setTab] = useState<Tab>("overview");
   const [showAddSite, setShowAddSite] = useState(false);
   // Set from anywhere (e.g. PageSpeed's fix list) that resolves an edit
@@ -7227,7 +8317,13 @@ export default function SeoPage() {
   const sites = sitesQuery.data ?? [];
 
   useEffect(() => {
-    if (siteId === null && sites.length > 0) setSiteId(sites[0].id);
+    // Falls back to sites[0] only when there's genuinely nothing better:
+    // no stored selection yet, or the stored site id no longer exists
+    // (e.g. it was deleted) — a valid stored selection is left alone,
+    // which is what actually makes it survive a refresh.
+    if (sites.length > 0 && (siteId === null || !sites.some((s) => s.id === siteId))) {
+      setSiteId(sites[0].id);
+    }
   }, [sites, siteId]);
 
   const selectedSite = sites.find((s) => s.id === siteId) ?? null;
@@ -7335,6 +8431,7 @@ export default function SeoPage() {
               {tab === "backlinks" && (
                 <BacklinksTab siteId={selectedSite.id} siteName={selectedSite.name} siteUrl={selectedSite.base_url} />
               )}
+              {tab === "redirection" && <RedirectionTab />}
             </>
           )
         )}

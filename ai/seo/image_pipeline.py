@@ -43,22 +43,28 @@ UPLOAD_SUBDIR = "wp-content/uploads/seo-agent"
 
 # Facebook and LinkedIn both recommend a ~1.91:1 landscape crop for a
 # feed post's image (1200x630 / 1200x627) — a real, specific requirement,
-# not an arbitrary choice. This can't be satisfied by asking the image
-# provider for that size: verified live that the active provider
-# (ai/images/providers/image_worker_provider.py) silently ignores
-# width/height entirely and always returns a flat 1024x1024 square
-# regardless of what's requested, and FastSD/Stability/Puter offer no
-# stronger guarantee either. Enforcing the platform's real resolution
-# has to happen here, after generation, not by trusting the provider.
-_PLATFORM_IMAGE_DIMENSIONS = {
+# not an arbitrary choice. A blog post's featured image follows a
+# different, equally standard convention: a 2:1 landscape hero image
+# (1200x600) — the common WordPress/blog-theme featured-image ratio,
+# wide enough to crop cleanly into a 16:9 or square thumbnail downstream
+# without losing the subject. None of this can be satisfied by asking
+# the image provider for that size: verified live that the active
+# provider (ai/images/providers/image_worker_provider.py) silently
+# ignores width/height entirely and always returns a flat 1024x1024
+# square regardless of what's requested, and FastSD/Stability/Puter
+# offer no stronger guarantee either. Enforcing each task's real target
+# resolution has to happen here, after generation, not by trusting the
+# provider.
+_STANDARD_IMAGE_DIMENSIONS = {
     "facebook": (1200, 630),
     "linkedin": (1200, 627),
+    "blog_post": (1200, 600),
 }
 
 
 def _standard_dimensions_for_task(task: str) -> Optional[tuple[int, int]]:
-    for platform, dims in _PLATFORM_IMAGE_DIMENSIONS.items():
-        if task.endswith(platform):
+    for task_suffix, dims in _STANDARD_IMAGE_DIMENSIONS.items():
+        if task.endswith(task_suffix):
             return dims
     return None
 

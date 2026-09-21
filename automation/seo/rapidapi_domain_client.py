@@ -10,20 +10,23 @@ semrush-seo10 products in rapidapi_keyword_client.py — RapidAPI keys are
 per-account, not per-API, so one key authenticates across every product
 the account is subscribed to; the host header is what selects the API.
 
-Six endpoints under this host were tested live this session:
+Six endpoints under this host were tested live:
   - POST /backlink.php     (form: website)        -> real per-page backlinks         WORKING
   - POST /keyword-tool.php (form: country, keyword)-> real volume/cpc/competition     WORKING
   - POST /webtraffic.php   (form: website)         -> real organic traffic + samples  WORKING
   - POST /dapa.php         (form: website)         -> real Domain/Page Authority      WORKING
   - POST /bulk-dapa.php    (form: domains, csv)    -> same, for several domains       WORKING
-  - POST /competitor.php   (any domain-like field) -> {"message":"Missing or invalid
-    session credential","error":"Unauthorized","statusCode":401} EVERY time a real
-    domain is supplied (tried as website=, domain=, with/without scheme, with/without
-    a country field) — a provider-side auth bug, not a request-shape problem (the
-    exact same request with no domain field at all gets past that check and instead
-    returns "Website domain is required", proving the key/host auth itself is fine).
-    Deliberately NOT implemented here: shipping a feature verified to never return
-    real data would be worse than not having it.
+  - POST /competitor.php   (form: website)         -> real traffic/engagement/top
+    countries/top keywords/traffic sources/monthly visits         WORKING (see below)
+
+/competitor.php history: originally returned {"message":"Missing or invalid session
+credential","error":"Unauthorized","statusCode":401} for EVERY real domain — a
+provider-side auth bug (the same request with no domain field got past that check and
+returned "Website domain is required", proving our key/host auth was fine), so it was
+deliberately left unimplemented rather than shipping a feature that never returned
+real data. The provider has since fixed it: re-tested live against webpays.com and it
+now returns a real 200 with a 22-key data object, so it is implemented below against
+that verified response shape.
 """
 import logging
 from dataclasses import dataclass, field
@@ -284,4 +287,106 @@ def fetch_website_traffic(website: str) -> Optional[WebsiteTrafficResult]:
         )
     except Exception:
         logger.exception("Website traffic request failed (website=%s)", website)
+        return None
+
+
+@dataclass
+class CompetitorEngagement:
+    total_visits: Optional[float] = None
+    time_on_site: Optional[float] = None
+    pages_per_visit: Optional[float] = None
+    bounce_rate: Optional[float] = None
+
+
+@dataclass
+class CompetitorCountry:
+    country_code: str
+    share: Optional[float]  # 0-1 fraction of the domain's traffic, as returned by the provider
+
+
+@dataclass
+class CompetitorKeyword:
+    keyword: str
+    search_volume: Optional[float]
+    estimated_value: Optional[float]
+    cpc: Optional[float]
+
+
+@dataclass
+class CompetitorAnalysisResult:
+    domain: str
+    title: str
+    description: str
+    global_rank: Optional[float]
+    country_rank: Optional[float]
+    registration_time: str
+    expiration_time: str
+    snapshot_date: str
+    engagement: CompetitorEngagement = field(default_factory=CompetitorEngagement)
+    monthly_visits: dict = field(default_factory=dict)  # "YYYY-MM-DD" -> visits
+    traffic_sources: dict = field(default_factory=dict)  # source name -> 0-1 share
+    top_countries: List[CompetitorCountry] = field(default_factory=list)
+    top_keywords: List[CompetitorKeyword] = field(default_factory=list)
+
+
+def fetch_competitor_analysis(website: str) -> Optional[CompetitorAnalysisResult]:
+    """POST /competitor.php — one call returning a domain's estimated
+    total visits, engagement (time on site, pages/visit, bounce rate),
+    12 months of visit history, traffic-source split, top countries, and
+    top keywords. Shape verified live against webpays.com (see this
+    module's docstring). Never raises — returns None if unconfigured, on
+    any request failure, or if the provider reports a non-zero `code`."""
+    if not is_configured():
+        logger.error("rapidapi_domain_client: RAPIDAPI_SEMRUSH_MAGIC_KEY not set")
+        return None
+
+    def _do_request():
+        response = requests.post(
+            f"{BASE_URL}/competitor.php", files={"website": (None, website)}, headers=_headers(), timeout=TIMEOUT_SECONDS
+        )
+        response.raise_for_status()
+        return response
+
+    try:
+        response = with_retry(_do_request, max_attempts=2, retry_on=(requests.RequestException,))
+        body = response.json()
+        data = body.get("data")
+        if body.get("code") not in (0, None) or not isinstance(data, dict):
+            logger.warning("Competitor analysis returned no usable data for %s: %s", website, str(body)[:300])
+            return None
+
+        engagement = data.get("engagement") or {}
+        return CompetitorAnalysisResult(
+            domain=data.get("domain") or data.get("siteName") or website,
+            title=data.get("title") or "",
+            description=data.get("description") or "",
+            global_rank=data.get("globalRank"),
+            country_rank=data.get("countryRank"),
+            registration_time=data.get("registrationTime") or "",
+            expiration_time=data.get("expirationTime") or "",
+            snapshot_date=data.get("snapshotDate") or "",
+            engagement=CompetitorEngagement(
+                total_visits=engagement.get("totalVisits"),
+                time_on_site=engagement.get("timeOnSite"),
+                pages_per_visit=engagement.get("pagePerVisit"),
+                bounce_rate=engagement.get("bounceRate"),
+            ),
+            monthly_visits=data.get("monthlyVisits") or {},
+            traffic_sources=data.get("trafficSources") or {},
+            top_countries=[
+                CompetitorCountry(country_code=c.get("countryCode", ""), share=c.get("percentage"))
+                for c in (data.get("topCountries") or [])
+            ],
+            top_keywords=[
+                CompetitorKeyword(
+                    keyword=k.get("name", ""),
+                    search_volume=k.get("searchVolume"),
+                    estimated_value=k.get("estimatedValue"),
+                    cpc=k.get("cpc"),
+                )
+                for k in (data.get("topKeywords") or [])
+            ],
+        )
+    except Exception:
+        logger.exception("Competitor analysis request failed (website=%s)", website)
         return None

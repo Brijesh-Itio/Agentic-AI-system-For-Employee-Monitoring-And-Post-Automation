@@ -88,6 +88,18 @@ class SftpClient:
         finally:
             client.close()
 
+    def read_binary_file(self, remote_path: str) -> bytes:
+        """Exact bytes, no decoding — for callers that rewrite a file and
+        must not alter parts they don't understand (e.g. a .htaccess with
+        non-UTF-8 bytes in a comment)."""
+        client = self._connect()
+        try:
+            sftp = client.open_sftp()
+            with sftp.open(remote_path, "rb") as f:
+                return f.read()
+        finally:
+            client.close()
+
     def write_file(self, remote_path: str, content: str) -> None:
         client = self._connect()
         try:
@@ -201,6 +213,16 @@ class FtpClient:
             buf = io.BytesIO()
             ftp.retrbinary(f"RETR {remote_path}", buf.write)
             return buf.getvalue().decode("utf-8", errors="replace")
+        finally:
+            ftp.quit()
+
+    def read_binary_file(self, remote_path: str) -> bytes:
+        """Exact bytes, no decoding — see SftpClient.read_binary_file."""
+        ftp = self._connect()
+        try:
+            buf = io.BytesIO()
+            ftp.retrbinary(f"RETR {remote_path}", buf.write)
+            return buf.getvalue()
         finally:
             ftp.quit()
 

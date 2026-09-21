@@ -282,6 +282,24 @@ class Department(Base):
     created_at = Column(DateTime)
 
 
+class UrlRedirect(Base):
+    __tablename__ = "url_redirects"
+    id = Column(Integer, primary_key=True)
+    source_url = Column(String, nullable=False)
+    source_host = Column(String)
+    source_path = Column(String, nullable=False)
+    target_url = Column(String, nullable=False)
+    status_code = Column(Integer, nullable=False)
+    hit_count = Column(Integer, nullable=False, default=0)
+    last_hit_at = Column(DateTime)
+    created_by = Column(String)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+    sync_status = Column(String)
+    sync_message = Column(String)
+    synced_at = Column(DateTime)
+
+
 class DarTemplate(Base):
     __tablename__ = "dar_templates"
     id = Column(Integer, primary_key=True)
@@ -603,6 +621,10 @@ class SeoSocialPost(Base):
     # through when more than one Facebook Page is configured; NULL means
     # "use the single default account from .env".
     facebook_account_id = Column(Integer, ForeignKey("seo_facebook_accounts.id"))
+    # Module 41 — when set and status='approved', the scheduler
+    # (ai/seo/social_scheduler.py) auto-publishes this post once this
+    # time arrives; NULL means manual-publish-only, unchanged behaviour.
+    scheduled_for = Column(DateTime)
 
 
 class SeoFacebookAccount(Base):
@@ -680,6 +702,7 @@ class SeoBlogPost(Base):
     error = Column(String)
     created_at = Column(DateTime)
     published_at = Column(DateTime)
+    scheduled_at = Column(DateTime)
 
 
 def init_db() -> None:

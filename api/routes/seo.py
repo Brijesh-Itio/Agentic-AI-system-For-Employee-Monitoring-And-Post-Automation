@@ -7,7 +7,7 @@ onward; this is the foundation those pipelines will be built on.
 """
 import json
 import logging
-from datetime import date as date_cls, datetime, timedelta
+from datetime import date as date_cls, datetime, time, timedelta
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -44,9 +44,16 @@ from api.database import (
     get_db,
 )
 from api.schemas import (
+    BlogBulkActionResultOut,
+    BlogBulkGenerateRequest,
+    BlogBulkIdsRequest,
+    BlogCalendarGenerateRequest,
+    BlogExportRequest,
+    BlogExportResult,
     BlogGenerateRequest,
     BlogPostOut,
     BlogPostUpdate,
+    BlogScheduleRequest,
     BlogTaxonomyUpdate,
     CmsPostOut,
     CmsStatusOut,
@@ -107,6 +114,8 @@ from api.schemas import (
     KeywordInsightOut,
     KeywordInsightRequest,
     TopBacklinksRequest,
+    CompetitorAnalysisOut,
+    CompetitorAnalysisRequest,
     WebsiteTrafficOut,
     WebsiteTrafficRequest,
     KeywordResearchRequest,
@@ -154,6 +163,13 @@ from api.schemas import (
     SocialGenerateRequest,
     SocialPostOut,
     SocialPostUpdate,
+    SocialScheduleRequest,
+    SocialBulkIdsRequest,
+    SocialBulkActionResultOut,
+    SocialBulkGenerateRequest,
+    SocialCalendarGenerateRequest,
+    SocialExportRequest,
+    SocialExportResult,
     FacebookAccountCreate,
     FacebookAccountOut,
     StructureReportOut,
@@ -177,6 +193,7 @@ from ai.seo.outreach_drafter import draft_outreach_email
 from ai.seo.rank_alerts import compute_rank_changes, dropped_out_of_top_10, top_movers
 from ai.seo.rollup_digest import generate_rollup_digest
 from ai.seo.social_content import generate_social_post
+from ai.seo.social_scheduler import publish_one as publish_one_social_post
 from automation.seo.backlinks.factory import get_provider as get_backlink_provider
 from automation.seo.cms.factory import get_cms_client
 from automation.seo.crawler import crawl_site, fetch_sitemap_urls
@@ -208,7 +225,6 @@ from automation.seo.semrush_client import (
 )
 from automation.seo.server_access import client_for_site as sftp_client_for_site
 from automation.seo.slack_notifier import send_slack_message
-from automation.seo.social_poster import publish_social_post
 from automation.seo.page_tag_audit import extract_tag_values as extract_page_tag_values
 from automation.seo.page_tag_audit import run_page_tag_audit
 from automation.seo.technical_audit import run_all_detectors
@@ -793,6 +809,26 @@ def website_traffic_route(payload: WebsiteTrafficRequest, db: Session = Depends(
     result = fetch_website_traffic(payload.website)
     if result is None:
         raise HTTPException(status_code=502, detail="Website traffic request failed — see server logs")
+    return result
+
+
+@router.post("/backlinks/competitor-analysis", response_model=CompetitorAnalysisOut)
+def competitor_analysis_route(payload: CompetitorAnalysisRequest, db: Session = Depends(get_db)):
+    """Module 47 — one-call competitor snapshot for any domain
+    (semrush-seo3's /competitor.php): estimated visits, engagement, 12
+    months of visit history, traffic-source split, top countries, and top
+    keywords. This endpoint returned a provider-side 401 for every real
+    domain when first tested; the provider has since fixed it and it was
+    re-verified live against webpays.com (see rapidapi_domain_client.py)."""
+    from automation.seo.rapidapi_domain_client import fetch_competitor_analysis, is_configured
+
+    if not is_configured():
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_MAGIC_KEY is not set in .env")
+    _site_or_404(payload.site_id, db)
+
+    result = fetch_competitor_analysis(payload.website)
+    if result is None:
+        raise HTTPException(status_code=502, detail="Competitor analysis request failed — see server logs")
     return result
 
 
@@ -2350,31 +2386,224 @@ def publish_social_post_route(post_id: int, db: Session = Depends(get_db)):
     if row.status not in ("approved", "failed"):
         raise HTTPException(status_code=409, detail=f"Post must be approved first (current status: {row.status})")
 
-    facebook_page_id = None
-    facebook_access_token = None
-    if row.platform == "facebook" and row.facebook_account_id is not None:
-        account = database.get_facebook_account(row.facebook_account_id)
-        if account is None:
-            database.mark_social_post_failed(post_id, f"Facebook account {row.facebook_account_id} was deleted")
-            db.expire_all()
-            return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
-        facebook_page_id = account["page_id"]
-        facebook_access_token = account["page_access_token"]
-
-    result = publish_social_post(
-        row.platform,
-        row.content,
-        image_url=row.image_url,
-        facebook_page_id=facebook_page_id,
-        facebook_access_token=facebook_access_token,
-    )
-    if result.ok:
-        database.mark_social_post_posted(post_id, result.external_post_id)
-    else:
-        database.mark_social_post_failed(post_id, result.detail)
+    publish_one_social_post(post_id)
 
     db.expire_all()
     return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+
+
+@router.post("/social/{post_id}/schedule", response_model=SocialPostOut)
+def schedule_social_post_route(post_id: int, payload: SocialScheduleRequest, db: Session = Depends(get_db)):
+    """Module 41 — sets/clears when this post should auto-publish. Scheduling
+    and approval are independent on purpose: a draft can be scheduled ahead
+    of time, but the scheduler job only ever picks up posts that are ALSO
+    status='approved' — so a scheduled-but-still-draft post won't go out
+    just because its time arrived, preserving the human-review gate."""
+    row = db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No social post {post_id}")
+    if row.status == "posted":
+        raise HTTPException(status_code=409, detail="Can't schedule a post that's already been published")
+
+    scheduled_for = payload.scheduled_for.strftime("%Y-%m-%d %H:%M:%S") if payload.scheduled_for else None
+    database.set_social_post_schedule(post_id, scheduled_for)
+    db.expire_all()
+    return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+
+
+@router.post("/social/bulk-approve", response_model=list[SocialBulkActionResultOut])
+def bulk_approve_social_posts_route(payload: SocialBulkIdsRequest):
+    results = []
+    for post_id in payload.post_ids:
+        ok = database.set_social_post_status(post_id, "approved")
+        results.append(
+            SocialBulkActionResultOut(
+                post_id=post_id, ok=ok, detail="Approved" if ok else f"No social post {post_id}"
+            )
+        )
+    return results
+
+
+@router.post("/social/bulk-publish", response_model=list[SocialBulkActionResultOut])
+def bulk_publish_social_posts_route(payload: SocialBulkIdsRequest, db: Session = Depends(get_db)):
+    results = []
+    for post_id in payload.post_ids:
+        row = db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+        if row is None:
+            results.append(SocialBulkActionResultOut(post_id=post_id, ok=False, detail=f"No social post {post_id}"))
+            continue
+        if row.status not in ("approved", "failed"):
+            results.append(
+                SocialBulkActionResultOut(
+                    post_id=post_id, ok=False, detail=f"Must be approved first (current status: {row.status})"
+                )
+            )
+            continue
+        result = publish_one_social_post(post_id)
+        results.append(SocialBulkActionResultOut(post_id=post_id, ok=result.ok, detail=result.detail))
+    return results
+
+
+@router.post("/social/bulk-generate", response_model=list[SocialPostOut], status_code=201)
+def bulk_generate_social_posts_route(payload: SocialBulkGenerateRequest, db: Session = Depends(get_db)):
+    """Module 41 — the same generation call /social/generate makes, just
+    looped over multiple pasted topics in one request instead of one
+    page_title/content_excerpt pair. Each topic becomes its own
+    page_title AND content_excerpt (there's no separate "excerpt" for a
+    bare pasted topic) — one platform failing for one topic doesn't stop
+    the rest, same graceful-degrade-per-item convention as the batch
+    /social/generate endpoint already uses per platform."""
+    site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
+
+    created_ids = []
+    for topic in payload.topics:
+        topic = topic.strip()
+        if not topic:
+            continue
+        for platform in payload.platforms:
+            draft = generate_social_post(platform, topic, topic, site_id=payload.site_id)
+            if draft is None:
+                continue
+            post_id = database.create_social_post(
+                payload.site_id,
+                platform,
+                draft.content,
+                None,
+                payload.image_url,
+                facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
+            )
+            created_ids.append(post_id)
+
+    if not created_ids:
+        raise HTTPException(status_code=502, detail="Social content generation failed for every topic/platform combination")
+
+    db.expire_all()
+    return db.query(SeoSocialPost).filter(SeoSocialPost.id.in_(created_ids)).all()
+
+
+@router.post("/social/generate-calendar", response_model=list[SocialPostOut], status_code=201)
+def generate_social_calendar_route(payload: SocialCalendarGenerateRequest, db: Session = Depends(get_db)):
+    """Module 41 — a real 30-day (or however many `days`) content
+    calendar: cycles through the given topics (repeating if there are
+    fewer topics than days) so every day in the range gets a real,
+    LLM-generated post per selected platform, each pre-scheduled for
+    that day at `post_time`. Lands as 'draft' like every other generated
+    post — a human still has to review and bulk-approve before the
+    scheduler will actually auto-publish any of them; a calendar of
+    unreviewed AI content going out untouched isn't this feature's job."""
+    site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
+
+    topics = [t.strip() for t in payload.topics if t.strip()]
+    if not topics:
+        raise HTTPException(status_code=400, detail="At least one topic is required")
+
+    try:
+        post_hour, post_minute = (int(part) for part in payload.post_time.split(":", 1))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="post_time must be in HH:MM format")
+
+    created_ids = []
+    for day_offset in range(payload.days):
+        day = payload.start_date + timedelta(days=day_offset)
+        topic = topics[day_offset % len(topics)]
+        scheduled_for = datetime.combine(day, time(post_hour, post_minute)).strftime("%Y-%m-%d %H:%M:%S")
+
+        for platform in payload.platforms:
+            draft = generate_social_post(platform, topic, topic, site_id=payload.site_id)
+            if draft is None:
+                continue
+            post_id = database.create_social_post(
+                payload.site_id,
+                platform,
+                draft.content,
+                None,
+                payload.image_url,
+                facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
+            )
+            database.set_social_post_schedule(post_id, scheduled_for)
+            created_ids.append(post_id)
+
+    if not created_ids:
+        raise HTTPException(status_code=502, detail="Social content generation failed for every day/platform combination")
+
+    db.expire_all()
+    return db.query(SeoSocialPost).filter(SeoSocialPost.id.in_(created_ids)).all()
+
+
+@router.post("/social/export-to-sheet", response_model=SocialExportResult)
+def export_social_posts_to_sheet_route(payload: SocialExportRequest, db: Session = Depends(get_db)):
+    """Module 41 — the Social tab's own "Export to Sheet" button: every
+    generated post for this site (any status) goes into the combined
+    "Social Posts" tab, AND into its own per-platform tab (Facebook/
+    Instagram/LinkedIn/Twitter) — same shape as GSC Queries/Pages/
+    Countries/Devices being separate tabs over the same underlying data,
+    so a user can jump straight to e.g. "LinkedIn" instead of scanning a
+    Platform column. All tabs overwritten on each export (see
+    overwrite_rows), never appended — a re-export always reflects
+    current post state (an approval, a publish, a reschedule since the
+    last export), not a stale copy."""
+    from automation.seo.sheets_client import TAB_HEADERS, format_tab_top_aligned, get_or_create_spreadsheet, overwrite_rows
+
+    # Display names, not the raw lowercase platform enum values — the
+    # whole point of this column is to identify which post is for which
+    # platform at a glance. PLATFORM_TABS maps the same enum value to the
+    # per-platform tab it belongs on (sheets_client.py's own tab names).
+    platform_labels = {"linkedin": "LinkedIn", "facebook": "Facebook", "instagram": "Instagram", "twitter": "Twitter/X"}
+    platform_tabs = {"linkedin": "LinkedIn", "facebook": "Facebook", "instagram": "Instagram", "twitter": "Twitter"}
+
+    _site_or_404(payload.site_id, db)
+    spreadsheet_id = get_or_create_spreadsheet("social")
+    if not spreadsheet_id:
+        return SocialExportResult(ok=False, detail="No Social Media sheet connected yet — connect one on the Social tab.")
+
+    rows = (
+        db.query(SeoSocialPost)
+        .filter(SeoSocialPost.site_id == payload.site_id)
+        .order_by(SeoSocialPost.created_at.desc())
+        .all()
+    )
+    if not rows:
+        return SocialExportResult(ok=False, detail="No social posts yet for this site — generate some first.")
+
+    def _title_from_content(content: str) -> str:
+        first_line = content.strip().split("\n", 1)[0]
+        return f"{first_line[:97]}..." if len(first_line) > 100 else first_line
+
+    def _shared_fields(row) -> list:
+        return [
+            _title_from_content(row.content),
+            row.content,
+            row.status,
+            row.scheduled_for.isoformat() if row.scheduled_for else "",
+            row.posted_at.isoformat() if row.posted_at else "",
+            row.source_url or "",
+            row.external_post_id or "",
+            row.created_at.isoformat() if row.created_at else "",
+        ]
+
+    combined_rows = [
+        [_title_from_content(row.content), platform_labels.get(row.platform, row.platform), *_shared_fields(row)[1:]]
+        for row in rows
+    ]
+
+    if not overwrite_rows("Social Posts", TAB_HEADERS["Social Posts"], combined_rows):
+        return SocialExportResult(ok=False, detail="Sheets write failed — see server logs.")
+    format_tab_top_aligned("Social Posts")  # best-effort, never undoes the data write above
+
+    for platform, tab_name in platform_tabs.items():
+        platform_rows = [_shared_fields(row) for row in rows if row.platform == platform]
+        if overwrite_rows(tab_name, TAB_HEADERS[tab_name], platform_rows):
+            format_tab_top_aligned(tab_name)
+        else:
+            logger.warning("Social export: failed to write the %r tab — combined tab still exported fine", tab_name)
+
+    return SocialExportResult(
+        ok=True, detail=f"Exported {len(combined_rows)} post(s).", sheet_url=_sheet_open_url(spreadsheet_id, "social")
+    )
 
 
 @router.get("/facebook-accounts", response_model=list[FacebookAccountOut])
@@ -2805,20 +3034,53 @@ def _run_post_publish_automation(site, post_id: int, title: str, excerpt: Option
         logger.exception("GSC indexing submission failed for post %s — publish itself already succeeded", post_id)
 
 
-@router.post("/blog/{post_id}/publish", response_model=BlogPostOut)
-def publish_blog_post_route(post_id: int, db: Session = Depends(get_db)):
-    """'Publish' means "create it as a draft in the CMS" — see
-    automation/seo/cms/base.py's create_post docstring for why this
-    deliberately never puts a page live on its own; a human still has to
-    hit Publish inside WordPress/Webflow itself.
+def _do_go_live_blog_post(post_id: int, db: Session) -> tuple[bool, str]:
+    """The actual "flip the CMS post to publish/isDraft=false" step —
+    shared by the manual /blog/{id}/go-live route and _do_publish_
+    blog_post's go_live=True path (the scheduler), same "one code path"
+    reasoning as _do_publish_blog_post's own docstring. Assumes the post
+    already has a cms_post_id (the route validates this before calling
+    in); returns (ok, detail), never raises for an ordinary CMS failure."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        return False, f"No blog post {post_id}"
+    site = db.query(SeoSite).filter(SeoSite.id == row.site_id).first()
+    if site is None:
+        return False, f"No SEO site {row.site_id}"
 
-    Module 36 — before pushing to the CMS, auto-attaches a featured
-    image (if one hasn't already been generated/set) and injects a
-    Related Reading section; after a successful publish, auto-generates
-    OG tags, indexes the page for future interlinking, and submits the
-    URL to GSC. All of this graceful-degrades — a site with no image
-    provider or no server access configured still publishes normally,
-    just without those extras."""
+    client = _cms_client_for(site)
+    result = client.update_post(row.cms_post_id, status="publish")
+    if result.ok:
+        database.mark_blog_post_live(post_id)
+        return True, "Live"
+    else:
+        database.mark_blog_post_go_live_failed(post_id, result.detail)
+        return False, result.detail
+
+
+def _do_publish_blog_post(post_id: int, db: Session, go_live: bool = False) -> tuple[bool, str]:
+    """The actual "resolve the CMS client, attach an image, inject
+    interlinks, create the CMS draft, run post-publish automation"
+    orchestration — shared by the manual /blog/{id}/publish route,
+    /blog/bulk-publish, and the recurring scheduler job (ai/seo/
+    blog_scheduler.py), same "one code path, not copies that could
+    drift" reasoning as automation/seo/social_poster.py's publish_one.
+    Takes its own db Session so the scheduler (no FastAPI request in
+    scope) can pass in a short-lived SessionLocal() instance — see
+    blog_scheduler.py. Returns (ok, detail); never raises for an
+    ordinary publish failure (CMS error, missing image provider, etc.),
+    only HTTPException for a genuinely missing post/site, matching every
+    other route in this file.
+
+    go_live=True immediately follows a successful CMS-draft creation
+    with the same "make it actually public" step /blog/{id}/go-live
+    does, rather than leaving it sitting as a CMS draft awaiting a human
+    to notice and click Go Live. The manual Publish button and bulk-
+    publish deliberately keep go_live=False (create-draft-then-human-
+    reviews, /blog/{id}/publish's own long-standing behavior); the
+    scheduler passes go_live=True — a post someone scheduled for a
+    specific time is expected to actually appear on the site at that
+    time, not land in an admin queue nobody's watching."""
     row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
@@ -2862,11 +3124,254 @@ def publish_blog_post_route(post_id: int, db: Session = Depends(get_db)):
         link = result.post.link if result.post else None
         database.mark_blog_post_published(post_id, result.post.id if result.post else None, link)
         _run_post_publish_automation(site, post_id, row.title, row.excerpt, link)
+        if go_live:
+            # mark_blog_post_published just wrote cms_post_id through
+            # agent/database.py's own (raw sqlite) connection — this
+            # SQLAlchemy Session already has `row` in its identity map
+            # from the query above, so without expiring it here,
+            # _do_go_live_blog_post's own query would hand back that
+            # same stale in-memory object (cms_post_id still None)
+            # instead of re-reading the row this call just wrote.
+            # Verified live: this produced a real 404 to
+            # .../posts/None before this fix.
+            db.expire_all()
+            live_ok, live_detail = _do_go_live_blog_post(post_id, db)
+            return live_ok, ("Live" if live_ok else f"Published as a CMS draft, but going live failed: {live_detail}")
+        return True, "Published"
     else:
         database.mark_blog_post_failed(post_id, result.detail)
+        return False, result.detail
 
+
+@router.post("/blog/{post_id}/publish", response_model=BlogPostOut)
+def publish_blog_post_route(post_id: int, db: Session = Depends(get_db)):
+    """'Publish' means "create it as a draft in the CMS" — see
+    automation/seo/cms/base.py's create_post docstring for why this
+    deliberately never puts a page live on its own; a human still has to
+    hit Publish inside WordPress/Webflow itself.
+
+    Module 36 — before pushing to the CMS, auto-attaches a featured
+    image (if one hasn't already been generated/set) and injects a
+    Related Reading section; after a successful publish, auto-generates
+    OG tags, indexes the page for future interlinking, and submits the
+    URL to GSC. All of this graceful-degrades — a site with no image
+    provider or no server access configured still publishes normally,
+    just without those extras."""
+    _do_publish_blog_post(post_id, db)
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/{post_id}/schedule", response_model=BlogPostOut)
+def schedule_blog_post_route(post_id: int, payload: BlogScheduleRequest, db: Session = Depends(get_db)):
+    """Module 59 — sets/clears when this post should auto-publish.
+    Scheduling and approval are independent on purpose, same as the
+    social-post equivalent: a draft can be scheduled ahead of time, but
+    the scheduler job only ever picks up posts that are ALSO
+    status='approved' — so a scheduled-but-still-draft post won't go out
+    just because its time arrived, preserving the human-review gate."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+    if row.status == "live":
+        raise HTTPException(status_code=409, detail="Can't schedule a post that's already live")
+
+    scheduled_at = payload.scheduled_at.strftime("%Y-%m-%d %H:%M:%S") if payload.scheduled_at else None
+    database.set_blog_post_schedule(post_id, scheduled_at)
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/bulk-approve", response_model=list[BlogBulkActionResultOut])
+def bulk_approve_blog_posts_route(payload: BlogBulkIdsRequest):
+    results = []
+    for post_id in payload.post_ids:
+        ok = database.set_blog_post_status(post_id, "approved")
+        results.append(BlogBulkActionResultOut(post_id=post_id, ok=ok, detail="Approved" if ok else f"No blog post {post_id}"))
+    return results
+
+
+@router.post("/blog/bulk-publish", response_model=list[BlogBulkActionResultOut])
+def bulk_publish_blog_posts_route(payload: BlogBulkIdsRequest, db: Session = Depends(get_db)):
+    """One post's failure (CMS error, transient network issue) never
+    stops the rest, same graceful-degrade-per-item convention as the
+    social-post bulk-publish route."""
+    results = []
+    for post_id in payload.post_ids:
+        try:
+            ok, detail = _do_publish_blog_post(post_id, db)
+            results.append(BlogBulkActionResultOut(post_id=post_id, ok=ok, detail=detail))
+        except HTTPException as exc:
+            results.append(BlogBulkActionResultOut(post_id=post_id, ok=False, detail=str(exc.detail)))
+    return results
+
+
+def _generate_and_save_blog_post(
+    site: SeoSite, topic: str, min_words: int, generate_image: bool
+) -> Optional[int]:
+    """Shared by bulk-generate and generate-calendar below: one full
+    draft (text via generate_blog_post + structure check, matching
+    /blog/generate exactly) plus, if requested, a real featured image via
+    the same generate_and_publish_image pipeline /blog/{id}/publish uses.
+    Returns the new post id, or None if text generation itself failed
+    (an image failure alone doesn't discard an otherwise-good draft —
+    same graceful-degrade convention as publish's own auto-image step)."""
+    draft = generate_blog_post(topic, None, site_id=site.id, min_words=min_words)
+    if draft is None:
+        return None
+
+    structure = analyze_structure(draft.content_html, primary_keyword=None, min_words=min_words)
+    structure_issues_json = json.dumps(
+        [{"rule": i.rule, "severity": i.severity, "message": i.message} for i in structure.issues]
+    )
+    post_id = database.create_blog_post(
+        site.id, topic, None, draft.title, draft.excerpt, draft.content_html, structure.passed, structure_issues_json
+    )
+
+    if generate_image:
+        try:
+            image_prompt = derive_image_prompt(draft.content_html, title=draft.title, site_id=site.id) or draft.title
+            image_result = generate_and_publish_image(site, image_prompt, task="blog_post")
+            if image_result.ok:
+                database.set_blog_post_image(post_id, image_result.url)
+        except Exception:
+            logger.exception("Bulk-generate: image generation failed for post %s — draft still saved without one", post_id)
+
+    return post_id
+
+
+@router.post("/blog/bulk-generate", response_model=list[BlogPostOut], status_code=201)
+def bulk_generate_blog_posts_route(payload: BlogBulkGenerateRequest, db: Session = Depends(get_db)):
+    """Module 59 — the same generation call /blog/generate makes, just
+    looped over multiple pasted topics in one request. Each topic takes
+    roughly 1-3 minutes for the text alone (the slower, higher-quality
+    model, same as a single /blog/generate call) plus another 30-90s for
+    its image if generate_image is set — a batch of several topics can
+    genuinely take many minutes; the frontend uses no request timeout for
+    this route for that reason. One topic's failure doesn't stop the
+    rest, same graceful-degrade-per-item convention as the social-post
+    bulk-generate route."""
+    site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
+
+    created_ids = []
+    for topic in payload.topics:
+        topic = topic.strip()
+        if not topic:
+            continue
+        post_id = _generate_and_save_blog_post(site, topic, payload.min_words, payload.generate_image)
+        if post_id is not None:
+            created_ids.append(post_id)
+
+    if not created_ids:
+        raise HTTPException(status_code=502, detail="Blog post generation failed for every topic given")
+
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id.in_(created_ids)).all()
+
+
+@router.post("/blog/generate-calendar", response_model=list[BlogPostOut], status_code=201)
+def generate_blog_calendar_route(payload: BlogCalendarGenerateRequest, db: Session = Depends(get_db)):
+    """Module 59 — a real content calendar for the blog, same mechanism
+    as /social/generate-calendar: cycles through the given topics
+    (repeating if there are fewer topics than days) so every day in the
+    range gets a real, LLM-generated post pre-scheduled for that day at
+    post_time. Lands as 'draft' like every other generated post — a
+    human still has to review and bulk-approve before the scheduler will
+    actually auto-publish any of them."""
+    site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
+
+    topics = [t.strip() for t in payload.topics if t.strip()]
+    if not topics:
+        raise HTTPException(status_code=400, detail="At least one topic is required")
+
+    try:
+        post_hour, post_minute = (int(part) for part in payload.post_time.split(":", 1))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="post_time must be in HH:MM format")
+
+    created_ids = []
+    for day_offset in range(payload.days):
+        day = payload.start_date + timedelta(days=day_offset)
+        topic = topics[day_offset % len(topics)]
+        scheduled_at = datetime.combine(day, time(post_hour, post_minute)).strftime("%Y-%m-%d %H:%M:%S")
+
+        post_id = _generate_and_save_blog_post(site, topic, payload.min_words, payload.generate_image)
+        if post_id is not None:
+            database.set_blog_post_schedule(post_id, scheduled_at)
+            created_ids.append(post_id)
+
+    if not created_ids:
+        raise HTTPException(status_code=502, detail="Blog post generation failed for every day given")
+
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id.in_(created_ids)).all()
+
+
+@router.post("/blog/export-to-sheet", response_model=BlogExportResult)
+def export_blog_posts_to_sheet_route(payload: BlogExportRequest, db: Session = Depends(get_db)):
+    """Module 59 — the Blog tab's own "Export to Sheet" button: every
+    generated post for this site (any status) into a "Blog Posts" tab —
+    title, status, category, tags, author, slug, primary keyword,
+    scheduled time, and its CMS-draft/live link once published.
+    Overwritten on each export (see overwrite_rows), never appended — a
+    re-export always reflects current post state (an approval/publish/
+    reschedule since the last export), same convention as
+    /social/export-to-sheet. There's no separate "author" concept
+    tracked per blog post — every post this app publishes goes out
+    under the site's own configured CMS account, so that account's
+    username is the real, truthful answer here."""
+    from automation.seo.sheets_client import TAB_HEADERS, format_tab_top_aligned, get_or_create_spreadsheet, overwrite_rows
+
+    site = _site_or_404(payload.site_id, db)
+    author = site.cms_username or site.name
+    spreadsheet_id = get_or_create_spreadsheet("blog")
+    if not spreadsheet_id:
+        return BlogExportResult(ok=False, detail="No Blog sheet connected yet — connect one on the Blog tab.")
+
+    rows = (
+        db.query(SeoBlogPost)
+        .filter(SeoBlogPost.site_id == payload.site_id)
+        .order_by(SeoBlogPost.created_at.desc())
+        .all()
+    )
+    if not rows:
+        return BlogExportResult(ok=False, detail="No blog posts yet for this site — generate some first.")
+
+    def _joined(json_str: Optional[str]) -> str:
+        if not json_str:
+            return ""
+        try:
+            return ", ".join(json.loads(json_str))
+        except (TypeError, ValueError):
+            return ""
+
+    sheet_rows = [
+        [
+            row.title,
+            row.status,
+            _joined(row.categories),
+            _joined(row.tags),
+            author,
+            row.slug or "",
+            row.primary_keyword or "",
+            row.scheduled_at.isoformat() if row.scheduled_at else "",
+            row.cms_post_link or "",
+            row.created_at.isoformat() if row.created_at else "",
+        ]
+        for row in rows
+    ]
+
+    if not overwrite_rows("Blog Posts", TAB_HEADERS["Blog Posts"], sheet_rows):
+        return BlogExportResult(ok=False, detail="Sheets write failed — see server logs.")
+    format_tab_top_aligned("Blog Posts")  # best-effort, never undoes the data write above
+
+    return BlogExportResult(
+        ok=True, detail=f"Exported {len(sheet_rows)} post(s).", sheet_url=_sheet_open_url(spreadsheet_id, "blog")
+    )
 
 
 @router.post("/blog/{post_id}/go-live", response_model=BlogPostOut)
@@ -2888,16 +3393,6 @@ def go_live_blog_post_route(post_id: int, db: Session = Depends(get_db)):
     if not row.cms_post_id:
         raise HTTPException(status_code=409, detail="No CMS post id on record — publish it again first")
 
-    site = db.query(SeoSite).filter(SeoSite.id == row.site_id).first()
-    if site is None:
-        raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
-
-    client = _cms_client_for(site)
-    result = client.update_post(row.cms_post_id, status="publish")
-    if result.ok:
-        database.mark_blog_post_live(post_id)
-    else:
-        database.mark_blog_post_go_live_failed(post_id, result.detail)
-
+    _do_go_live_blog_post(post_id, db)
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()

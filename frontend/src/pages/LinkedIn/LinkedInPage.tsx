@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Briefcase, Clock, ExternalLink, Loader2, Sparkles } from "lucide-react";
 
 import PageMeta from "../../components/common/PageMeta";
+import ProgressBar from "@/components/common/ProgressBar";
 import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
 import { Badge } from "@/components/shadcn/badge";
@@ -128,14 +129,7 @@ export default function LinkedInPage() {
                 </Badge>
               </div>
 
-              <div className="mb-3 h-1.5 w-full overflow-hidden rounded-full bg-gray-100 dark:bg-white/5">
-                <div
-                  className={`h-full rounded-full transition-all ${
-                    activeJob.status === "failed" ? "bg-error-500" : "bg-brand-500"
-                  }`}
-                  style={{ width: `${activeJob.progress}%` }}
-                />
-              </div>
+              <ProgressBar value={activeJob.progress} failed={activeJob.status === "failed"} className="mb-3" />
 
               {/* Live stage log: "Generating post text…" -> "Generating matching image…" -> "Posting to LinkedIn…" */}
               <div className="space-y-1 text-theme-sm text-gray-600 dark:text-gray-300">

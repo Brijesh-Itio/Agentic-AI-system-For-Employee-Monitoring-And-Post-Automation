@@ -135,10 +135,13 @@ export default function RedirectionTab() {
       if (editingId !== null) dropTestResult(editingId);
       resetForm();
       // Saved either way, but only tell the user it's working when it really is.
-      if (outcome.ok) setNotice(outcome.text);
-      else {
+      if (outcome.ok) {
+        setNotice(outcome.text);
+        toast.success(outcome.text);
+      } else {
         setNotice(null);
         setFormError(outcome.text);
+        toast.error(outcome.text);
       }
       queryClient.invalidateQueries({ queryKey: ["redirects"] });
     },

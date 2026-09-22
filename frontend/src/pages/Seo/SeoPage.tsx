@@ -1,5 +1,5 @@
 import { Fragment, FormEvent, ReactElement, useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
@@ -41,6 +41,7 @@ import {
   Route,
   Search,
   Send,
+  ShieldCheck,
   Server,
   Share2,
   Sparkles,
@@ -55,7 +56,8 @@ import type { AxiosError } from "axios";
 import DOMPurify from "dompurify";
 
 import PageMeta from "@/components/common/PageMeta";
-import RichTextEditor from "@/components/Reports/RichTextEditor";
+import ProgressBar from "@/components/common/ProgressBar";
+import RichTextEditor, { type RichTextEditorHandle } from "@/components/Reports/RichTextEditor";
 import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
 import { Badge } from "@/components/shadcn/badge";
@@ -82,10 +84,14 @@ import {
   approveSocialPost,
   approveTechnicalIssue,
   BacklinkMention,
+  checkBlogPostQuality,
   checkPageSpeed,
+  checkSocialPostQuality,
+  ContentQualityReport,
   createSeoSite,
   analyzeContentStructure,
   DigestRollup,
+  DigestRollupPeriod,
   draftOutreachEmail,
   FaqPair,
   Ga4PageRow,
@@ -218,6 +224,7 @@ import {
   rejectMetaRewrite,
   updateBlogPost,
   updateBlogPostTaxonomy,
+  updateMetaRewrite,
   uploadBlogPostImage,
   uploadSocialPostImage,
   rejectSocialPost,
@@ -232,6 +239,7 @@ import {
   SeoJobRun,
   SeoSite,
   shareSheets,
+  parseQualityReport,
   SocialPlatform,
   StructureIssue,
   StructureReport,
@@ -338,6 +346,159 @@ function formatJobType(jobType: string) {
   return jobType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// Module 60 — shared by both the blog and social draft cards below.
+// Not checked yet: a button to run it. Checked: two badges (originality,
+// humanization) plus an expandable panel with the full report. Both
+// numbers are estimates, not certified results — see the disclaimer at
+// the bottom of the expanded panel and ai/seo/content_quality.py's module
+// docstring for exactly what each does and doesn't cover.
+function ContentQualityPanel({
+  reportJson,
+  checkedAt,
+  onCheck,
+  checking,
+}: {
+  reportJson: string | null;
+  checkedAt: string | null;
+  onCheck: () => void;
+  checking: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const report: ContentQualityReport | null = parseQualityReport(reportJson);
+
+  if (!report) {
+    return (
+      <Button size="sm" variant="outline" onClick={onCheck} disabled={checking}>
+        {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+        Check originality & humanization
+      </Button>
+    );
+  }
+
+  const { humanization: h, plagiarism: p } = report;
+  const humanVariant = h.score >= 70 ? "success" : h.score >= 40 ? "warning" : "destructive";
+  const originality = 100 - p.overall_similarity;
+  const plagVariant = p.overall_similarity < 10 ? "success" : p.overall_similarity < 30 ? "warning" : "destructive";
+
+  return (
+    <div className="mt-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={plagVariant} title={p.verdict}>
+          <ShieldCheck className="h-3 w-3" />
+          Originality {originality}%
+        </Badge>
+        <Badge variant={humanVariant} title={h.band}>
+          <Sparkles className="h-3 w-3" />
+          Humanization {h.score}/100
+        </Badge>
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="text-theme-xs text-brand-600 hover:underline dark:text-brand-400"
+        >
+          {expanded ? "Hide details" : "Details"}
+        </button>
+        <button
+          onClick={onCheck}
+          disabled={checking}
+          className="text-theme-xs text-gray-400 hover:text-gray-600 disabled:opacity-50 dark:hover:text-gray-300"
+        >
+          {checking ? "Re-checking…" : "Re-check"}
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="mt-2 space-y-2.5 rounded-lg border border-gray-100 bg-gray-50 p-3 text-theme-xs dark:border-gray-800 dark:bg-white/5">
+          <div>
+            <p className="font-medium text-gray-700 dark:text-gray-200">Humanization — {h.band}</p>
+            <p className="mt-0.5 text-gray-400">
+              {h.word_count} words · avg {h.avg_sentence_length} words/sentence · sentence variety {h.sentence_length_variety}/100
+              {" "}
+              · vocabulary variety {h.lexical_diversity}/100
+            </p>
+            {h.notes.map((n, i) => (
+              <p key={i} className="mt-0.5 text-gray-400">• {n}</p>
+            ))}
+            {h.flagged_phrases.length > 0 && (
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {h.flagged_phrases.map((f, i) => (
+                  <span
+                    key={i}
+                    title={f.reason}
+                    className="rounded bg-warning-50 px-1.5 py-0.5 text-warning-700 dark:bg-warning-500/10 dark:text-warning-400"
+                  >
+                    "{f.phrase}"
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="border-t border-gray-200 pt-2 dark:border-gray-700">
+            <p className="font-medium text-gray-700 dark:text-gray-200">Originality — {p.verdict}</p>
+            {p.matches.map((m, i) => (
+              <p key={i} className="mt-0.5 text-gray-400">
+                {m.similarity}% similar to your {m.source_type} post "{m.source_title}" — matched: "…{m.matched_snippet}…"
+              </p>
+            ))}
+          </div>
+
+          <p className="border-t border-gray-200 pt-2 text-gray-400 dark:border-gray-700 dark:text-gray-500">
+            {checkedAt && `Checked ${new Date(checkedAt).toLocaleString()}. `}
+            Originality is checked against this site's own saved content, not the public internet. Humanization is a
+            heuristic estimate of how AI-sounding the writing reads (sentence variety, wording, stock phrases) — not
+            a certified AI-content detector. Both are a starting point for review, not a pass/fail gate.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Module 61 — content generation (blog/social, single/bulk/calendar) used
+// to visibly "stop" the moment you switched to another SEO tab: BlogTab/
+// SocialTab are only mounted while their own tab is active
+// (`{tab === "blog" && <BlogTab .../>}`), so switching away destroys the
+// component — and with it, the spinner/progress bar that were the only
+// thing showing it was still working. The generation itself was never
+// actually affected (confirmed: TanStack Query's Mutation.execute() runs
+// the request and calls onSuccess/onError to completion regardless of
+// whether any component is still mounted to display it — that's how the
+// "Blog post drafted."/"Social content generation failed" toasts still
+// reliably fire even after navigating away). What was genuinely missing
+// is a status that survives the tab switch. Every generate/bulk-generate/
+// calendar mutation across both tabs is tagged with a mutationKey
+// (["seo","content-generate", contentType, mode, siteId]); this reads
+// them straight from TanStack Query's global mutation cache — which
+// outlives any one tab's component — instead of from BlogTab/SocialTab's
+// own now-destroyed local state, rendered once here, above the tab
+// buttons, so it's visible no matter which tab is open.
+function ContentGenerationStatusBar({ siteId }: { siteId: number }) {
+  const rawKeys = useMutationState({
+    filters: { mutationKey: ["seo", "content-generate"], status: "pending" },
+    select: (mutation) => mutation.options.mutationKey as unknown[] | undefined,
+  });
+  const pendingKeys = rawKeys.filter((key) => key?.[4] === siteId);
+
+  if (pendingKeys.length === 0) return null;
+
+  const blogCount = pendingKeys.filter((k) => k?.[2] === "blog").length;
+  const socialCount = pendingKeys.filter((k) => k?.[2] === "social").length;
+  const parts = [
+    blogCount > 0 ? `${blogCount} blog post${blogCount > 1 ? "s" : ""}` : null,
+    socialCount > 0 ? `${socialCount} social post${socialCount > 1 ? "s" : ""}` : null,
+  ].filter(Boolean);
+
+  return (
+    <div className="mb-3 flex items-center gap-2 rounded-lg border border-brand-100 bg-brand-50 px-3 py-2 text-theme-sm text-brand-700 dark:border-brand-500/20 dark:bg-brand-500/10 dark:text-brand-300">
+      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+      <span>
+        Generating {parts.join(" and ")} — this keeps running no matter which tab is open here; you'll see it appear
+        in its list (and a confirmation) once it's done.
+      </span>
+    </div>
+  );
+}
+
 const blogStatusVariant: Record<string, "warning" | "success" | "outline" | "destructive"> = {
   draft: "outline",
   approved: "warning",
@@ -371,6 +532,7 @@ function NewSiteForm({ onCreated, onCancel }: { onCreated: (site: SeoSite) => vo
     mutationFn: () => createSeoSite({ name: name.trim(), base_url: baseUrl.trim(), cms_type: "wordpress" }),
     onSuccess: (site) => {
       queryClient.invalidateQueries({ queryKey: ["seo", "sites"] });
+      toast.success(`${site.name} added.`);
       onCreated(site);
     },
     onError: (err) => {
@@ -1577,6 +1739,7 @@ function WebpBulkConvertCard({ siteId }: { siteId: number }) {
         {!hasReviewedDryRun && !runMutation.isPending && (
           <p className="mt-2 text-theme-xs text-gray-400">Scan this URL first — "Convert for real" unlocks once you've reviewed it.</p>
         )}
+        {(dryRunMutation.isPending || runMutation.isPending) && <ProgressBar className="mt-3 max-w-sm" />}
         {report && (
           <div className="mt-4 space-y-3">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -2060,7 +2223,17 @@ function OverviewTab({
   });
   const latestScore = pagespeedQuery.data?.[0]?.performance_score ?? null;
 
-  const jobsQuery = useQuery({ queryKey: ["seo", "jobs", siteId], queryFn: () => getSeoJobs(siteId, 15) });
+  // The daily automation cycle runs server-side (apscheduler, 06:00 local)
+  // and writes/updates these rows as it goes, so without polling the panel
+  // shows whatever it looked like at page load — a "running" step never
+  // flips to success/failed, and a step that starts after load never
+  // appears, until the user manually reloads. Poll while a step is running
+  // so the badge updates live; back off once everything has finished.
+  const jobsQuery = useQuery({
+    queryKey: ["seo", "jobs", siteId],
+    queryFn: () => getSeoJobs(siteId, 15),
+    refetchInterval: (query) => (query.state.data?.some((j) => j.status === "running") ? 5_000 : 30_000),
+  });
   const jobs = jobsQuery.data ?? [];
   const today = new Date().toISOString().slice(0, 10);
   const todaysJobs = jobs.filter((j) => j.run_date === today);
@@ -2171,7 +2344,10 @@ function OverviewTab({
 
   const generateFixMutation = useMutation({
     mutationFn: (issueId: number) => generateTechnicalIssueFix(issueId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] }),
+    onSuccess: () => {
+      toast.success("Fix generated — review it below before applying.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
+    },
     onError: (err) => {
       const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
       toast.error(detail || "Could not generate a fix for this issue.");
@@ -2193,7 +2369,10 @@ function OverviewTab({
 
   const aiSuggestionMutation = useMutation({
     mutationFn: (issueId: number) => generateTechnicalIssueAiSuggestion(issueId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] }),
+    onSuccess: () => {
+      toast.success("AI suggestion generated.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
+    },
     onError: (err) => {
       const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
       toast.error(detail || "Could not generate an AI suggestion for this issue.");
@@ -2264,6 +2443,16 @@ function OverviewTab({
           title="Backfill a specific past day instead of today"
         />
       </div>
+      {(auditMutation.isPending || digestMutation.isPending) && (
+        <div>
+          <ProgressBar />
+          <p className="mt-1.5 text-theme-xs text-gray-400">
+            {auditMutation.isPending
+              ? "Crawling the site and checking every page — this can take a couple of minutes for a large site."
+              : "Writing today's summary locally with Ollama…"}
+          </p>
+        </div>
+      )}
 
       <PageTagAuditCard siteId={siteId} />
 
@@ -2953,11 +3142,56 @@ const metaRewriteStatusVariant: Record<string, "warning" | "success" | "outline"
   rejected: "outline",
 };
 
+// Google's SERP snippet truncation points — the widely-used SEO benchmarks
+// for how long a title/description can be before it risks getting cut off.
+const META_LENGTH_LIMITS = {
+  title: { min: 50, max: 60 },
+  description: { min: 150, max: 160 },
+} as const;
+
+function metaLengthColorClass(length: number, kind: keyof typeof META_LENGTH_LIMITS): string {
+  const { min, max } = META_LENGTH_LIMITS[kind];
+  if (length > max) return "text-error-500";
+  if (length >= min) return "text-success-500";
+  return "text-warning-500";
+}
+
+function MetaLengthCounter({ text, kind }: { text: string; kind: keyof typeof META_LENGTH_LIMITS }) {
+  const length = text.length;
+  const { max } = META_LENGTH_LIMITS[kind];
+  return (
+    <span className={`ml-2 text-theme-xs font-normal ${metaLengthColorClass(length, kind)}`}>
+      {length}/{max} characters
+    </span>
+  );
+}
+
 function MetaRewriteQueuePanel({ siteId }: { siteId: number }) {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const query = useQuery({ queryKey: ["seo", "meta-rewrites", siteId], queryFn: () => getMetaRewrites(siteId) });
   const items = query.data ?? [];
 
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+
+  const startEditing = (item: MetaRewrite) => {
+    setEditingId(item.id);
+    setEditTitle(item.suggested_title ?? "");
+    setEditDescription(item.suggested_description ?? "");
+  };
+
+  const updateMutation = useMutation({
+    mutationFn: (id: number) =>
+      updateMetaRewrite(id, { suggested_title: editTitle, suggested_description: editDescription }),
+    onSuccess: () => {
+      toast.success("Meta rewrite updated.");
+      setEditingId(null);
+      queryClient.invalidateQueries({ queryKey: ["seo", "meta-rewrites", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't save these changes.")),
+  });
   const approveMutation = useMutation({
     mutationFn: (id: number) => approveMetaRewrite(id),
     onSuccess: () => {
@@ -3008,22 +3242,68 @@ function MetaRewriteQueuePanel({ siteId }: { siteId: number }) {
                   </span>
                 </div>
                 <p className="mt-2 break-all text-theme-sm font-medium text-gray-900 dark:text-white">{item.url}</p>
-                {item.suggested_title ? (
+                {editingId === item.id ? (
+                  <div className="mt-2 space-y-3">
+                    <div>
+                      <label className="mb-1 flex items-center text-theme-xs text-gray-400">
+                        Title
+                        <MetaLengthCounter text={editTitle} kind="title" />
+                      </label>
+                      <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} />
+                    </div>
+                    <div>
+                      <label className="mb-1 flex items-center text-theme-xs text-gray-400">
+                        Description
+                        <MetaLengthCounter text={editDescription} kind="description" />
+                      </label>
+                      <textarea
+                        value={editDescription}
+                        onChange={(e) => setEditDescription(e.target.value)}
+                        rows={3}
+                        className="w-full rounded-lg border border-gray-300 bg-transparent p-3 text-theme-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        onClick={() => updateMutation.mutate(item.id)}
+                        disabled={updateMutation.isPending || !editTitle.trim() || !editDescription.trim()}
+                      >
+                        {updateMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                        Save
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setEditingId(null)} disabled={updateMutation.isPending}>
+                        <X className="h-3.5 w-3.5" />
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                ) : item.suggested_title ? (
                   <div className="mt-2 space-y-1">
                     <p className="text-theme-sm text-gray-700 dark:text-gray-300">
                       <span className="text-gray-400">Suggested title: </span>
                       {item.suggested_title}
+                      <MetaLengthCounter text={item.suggested_title} kind="title" />
                     </p>
                     <p className="text-theme-sm text-gray-700 dark:text-gray-300">
                       <span className="text-gray-400">Suggested description: </span>
                       {item.suggested_description}
+                      {item.suggested_description && (
+                        <MetaLengthCounter text={item.suggested_description} kind="description" />
+                      )}
                     </p>
                   </div>
                 ) : (
                   <p className="mt-2 text-theme-xs text-gray-400">No AI draft yet for this item.</p>
                 )}
-                {item.status === "queued" && (
+                {item.status === "queued" && editingId !== item.id && (
                   <div className="mt-3 flex gap-2">
+                    {item.suggested_title && (
+                      <Button size="sm" variant="outline" onClick={() => startEditing(item)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit
+                      </Button>
+                    )}
                     <Button size="sm" variant="outline" onClick={() => approveMutation.mutate(item.id)}>
                       <CheckCircle2 className="h-3.5 w-3.5" />
                       Approve
@@ -3065,6 +3345,19 @@ function SocialTab({ siteId }: { siteId: number }) {
   const facebookAccounts = facebookAccountsQuery.data ?? [];
 
   const generateMutation = useMutation({
+    // Module 61 — a mutationKey lets ContentGenerationStatusBar (rendered
+    // once at the top of the SEO page, outside any tab) track this via
+    // TanStack Query's global mutation cache instead of this component's
+    // own state. Switching to another SEO tab unmounts SocialTab, which
+    // destroys this hook instance — but the mutationKey'd entry in the
+    // cache is what the status bar reads, so "still generating" keeps
+    // showing regardless. The generation itself was never actually
+    // stopped by switching tabs (Mutation.execute() runs to completion
+    // and calls onSuccess/onError below regardless of whether any
+    // component is still around to display it) — this only fixes the
+    // part that really was broken: nothing told the user it was still
+    // running once they navigated away.
+    mutationKey: ["seo", "content-generate", "social", "single", siteId],
     mutationFn: () =>
       generateSocialPosts({
         site_id: siteId,
@@ -3079,6 +3372,17 @@ function SocialTab({ siteId }: { siteId: number }) {
       queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
     },
     onError: () => toast.error("Social content generation failed — check that Ollama is running."),
+  });
+
+  // Module 60 — see BlogTab's identical qualityCheckMutation for the
+  // full comment; same shape, just the social-post endpoint.
+  const qualityCheckMutation = useMutation({
+    mutationFn: (id: number) => checkSocialPostQuality(id),
+    onSuccess: () => {
+      toast.success("Originality & humanization checked.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Quality check failed.")),
   });
 
   const approveMutation = useMutation({
@@ -3165,6 +3469,7 @@ function SocialTab({ siteId }: { siteId: number }) {
   // topics instead of one page_title/content_excerpt pair.
   const [bulkTopics, setBulkTopics] = useState("");
   const bulkGenerateMutation = useMutation({
+    mutationKey: ["seo", "content-generate", "social", "bulk", siteId],
     mutationFn: () =>
       bulkGenerateSocialPosts({
         site_id: siteId,
@@ -3194,6 +3499,7 @@ function SocialTab({ siteId }: { siteId: number }) {
     setCalendarPlatforms((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
   };
   const calendarMutation = useMutation({
+    mutationKey: ["seo", "content-generate", "social", "calendar", siteId],
     mutationFn: () =>
       generateSocialCalendar({
         site_id: siteId,
@@ -3455,6 +3761,7 @@ function SocialTab({ siteId }: { siteId: number }) {
             {generateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
             Generate
           </Button>
+          {generateMutation.isPending && <ProgressBar className="mt-3 max-w-sm" />}
 
           <div className="mt-6 border-t border-gray-100 pt-6 dark:border-gray-800">
             <h3 className="mb-2 text-theme-sm font-semibold text-gray-900 dark:text-white">
@@ -3479,6 +3786,7 @@ function SocialTab({ siteId }: { siteId: number }) {
               {bulkGenerateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               Bulk generate
             </Button>
+            {bulkGenerateMutation.isPending && <ProgressBar className="mt-3 max-w-sm" />}
             {(() => {
               const topicCount = bulkTopics.split("\n").map((t) => t.trim()).filter(Boolean).length;
               const combos = topicCount * selectedPlatforms.length;
@@ -3570,10 +3878,13 @@ function SocialTab({ siteId }: { siteId: number }) {
             Generate {calendarDays}-day calendar
           </Button>
           {calendarMutation.isPending && (
-            <p className="mt-2 text-theme-xs text-gray-400">
-              Generating {calendarDays} day(s) × {calendarPlatforms.length} platform(s) — this can take a while for a
-              full 30-day calendar.
-            </p>
+            <>
+              <ProgressBar className="mt-3 max-w-sm" />
+              <p className="mt-2 text-theme-xs text-gray-400">
+                Generating {calendarDays} day(s) × {calendarPlatforms.length} platform(s) — this can take a while for a
+                full 30-day calendar.
+              </p>
+            </>
           )}
         </CardContent>
       </Card>
@@ -3733,6 +4044,12 @@ function SocialTab({ siteId }: { siteId: number }) {
                   ) : (
                     <p className="whitespace-pre-line text-theme-sm text-gray-700 dark:text-gray-300">{post.content}</p>
                   )}
+                  <ContentQualityPanel
+                    reportJson={post.quality_report_json}
+                    checkedAt={post.quality_checked_at}
+                    onCheck={() => qualityCheckMutation.mutate(post.id)}
+                    checking={qualityCheckMutation.isPending && qualityCheckMutation.variables === post.id}
+                  />
                   {post.platform === "instagram" && !post.image_url && (
                     <p className="mt-1 text-theme-xs text-warning-500">
                       No image URL — this post can't be published to Instagram until one is added.
@@ -4173,6 +4490,10 @@ function BlogTab({ siteId }: { siteId: number }) {
   const [editTitle, setEditTitle] = useState("");
   const [editExcerpt, setEditExcerpt] = useState("");
   const [editContent, setEditContent] = useState("");
+  // Save reads content straight from the live editor via this ref
+  // (contentEditorRef.current?.getHTML()) rather than trusting editContent
+  // to have caught up — see RichTextEditorHandle's own comment for why.
+  const contentEditorRef = useRef<RichTextEditorHandle>(null);
   const [editSlug, setEditSlug] = useState("");
   const [editTags, setEditTags] = useState("");
   const [editCategories, setEditCategories] = useState("");
@@ -4200,7 +4521,10 @@ function BlogTab({ siteId }: { siteId: number }) {
 
   const updateMutation = useMutation({
     mutationFn: async (postId: number) => {
-      await updateBlogPost(postId, { title: editTitle, excerpt: editExcerpt, content: editContent });
+      // Read the editor's live content directly rather than editContent —
+      // see contentEditorRef's own comment for why.
+      const content = contentEditorRef.current?.getHTML() ?? editContent;
+      await updateBlogPost(postId, { title: editTitle, excerpt: editExcerpt, content });
       await updateBlogPostTaxonomy(postId, {
         slug: editSlug.trim() || undefined,
         tags: splitCsv(editTags),
@@ -4216,12 +4540,27 @@ function BlogTab({ siteId }: { siteId: number }) {
   });
 
   const generateMutation = useMutation({
+    // Module 61 — see SocialTab's identical generateMutation for the full
+    // comment on why this exists.
+    mutationKey: ["seo", "content-generate", "blog", "single", siteId],
     mutationFn: () => generateBlogPost({ site_id: siteId, topic, primary_keyword: primaryKeyword.trim() || undefined }),
     onSuccess: () => {
       toast.success("Blog post drafted.");
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
     onError: () => toast.error("Blog post generation failed — check that Ollama is running."),
+  });
+
+  // Module 60 — the automatic check runs at generation time; this is the
+  // manual re-check button ContentQualityPanel shows (e.g. after editing
+  // a draft's content, or for a pre-module-60 post that was never checked).
+  const qualityCheckMutation = useMutation({
+    mutationFn: (id: number) => checkBlogPostQuality(id),
+    onSuccess: () => {
+      toast.success("Originality & humanization checked.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Quality check failed.")),
   });
 
   const approveMutation = useMutation({
@@ -4321,6 +4660,7 @@ function BlogTab({ siteId }: { siteId: number }) {
   const [bulkTopics, setBulkTopics] = useState("");
   const [bulkGenerateImages, setBulkGenerateImages] = useState(true);
   const bulkGenerateMutation = useMutation({
+    mutationKey: ["seo", "content-generate", "blog", "bulk", siteId],
     mutationFn: () =>
       bulkGenerateBlogPosts({
         site_id: siteId,
@@ -4344,6 +4684,7 @@ function BlogTab({ siteId }: { siteId: number }) {
   const [calendarPostTime, setCalendarPostTime] = useState("10:00");
   const [calendarGenerateImages, setCalendarGenerateImages] = useState(true);
   const calendarMutation = useMutation({
+    mutationKey: ["seo", "content-generate", "blog", "calendar", siteId],
     mutationFn: () =>
       generateBlogCalendar({
         site_id: siteId,
@@ -4429,9 +4770,12 @@ function BlogTab({ siteId }: { siteId: number }) {
             Generate
           </Button>
           {generateMutation.isPending && (
-            <p className="mt-2 text-theme-xs text-gray-400">
-              A full post takes a minute or two — this uses the slower, higher-quality model on purpose.
-            </p>
+            <>
+              <ProgressBar className="mt-3 max-w-sm" />
+              <p className="mt-2 text-theme-xs text-gray-400">
+                A full post takes a minute or two — this uses the slower, higher-quality model on purpose.
+              </p>
+            </>
           )}
 
           <div className="mt-6 border-t border-gray-100 pt-6 dark:border-gray-800">
@@ -4466,6 +4810,7 @@ function BlogTab({ siteId }: { siteId: number }) {
               {bulkGenerateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               Bulk generate
             </Button>
+            {bulkGenerateMutation.isPending && <ProgressBar className="mt-3 max-w-sm" />}
             {(() => {
               const topicCount = bulkTopics.split("\n").map((t) => t.trim()).filter(Boolean).length;
               if (topicCount === 0) return null;
@@ -4541,10 +4886,13 @@ function BlogTab({ siteId }: { siteId: number }) {
             Generate {calendarDays}-day calendar
           </Button>
           {calendarMutation.isPending && (
-            <p className="mt-2 text-theme-xs text-gray-400">
-              Generating {calendarDays} day(s) — a full post (and image) per day, so this can take a while for a
-              longer calendar.
-            </p>
+            <>
+              <ProgressBar className="mt-3 max-w-sm" />
+              <p className="mt-2 text-theme-xs text-gray-400">
+                Generating {calendarDays} day(s) — a full post (and image) per day, so this can take a while for a
+                longer calendar.
+              </p>
+            </>
           )}
         </CardContent>
       </Card>
@@ -4715,6 +5063,12 @@ function BlogTab({ siteId }: { siteId: number }) {
                         ))}
                       </ul>
                     )}
+                    <ContentQualityPanel
+                      reportJson={post.quality_report_json}
+                      checkedAt={post.quality_checked_at}
+                      onCheck={() => qualityCheckMutation.mutate(post.id)}
+                      checking={qualityCheckMutation.isPending && qualityCheckMutation.variables === post.id}
+                    />
                     {post.error && <p className="mt-1 text-theme-xs text-red-500">{post.error}</p>}
                     {(post.slug || post.tags || post.categories) && (
                       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-theme-xs text-gray-400">
@@ -4826,7 +5180,13 @@ function BlogTab({ siteId }: { siteId: number }) {
                         </div>
                         <div>
                           <Label htmlFor={`blog-edit-content-${post.id}`}>Content</Label>
-                          <RichTextEditor value={editContent} onChange={setEditContent} headings placeholder="Post body…" />
+                          <RichTextEditor
+                            ref={contentEditorRef}
+                            value={editContent}
+                            onChange={setEditContent}
+                            headings
+                            placeholder="Post body…"
+                          />
                         </div>
                         <div className="grid gap-3 sm:grid-cols-3">
                           <div>
@@ -5182,9 +5542,12 @@ function PerformanceTab({
             Run Page Speed Check
           </Button>
           {checkMutation.isPending && (
-            <p className="mt-2 text-theme-xs text-gray-400">
-              Lighthouse runs server-side on Google's end — this genuinely takes 20-40 seconds for a real page, longer for a slow or heavy one.
-            </p>
+            <>
+              <ProgressBar className="mt-3 max-w-sm" />
+              <p className="mt-2 text-theme-xs text-gray-400">
+                Lighthouse runs server-side on Google's end — this genuinely takes 20-40 seconds for a real page, longer for a slow or heavy one.
+              </p>
+            </>
           )}
         </CardContent>
       </Card>
@@ -5744,6 +6107,7 @@ function GscPerformancePanel({ siteId }: { siteId: number }) {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     },
+    onSuccess: () => toast.success("CSV downloaded."),
     onError: (err) => toast.error(serverErrorDetail(err, "Download failed.")),
   });
 
@@ -6420,6 +6784,7 @@ function Ga4PerformancePanel({ siteId }: { siteId: number }) {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     },
+    onSuccess: () => toast.success("CSV downloaded."),
     onError: (err) => toast.error(serverErrorDetail(err, "Download failed.")),
   });
 
@@ -7506,7 +7871,10 @@ function KeywordResearchCard() {
           </Button>
         </div>
         {researchMutation.isPending && (
-          <p className="mt-2 text-theme-xs text-gray-400">This can take up to a minute…</p>
+          <>
+            <ProgressBar className="mt-3 max-w-sm" />
+            <p className="mt-2 text-theme-xs text-gray-400">This can take up to a minute…</p>
+          </>
         )}
         {rows && (
           <div className="mt-3 overflow-x-auto">
@@ -7678,7 +8046,10 @@ function RapidApiKeywordCard({ siteId }: { siteId: number }) {
           </Button>
         </div>
         {checkMutation.isPending && (
-          <p className="mt-2 text-theme-xs text-gray-400">This provider can take up to a minute to respond…</p>
+          <>
+            <ProgressBar className="mt-3 max-w-sm" />
+            <p className="mt-2 text-theme-xs text-gray-400">This provider can take up to a minute to respond…</p>
+          </>
         )}
         {result && (
           <pre className="mt-3 max-h-64 overflow-auto rounded-md border border-gray-200 bg-gray-50 p-3 text-theme-xs text-gray-700 dark:border-gray-800 dark:bg-white/5 dark:text-gray-300">
@@ -8137,7 +8508,7 @@ function CompetitorAnalysisCard({ siteId, siteUrl }: { siteId: number; siteUrl: 
                       <CartesianGrid strokeDasharray="3 3" vertical={false} />
                       <XAxis dataKey="month" tick={{ fontSize: 11 }} />
                       <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatCompactNumber(v)} width={44} />
-                      <Tooltip formatter={(v: number) => [v.toLocaleString(), "Visits"]} />
+                      <Tooltip formatter={(v) => [Number(v).toLocaleString(), "Visits"]} />
                       <Bar dataKey="visits" fill="#465fff" radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
@@ -8443,6 +8814,8 @@ export default function SeoPage() {
                   </button>
                 ))}
               </div>
+
+              <ContentGenerationStatusBar siteId={selectedSite.id} />
 
               {tab === "overview" && (
                 <OverviewTab

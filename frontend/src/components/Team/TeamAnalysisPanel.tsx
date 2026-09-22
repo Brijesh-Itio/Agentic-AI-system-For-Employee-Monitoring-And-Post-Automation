@@ -1,10 +1,13 @@
+import { useEffect, useRef } from "react";
 import { AlertTriangle, Loader2, Sparkles, TrendingDown, TrendingUp } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 import { Button } from "@/components/shadcn/button";
 import { Badge } from "@/components/shadcn/badge";
+import ProgressBar from "@/components/common/ProgressBar";
 import TeamComparisonChart from "./TeamComparisonChart";
 import { getTeamAnalysis } from "@/api";
+import { useToast } from "@/context/ToastContext";
 
 const RISK_VARIANT: Record<string, "destructive" | "warning" | "success"> = {
   high: "destructive",
@@ -17,11 +20,25 @@ interface TeamAnalysisPanelProps {
 }
 
 export default function TeamAnalysisPanel({ anonymised }: TeamAnalysisPanelProps) {
+  const toast = useToast();
   const query = useQuery({
     queryKey: ["team", "analysis"],
     queryFn: () => getTeamAnalysis(7),
     enabled: false,
   });
+
+  // The run can take several minutes, so a failure gets a toast too — not
+  // just the inline message below, which is easy to miss if the user has
+  // moved on to another tab while it was running. dataUpdatedAt/errorUpdatedAt
+  // change on every fetch (including a retry of the same failure), so this
+  // fires once per actual attempt rather than once ever.
+  const notifiedErrorRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (query.isError && notifiedErrorRef.current !== query.errorUpdatedAt) {
+      notifiedErrorRef.current = query.errorUpdatedAt;
+      toast.error("Team analysis failed — check the backend and Ollama are reachable.");
+    }
+  }, [query.isError, query.errorUpdatedAt, toast]);
 
   return (
     <div className="space-y-4">
@@ -37,6 +54,15 @@ export default function TeamAnalysisPanel({ anonymised }: TeamAnalysisPanelProps
           Run Analysis
         </Button>
       </div>
+
+      {query.isFetching && (
+        <div>
+          <ProgressBar />
+          <p className="mt-1.5 text-theme-xs text-gray-400">
+            Reading the whole team's week of tracked data with Ollama — this can take several minutes.
+          </p>
+        </div>
+      )}
 
       {query.isError && (
         <p className="text-theme-sm text-error-600 dark:text-error-400">

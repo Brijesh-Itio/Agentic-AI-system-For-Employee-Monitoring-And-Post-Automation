@@ -16,6 +16,7 @@ interface InputProps {
   success?: boolean;
   error?: boolean;
   hint?: string;
+  title?: string;
 }
 
 const Input: FC<InputProps> = ({
@@ -33,6 +34,7 @@ const Input: FC<InputProps> = ({
   success = false,
   error = false,
   hint,
+  title,
 }) => {
   const inputRef = useRef<HTMLInputElement>(null);
   // A date/time input's native calendar-picker icon is a small,
@@ -79,6 +81,7 @@ const Input: FC<InputProps> = ({
         max={max}
         step={step}
         disabled={disabled}
+        title={title}
         className={inputClasses}
       />
 

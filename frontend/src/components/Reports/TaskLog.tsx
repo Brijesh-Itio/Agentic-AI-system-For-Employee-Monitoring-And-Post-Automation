@@ -28,6 +28,7 @@ import DOMPurify from "dompurify";
 import { Button } from "@/components/shadcn/button";
 import { Badge } from "@/components/shadcn/badge";
 import StatStrip from "@/components/common/StatStrip";
+import ProgressBar from "@/components/common/ProgressBar";
 import { useModal } from "@/hooks/useModal";
 import { useToast } from "@/context/ToastContext";
 import DepartmentManagerModal from "./DepartmentManagerModal";
@@ -334,6 +335,18 @@ export default function TaskLog({ date }: TaskLogProps) {
           Import CSV
         </Button>
       </div>
+
+      {/* AI drafting runs a full Ollama pass over the day's log — can take
+          several minutes for a busy department, so it gets its own progress
+          bar rather than just the button's spinner. */}
+      {draftMutation.isPending && (
+        <div>
+          <ProgressBar />
+          <p className="mt-1.5 text-theme-xs text-gray-400">
+            Drafting entries locally with Ollama — this can take a few minutes for a busy day.
+          </p>
+        </div>
+      )}
 
       {/* Filter bar: date itself is controlled one level up (the day
           navigator above this component) — this filters *within* that

@@ -1,9 +1,13 @@
-import { useEffect } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
+import TextAlign from "@tiptap/extension-text-align";
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   Bold,
   Heading2,
   Heading3,
@@ -11,6 +15,7 @@ import {
   Link as LinkIcon,
   List,
   ListOrdered,
+  Quote,
   Strikethrough,
   Undo2,
   Redo2,
@@ -24,6 +29,20 @@ interface RichTextEditorProps {
   // body editing turns this on. H1 is deliberately excluded: that's the
   // post's own title field, not something to duplicate inside the body.
   headings?: boolean;
+}
+
+// Exposed so a caller that's about to save can read the editor's CURRENT
+// content directly (`ref.current?.getHTML()`) instead of trusting `value`
+// to have caught up via onChange -> setState -> re-render first. Found via
+// real testing, not theoretical: that round trip has a real timing gap
+// around rapid-fire edit-then-immediately-save sequences (confirmed with
+// plain typing too, nothing specific to any one toolbar button) where a
+// save could fire before the parent's own state had caught up to the
+// editor's actual content, saving stale content. Reading straight from the
+// live editor instance sidesteps that gap entirely rather than trying to
+// close it.
+export interface RichTextEditorHandle {
+  getHTML: () => string;
 }
 
 function ToolbarButton({
@@ -59,15 +78,49 @@ function ToolbarButton({
   );
 }
 
-export default function RichTextEditor({ value, onChange, placeholder, headings = false }: RichTextEditorProps) {
+const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(function RichTextEditor(
+  { value, onChange, placeholder, headings = false },
+  ref
+) {
+  // The last html *we* emitted via onChange — lets the resync effect below
+  // tell "the parent handed back the value we just gave it" (an echo of
+  // our own edit, arriving as this render's `value` prop after the
+  // onChange -> setState -> re-render round trip) apart from "the parent
+  // genuinely reset `value` to something else" (e.g. cancel/reload).
+  const lastEmittedRef = useRef(value);
+
+  // useEditor's options object (including `content`) is rebuilt on every
+  // render and handed to @tiptap/react's own EditorInstanceManager, which
+  // keeps a ref to "the latest options" and — independently of the resync
+  // effect below, entirely inside the library — re-applies it via
+  // editor.setOptions() a tick after render (its scheduleDestroy/onRender
+  // bookkeeping; see node_modules/@tiptap/react/dist/index.cjs). That
+  // re-apply includes whatever `content` happened to be in the options
+  // object AT THAT MOMENT. Real bug this caused, found by testing (not
+  // theoretical): passing the live `value` prop as `content` here meant
+  // every such re-apply could reset the document back to a `value` that
+  // hadn't caught up yet — invisible while actively typing (each keystroke
+  // re-renders fast enough to keep superseding it), but it would win the
+  // moment typing paused, e.g. right before a Save click, quietly
+  // reverting content that had just been typed. `content` is only ever
+  // meant to seed the editor once; ongoing sync already goes through the
+  // explicit setContent() effect below, which is the one place this
+  // component is allowed to change the document after that.
+  const initialContentRef = useRef(value || "");
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ heading: headings ? { levels: [2, 3] } : false }),
       Link.configure({ openOnClick: false, autolink: true, HTMLAttributes: { rel: "noopener noreferrer" } }),
       Placeholder.configure({ placeholder: placeholder ?? "Write a comment…" }),
+      TextAlign.configure({ types: ["heading", "paragraph"] }),
     ],
-    content: value || "",
-    onUpdate: ({ editor }) => onChange(editor.isEmpty ? "" : editor.getHTML()),
+    content: initialContentRef.current,
+    onUpdate: ({ editor }) => {
+      const html = editor.isEmpty ? "" : editor.getHTML();
+      lastEmittedRef.current = html;
+      onChange(html);
+    },
     editorProps: {
       attributes: {
         class:
@@ -76,13 +129,24 @@ export default function RichTextEditor({ value, onChange, placeholder, headings 
     },
   });
 
-  // Keep the editor in sync if the parent resets `value` (e.g. form reset on close).
+  // Keep the editor in sync if the parent resets `value` (e.g. form reset on close) —
+  // but not when `value` is just our own last edit echoed back.
   useEffect(() => {
-    if (editor && value !== editor.getHTML() && !(value === "" && editor.isEmpty)) {
-      editor.commands.setContent(value || "", { emitUpdate: false });
+    if (!editor || value === lastEmittedRef.current) return;
+    if (value !== editor.getHTML() && !(value === "" && editor.isEmpty)) {
+      lastEmittedRef.current = value;
+      editor.commands.setContent(value || "", false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      getHTML: () => (editor ? (editor.isEmpty ? "" : editor.getHTML()) : value),
+    }),
+    [editor, value]
+  );
 
   if (!editor) return null;
 
@@ -155,6 +219,35 @@ export default function RichTextEditor({ value, onChange, placeholder, headings 
         >
           <ListOrdered className="h-3.5 w-3.5" />
         </ToolbarButton>
+        <ToolbarButton
+          label="Quote"
+          active={editor.isActive("blockquote")}
+          onClick={() => editor.chain().focus().toggleBlockquote().run()}
+        >
+          <Quote className="h-3.5 w-3.5" />
+        </ToolbarButton>
+        <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
+        <ToolbarButton
+          label="Align left"
+          active={editor.isActive({ textAlign: "left" })}
+          onClick={() => editor.chain().focus().setTextAlign("left").run()}
+        >
+          <AlignLeft className="h-3.5 w-3.5" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="Align center"
+          active={editor.isActive({ textAlign: "center" })}
+          onClick={() => editor.chain().focus().setTextAlign("center").run()}
+        >
+          <AlignCenter className="h-3.5 w-3.5" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="Align right"
+          active={editor.isActive({ textAlign: "right" })}
+          onClick={() => editor.chain().focus().setTextAlign("right").run()}
+        >
+          <AlignRight className="h-3.5 w-3.5" />
+        </ToolbarButton>
         <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
         <ToolbarButton label="Link" active={editor.isActive("link")} onClick={setLink}>
           <LinkIcon className="h-3.5 w-3.5" />
@@ -178,4 +271,6 @@ export default function RichTextEditor({ value, onChange, placeholder, headings 
       <EditorContent editor={editor} />
     </div>
   );
-}
+});
+
+export default RichTextEditor;

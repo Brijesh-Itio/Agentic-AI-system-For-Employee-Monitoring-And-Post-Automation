@@ -1127,6 +1127,10 @@ _SEO_SOCIAL_POSTS_EXTRA_COLUMNS = {
     # comparison against the same format sorts/compares correctly for
     # the "is it due yet" query — never format this column differently.
     "scheduled_for": "DATETIME",
+    # Module 60 — plagiarism/humanization check result, JSON-encoded
+    # ContentQualityReportOut (api/schemas.py). NULL means not checked yet.
+    "quality_report_json": "TEXT",
+    "quality_checked_at": "DATETIME",
 }
 
 # Module 36 — blog posts shipped without a featured-image field; added
@@ -1152,6 +1156,10 @@ _SEO_BLOG_POSTS_EXTRA_COLUMNS = {
     # comparison against that exact format is what the "is it due yet"
     # query relies on.
     "scheduled_at": "DATETIME",
+    # Module 60 — same convention as _SEO_SOCIAL_POSTS_EXTRA_COLUMNS's own
+    # quality_report_json/quality_checked_at above.
+    "quality_report_json": "TEXT",
+    "quality_checked_at": "DATETIME",
 }
 
 
@@ -2761,6 +2769,17 @@ def set_social_post_image(post_id: int, image_url: str) -> bool:
         return cur.rowcount > 0
 
 
+def set_social_post_quality(post_id: int, quality_report_json: str) -> bool:
+    """Module 60 — see set_blog_post_quality's own comment; identical
+    shape, just the social_posts table."""
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_social_posts SET quality_report_json = ?, quality_checked_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (quality_report_json, post_id),
+        )
+        return cur.rowcount > 0
+
+
 def mark_social_post_posted(post_id: int, external_post_id: Optional[str]) -> None:
     with write_cursor() as cur:
         cur.execute(
@@ -3094,6 +3113,20 @@ def set_blog_post_image(post_id: int, image_url: str) -> None:
         cur.execute("UPDATE seo_blog_posts SET image_url = ? WHERE id = ?", (image_url, post_id))
 
 
+def set_blog_post_quality(post_id: int, quality_report_json: str) -> bool:
+    """Module 60 — stores the plagiarism/humanization check result
+    (JSON-encoded ContentQualityReportOut) run right after generation, or
+    re-run manually after a content edit. A sparse setter like
+    set_blog_post_image, not folded into update_blog_post, so existing
+    callers of that function are unaffected."""
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_blog_posts SET quality_report_json = ?, quality_checked_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (quality_report_json, post_id),
+        )
+        return cur.rowcount > 0
+
+
 # ── seo_blog_posts scheduling — module 59, same shape as seo_social_
 # posts scheduling/bulk actions (module 41) above ──
 
@@ -3201,5 +3234,16 @@ def set_meta_rewrite_status(item_id: int, status: str) -> bool:
         cur.execute(
             "UPDATE seo_meta_rewrite_queue SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
             (status, item_id),
+        )
+        return cur.rowcount > 0
+
+
+def update_meta_rewrite_content(item_id: int, title: Optional[str], description: Optional[str]) -> bool:
+    """Lets a reviewer edit the AI-drafted title/description in place before
+    approving — the draft is a starting point, not the final copy."""
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_meta_rewrite_queue SET suggested_title = ?, suggested_description = ? WHERE id = ?",
+            (title, description, item_id),
         )
         return cur.rowcount > 0

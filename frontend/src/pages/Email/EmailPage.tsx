@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, FileEdit, Loader2, Mail, RefreshCw, Send, Users } from "lucide-react";
 
 import PageMeta from "../../components/common/PageMeta";
+import ProgressBar from "@/components/common/ProgressBar";
 import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
 import { Badge } from "@/components/shadcn/badge";
@@ -71,6 +72,17 @@ export default function EmailPage() {
             </Button>
           </div>
         </div>
+
+        {(campaignMutation.isPending || followUpMutation.isPending) && (
+          <div>
+            <ProgressBar />
+            <p className="mt-1.5 text-theme-xs text-gray-400">
+              {campaignMutation.isPending
+                ? "Writing a personalised email per lead with Ollama and sending over SMTP — can take a while for a long list."
+                : "Checking who's due a follow-up and sending over SMTP…"}
+            </p>
+          </div>
+        )}
 
         {(campaignMutation.isSuccess || followUpMutation.isSuccess) && (
           <div className="rounded-lg border border-success-200 bg-success-50 p-3 text-theme-sm text-success-700 dark:border-success-500/20 dark:bg-success-500/10 dark:text-success-400">

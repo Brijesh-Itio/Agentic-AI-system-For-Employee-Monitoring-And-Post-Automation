@@ -121,6 +121,7 @@ export default function EntryFormModal({ isOpen, onClose, date, entry = null }: 
       const detail =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to create entry";
       setError(detail);
+      toast.error(detail);
     },
   });
 
@@ -135,6 +136,7 @@ export default function EntryFormModal({ isOpen, onClose, date, entry = null }: 
       const detail =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Failed to save changes";
       setError(detail);
+      toast.error(detail);
     },
   });
 

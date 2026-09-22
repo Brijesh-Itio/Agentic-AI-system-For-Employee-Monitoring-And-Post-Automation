@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Play, Square, Terminal, XCircle } from "lucide-react";
 
 import PageMeta from "../../components/common/PageMeta";
+import ProgressBar from "@/components/common/ProgressBar";
 import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
 import { Badge } from "@/components/shadcn/badge";
@@ -34,11 +35,34 @@ export default function CommandModePage() {
     enabled: activeJobId != null,
     refetchInterval: (query) => {
       const status = query.state.data?.status;
+      const isDone = status === "completed" || status === "failed" || status === "cancelled";
+      // The row for this job in "Job History" below was inserted (as
+      // "running") when the command started, and otherwise never refetches —
+      // without this it would keep showing "running" forever once the job
+      // actually finishes.
+      if (isDone) queryClient.invalidateQueries({ queryKey: ["job-history"] });
       return status === "running" || status === "queued" ? 1_500 : false;
     },
   });
 
   const historyQuery = useQuery({ queryKey: ["job-history"], queryFn: getJobHistory });
+
+  // The command can route to any sub-agent (post to LinkedIn, run a
+  // campaign, generate a report, ...) and run for minutes — a toast on
+  // completion/failure catches the user even if they've switched tabs
+  // while it ran, the same as LinkedIn's own job panel does. One toast per
+  // job id — the polling query re-delivers the same terminal state on
+  // every refetch.
+  const notifiedJobRef = useRef<string | null>(null);
+  useEffect(() => {
+    const job = activeJobQuery.data;
+    if (!job || notifiedJobRef.current === job.id) return;
+    if (job.status === "completed") toast.success(job.result || "Command completed.");
+    else if (job.status === "failed") toast.error(job.result || "Command failed.");
+    else if (job.status === "cancelled") toast.info("Command cancelled.");
+    else return;
+    notifiedJobRef.current = job.id;
+  }, [activeJobQuery.data, toast]);
 
   const runMutation = useMutation({
     mutationFn: (cmd: string) => runCommand(cmd),
@@ -125,14 +149,7 @@ export default function CommandModePage() {
                 )}
               </div>
 
-              <div className="mb-3 h-1.5 w-full overflow-hidden rounded-full bg-gray-100 dark:bg-white/5">
-                <div
-                  className={`h-full rounded-full transition-all ${
-                    activeJob.status === "failed" ? "bg-error-500" : "bg-brand-500"
-                  }`}
-                  style={{ width: `${activeJob.progress}%` }}
-                />
-              </div>
+              <ProgressBar value={activeJob.progress} failed={activeJob.status === "failed"} className="mb-3" />
 
               <div className="max-h-56 overflow-y-auto rounded-lg bg-gray-900 p-3 font-mono text-theme-xs text-gray-200">
                 {activeJob.logs.length === 0 ? (

@@ -58,17 +58,21 @@ from api.schemas import (
     CmsPostOut,
     CmsStatusOut,
     ContentAnalyzeRequest,
+    ContentQualityCheckRequest,
+    ContentQualityReportOut,
     DigestGenerateRequest,
     DigestRollupGenerateRequest,
     DigestOut,
     DigestRollupOut,
     FaqPairOut,
     FaqRequest,
+    FlaggedPhraseOut,
     Ga4PageRowOut,
     Ga4PullRequest,
     GscPageRowOut,
     GscPullRequest,
     GscQueryRowOut,
+    HumanizationReportOut,
     IndexingSubmissionOut,
     IndexingSubmitRequest,
     IndexStatusOut,
@@ -77,6 +81,7 @@ from api.schemas import (
     InterlinkSuggestRequest,
     LlmUsageLogOut,
     MetaRewriteOut,
+    MetaRewriteUpdate,
     OgTagsGenerateRequest,
     OgTagsOut,
     RankChangeOut,
@@ -177,12 +182,15 @@ from api.schemas import (
     PageTagAuditOut,
     PageTagAuditRequest,
     PageTagFindingOut,
+    PlagiarismMatchOut,
+    PlagiarismReportOut,
     TechnicalIssueEditTargetOut,
     TechnicalIssueOut,
     TechnicalIssueReview,
     UrlInspectRequest,
 )
 from ai.seo.blog_content import generate_blog_post
+from ai.seo.content_quality import assess_humanization, check_plagiarism
 from ai.seo.content_structure import analyze_structure, generate_faq
 from ai.seo.daily_digest import generate_daily_digest
 from ai.seo.image_pipeline import generate_and_publish_image, upload_image_bytes
@@ -1275,6 +1283,17 @@ def list_meta_rewrites(site_id: int, status: Optional[str] = None, limit: int = 
     return query.order_by(SeoMetaRewrite.impressions.desc()).limit(limit).all()
 
 
+@router.patch("/meta-rewrites/{item_id}", response_model=MetaRewriteOut)
+def update_meta_rewrite_route(item_id: int, payload: MetaRewriteUpdate, db: Session = Depends(get_db)):
+    """Lets a reviewer edit the AI-drafted title/description before
+    approving it — the draft is a starting point, not the final copy."""
+    ok = database.update_meta_rewrite_content(item_id, payload.suggested_title, payload.suggested_description)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No meta rewrite candidate {item_id}")
+    db.expire_all()
+    return db.query(SeoMetaRewrite).filter(SeoMetaRewrite.id == item_id).first()
+
+
 @router.post("/meta-rewrites/{item_id}/approve", response_model=MetaRewriteOut)
 def approve_meta_rewrite_route(item_id: int, db: Session = Depends(get_db)):
     """Marks a rewrite reviewed and approved. Deliberately doesn't push
@@ -1713,6 +1732,128 @@ def analyze_content_route(payload: ContentAnalyzeRequest):
         passed=report.passed,
         issues=[{"rule": i.rule, "severity": i.severity, "message": i.message} for i in report.issues],
     )
+
+
+# Module 60 — content plagiarism & humanization check. See
+# ai/seo/content_quality.py's module docstring for what each check
+# honestly does and doesn't cover.
+
+def _load_quality_check_candidates(db: Session, site_id: int, exclude_blog_post_id=None, exclude_social_post_id=None):
+    """Every other blog/social post for this site — the plagiarism
+    comparison pool. Loaded once per request/batch by the caller (see
+    _check_and_store_blog_quality's own comment) rather than per post."""
+    candidates = []
+    blog_q = db.query(SeoBlogPost).filter(SeoBlogPost.site_id == site_id)
+    if exclude_blog_post_id is not None:
+        blog_q = blog_q.filter(SeoBlogPost.id != exclude_blog_post_id)
+    for row in blog_q.all():
+        candidates.append(("blog", row.id, row.title, row.content))
+
+    social_q = db.query(SeoSocialPost).filter(SeoSocialPost.site_id == site_id)
+    if exclude_social_post_id is not None:
+        social_q = social_q.filter(SeoSocialPost.id != exclude_social_post_id)
+    for row in social_q.all():
+        candidates.append(("social", row.id, f"{row.platform} post #{row.id}", row.content))
+
+    return candidates
+
+
+def _run_quality_check(content_html: str, candidates) -> ContentQualityReportOut:
+    humanization = assess_humanization(content_html)
+    plagiarism = check_plagiarism(content_html, candidates)
+    return ContentQualityReportOut(
+        humanization=HumanizationReportOut(
+            score=humanization.score,
+            band=humanization.band,
+            word_count=humanization.word_count,
+            avg_sentence_length=humanization.avg_sentence_length,
+            sentence_length_variety=humanization.sentence_length_variety,
+            lexical_diversity=humanization.lexical_diversity,
+            flagged_phrases=[FlaggedPhraseOut(phrase=f.phrase, reason=f.reason) for f in humanization.flagged_phrases],
+            notes=humanization.notes,
+        ),
+        plagiarism=PlagiarismReportOut(
+            overall_similarity=plagiarism.overall_similarity,
+            verdict=plagiarism.verdict,
+            matches=[
+                PlagiarismMatchOut(
+                    source_type=m.source_type, source_id=m.source_id, source_title=m.source_title,
+                    similarity=m.similarity, matched_snippet=m.matched_snippet,
+                )
+                for m in plagiarism.matches
+            ],
+        ),
+        checked_at=datetime.utcnow(),
+    )
+
+
+def _check_and_store_blog_quality(db: Session, post_id: int, site_id: int, content_html: str, candidates=None) -> None:
+    """Runs right after a blog draft is created (every generation path —
+    single/bulk/calendar) so a reviewer sees originality/humanization
+    alongside the draft, same "not a separate manual step" treatment
+    module 27.5's structure checker gets. Never raises — a quality-check
+    failure (a bug in the heuristics, an unexpected content shape) must
+    never take down content generation itself; the post is simply left
+    unchecked (quality_report_json stays NULL) and can be re-checked
+    manually. `candidates` lets a bulk/calendar loop pass in one
+    site-wide pool loaded ONCE rather than re-querying per post."""
+    try:
+        if candidates is None:
+            candidates = _load_quality_check_candidates(db, site_id, exclude_blog_post_id=post_id)
+        report = _run_quality_check(content_html, candidates)
+        database.set_blog_post_quality(post_id, report.model_dump_json())
+    except Exception:
+        logger.exception("Quality check failed for blog post %s — post saved without one", post_id)
+
+
+def _check_and_store_social_quality(db: Session, post_id: int, site_id: int, content_html: str, candidates=None) -> None:
+    """Social-post counterpart to _check_and_store_blog_quality — see its
+    own comment."""
+    try:
+        if candidates is None:
+            candidates = _load_quality_check_candidates(db, site_id, exclude_social_post_id=post_id)
+        report = _run_quality_check(content_html, candidates)
+        database.set_social_post_quality(post_id, report.model_dump_json())
+    except Exception:
+        logger.exception("Quality check failed for social post %s — post saved without one", post_id)
+
+
+@router.post("/content/quality-check", response_model=ContentQualityReportOut)
+def check_content_quality_route(payload: ContentQualityCheckRequest, db: Session = Depends(get_db)):
+    """General-purpose version of the same check the generation routes
+    run automatically — lets any piece of content (e.g. something written
+    directly in the CMS, or a draft re-checked after a manual edit) be
+    assessed on demand, same relationship /content/analyze has to the
+    structure checker."""
+    candidates = _load_quality_check_candidates(
+        db, payload.site_id,
+        exclude_blog_post_id=payload.exclude_blog_post_id,
+        exclude_social_post_id=payload.exclude_social_post_id,
+    )
+    return _run_quality_check(payload.content_html, candidates)
+
+
+@router.post("/blog/{post_id}/quality-check", response_model=BlogPostOut)
+def check_blog_post_quality_route(post_id: int, db: Session = Depends(get_db)):
+    """Manual re-check — e.g. after editing a draft's content, since the
+    automatic check only ran once, at generation time."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+    _check_and_store_blog_quality(db, post_id, row.site_id, row.content)
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/social/{post_id}/quality-check", response_model=SocialPostOut)
+def check_social_post_quality_route(post_id: int, db: Session = Depends(get_db)):
+    """Manual re-check counterpart — see check_blog_post_quality_route."""
+    row = db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No social post {post_id}")
+    _check_and_store_social_quality(db, post_id, row.site_id, row.content)
+    db.expire_all()
+    return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
 
 
 @router.post("/content/faq", response_model=list[FaqPairOut])
@@ -2263,6 +2404,9 @@ def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = De
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
+    # Loaded once and grown as posts are created, rather than re-querying
+    # per platform — see _check_and_store_social_quality's own comment.
+    candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
     for platform in payload.platforms:
         draft = generate_social_post(platform, payload.page_title, payload.content_excerpt, site_id=payload.site_id)
@@ -2276,6 +2420,8 @@ def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = De
             payload.image_url,
             facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
         )
+        _check_and_store_social_quality(db, post_id, payload.site_id, draft.content, candidates=candidates)
+        candidates.append(("social", post_id, f"{platform} post #{post_id}", draft.content))
         created_ids.append(post_id)
 
     if not created_ids:
@@ -2457,6 +2603,7 @@ def bulk_generate_social_posts_route(payload: SocialBulkGenerateRequest, db: Ses
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
+    candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
     for topic in payload.topics:
         topic = topic.strip()
@@ -2474,6 +2621,14 @@ def bulk_generate_social_posts_route(payload: SocialBulkGenerateRequest, db: Ses
                 payload.image_url,
                 facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
             )
+            # Bulk-generation's actual duplicate-content risk is here, not
+            # the single-post route's: a topic list with near-duplicate
+            # entries (or an AI drifting toward the same phrasing across a
+            # long list) is exactly what this catches, checked against the
+            # whole batch generated so far plus everything already on the
+            # site.
+            _check_and_store_social_quality(db, post_id, payload.site_id, draft.content, candidates=candidates)
+            candidates.append(("social", post_id, f"{platform} post #{post_id}", draft.content))
             created_ids.append(post_id)
 
     if not created_ids:
@@ -2506,6 +2661,7 @@ def generate_social_calendar_route(payload: SocialCalendarGenerateRequest, db: S
     except ValueError:
         raise HTTPException(status_code=400, detail="post_time must be in HH:MM format")
 
+    candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
     for day_offset in range(payload.days):
         day = payload.start_date + timedelta(days=day_offset)
@@ -2525,6 +2681,11 @@ def generate_social_calendar_route(payload: SocialCalendarGenerateRequest, db: S
                 facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
             )
             database.set_social_post_schedule(post_id, scheduled_for)
+            # A calendar cycles through few topics over many days — the
+            # exact scenario most likely to produce near-duplicate posts,
+            # so this matters here even more than in bulk-generate above.
+            _check_and_store_social_quality(db, post_id, payload.site_id, draft.content, candidates=candidates)
+            candidates.append(("social", post_id, f"{platform} post #{post_id}", draft.content))
             created_ids.append(post_id)
 
     if not created_ids:
@@ -2809,11 +2970,12 @@ def get_content_backup_route(backup_id: int):
 @router.post("/blog/generate", response_model=BlogPostOut, status_code=201)
 def generate_blog_post_route(payload: BlogGenerateRequest, db: Session = Depends(get_db)):
     """Generates a full blog post draft, immediately runs it through
-    module 27.5's own structure checker (analyze_structure) so a
-    reviewer sees the H1/word-count/keyword findings right alongside the
-    draft rather than as a separate manual step, and stores it as
-    'draft' — no CMS call happens here. See /blog/{id}/publish for what
-    approval leads to."""
+    module 27.5's own structure checker (analyze_structure) and module
+    60's plagiarism/humanization check so a reviewer sees the H1/word-
+    count/keyword findings AND originality/AI-pattern findings right
+    alongside the draft rather than as a separate manual step, and stores
+    it as 'draft' — no CMS call happens here. See /blog/{id}/publish for
+    what approval leads to."""
     site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
@@ -2841,6 +3003,7 @@ def generate_blog_post_route(payload: BlogGenerateRequest, db: Session = Depends
         structure.passed,
         structure_issues_json,
     )
+    _check_and_store_blog_quality(db, post_id, payload.site_id, draft.content_html)
     _log_to_sheet_safe(
         "Content Pipeline",
         [date_cls.today().isoformat(), site.name, payload.topic, draft.title, "draft", structure.passed],
@@ -3207,7 +3370,7 @@ def bulk_publish_blog_posts_route(payload: BlogBulkIdsRequest, db: Session = Dep
 
 
 def _generate_and_save_blog_post(
-    site: SeoSite, topic: str, min_words: int, generate_image: bool
+    db: Session, site: SeoSite, topic: str, min_words: int, generate_image: bool, candidates=None
 ) -> Optional[int]:
     """Shared by bulk-generate and generate-calendar below: one full
     draft (text via generate_blog_post + structure check, matching
@@ -3215,7 +3378,10 @@ def _generate_and_save_blog_post(
     the same generate_and_publish_image pipeline /blog/{id}/publish uses.
     Returns the new post id, or None if text generation itself failed
     (an image failure alone doesn't discard an otherwise-good draft —
-    same graceful-degrade convention as publish's own auto-image step)."""
+    same graceful-degrade convention as publish's own auto-image step).
+    `candidates` — see _check_and_store_blog_quality's own comment; the
+    caller passes one site-wide pool it loaded once, grown as each post
+    is created, so a whole bulk/calendar run doesn't re-query per post."""
     draft = generate_blog_post(topic, None, site_id=site.id, min_words=min_words)
     if draft is None:
         return None
@@ -3227,6 +3393,9 @@ def _generate_and_save_blog_post(
     post_id = database.create_blog_post(
         site.id, topic, None, draft.title, draft.excerpt, draft.content_html, structure.passed, structure_issues_json
     )
+    _check_and_store_blog_quality(db, post_id, site.id, draft.content_html, candidates=candidates)
+    if candidates is not None:
+        candidates.append(("blog", post_id, draft.title, draft.content_html))
 
     if generate_image:
         try:
@@ -3255,12 +3424,13 @@ def bulk_generate_blog_posts_route(payload: BlogBulkGenerateRequest, db: Session
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
+    candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
     for topic in payload.topics:
         topic = topic.strip()
         if not topic:
             continue
-        post_id = _generate_and_save_blog_post(site, topic, payload.min_words, payload.generate_image)
+        post_id = _generate_and_save_blog_post(db, site, topic, payload.min_words, payload.generate_image, candidates=candidates)
         if post_id is not None:
             created_ids.append(post_id)
 
@@ -3293,13 +3463,14 @@ def generate_blog_calendar_route(payload: BlogCalendarGenerateRequest, db: Sessi
     except ValueError:
         raise HTTPException(status_code=400, detail="post_time must be in HH:MM format")
 
+    candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
     for day_offset in range(payload.days):
         day = payload.start_date + timedelta(days=day_offset)
         topic = topics[day_offset % len(topics)]
         scheduled_at = datetime.combine(day, time(post_hour, post_minute)).strftime("%Y-%m-%d %H:%M:%S")
 
-        post_id = _generate_and_save_blog_post(site, topic, payload.min_words, payload.generate_image)
+        post_id = _generate_and_save_blog_post(db, site, topic, payload.min_words, payload.generate_image, candidates=candidates)
         if post_id is not None:
             database.set_blog_post_schedule(post_id, scheduled_at)
             created_ids.append(post_id)

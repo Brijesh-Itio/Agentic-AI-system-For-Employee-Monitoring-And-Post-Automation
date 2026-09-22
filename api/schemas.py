@@ -1126,6 +1126,11 @@ class MetaRewriteOut(BaseModel):
     reviewed_at: Optional[datetime] = None
 
 
+class MetaRewriteUpdate(BaseModel):
+    suggested_title: Optional[str] = None
+    suggested_description: Optional[str] = None
+
+
 class Ga4PullRequest(BaseModel):
     site_id: int
     start_date: str = "7daysAgo"
@@ -1201,6 +1206,57 @@ class StructureReportOut(BaseModel):
     h3_count: int
     passed: bool
     issues: list[StructureIssueOut]
+
+
+# Module 60 — content plagiarism & humanization check. See
+# ai/seo/content_quality.py's module docstring for the honest scope of
+# each: plagiarism is checked against this install's own stored content
+# (not the internet), and humanization is a heuristic estimate (not a
+# certified AI-content detector) — both labelled as such wherever shown.
+class ContentQualityCheckRequest(BaseModel):
+    content_html: str
+    site_id: int
+    # Excludes the post itself from its own plagiarism comparison pool
+    # when re-checking after an edit — otherwise every post would always
+    # find a 100% match against its own unedited copy still in the DB.
+    exclude_blog_post_id: Optional[int] = None
+    exclude_social_post_id: Optional[int] = None
+
+
+class FlaggedPhraseOut(BaseModel):
+    phrase: str
+    reason: str
+
+
+class HumanizationReportOut(BaseModel):
+    score: int
+    band: str
+    word_count: int
+    avg_sentence_length: float
+    sentence_length_variety: int
+    lexical_diversity: int
+    flagged_phrases: list[FlaggedPhraseOut]
+    notes: list[str]
+
+
+class PlagiarismMatchOut(BaseModel):
+    source_type: str
+    source_id: int
+    source_title: str
+    similarity: int
+    matched_snippet: str
+
+
+class PlagiarismReportOut(BaseModel):
+    overall_similarity: int
+    verdict: str
+    matches: list[PlagiarismMatchOut]
+
+
+class ContentQualityReportOut(BaseModel):
+    humanization: HumanizationReportOut
+    plagiarism: PlagiarismReportOut
+    checked_at: datetime
 
 
 class FaqRequest(BaseModel):
@@ -1363,6 +1419,9 @@ class SocialPostOut(BaseModel):
     created_at: Optional[datetime] = None
     posted_at: Optional[datetime] = None
     facebook_account_id: Optional[int] = None
+    # Module 60 — same convention as BlogPostOut's own quality_report_json.
+    quality_report_json: Optional[str] = None
+    quality_checked_at: Optional[datetime] = None
     # Module 41 — set means "auto-publish at this time once approved";
     # None means manual-publish-only (unchanged pre-module-41 behaviour).
     scheduled_for: Optional[datetime] = None
@@ -1869,6 +1928,12 @@ class BlogPostOut(BaseModel):
     content: str
     structure_passed: Optional[bool] = None
     structure_issues_json: Optional[str] = None
+    # Module 60 — JSON-encoded ContentQualityReportOut, same
+    # frontend-parses-the-string convention as structure_issues_json above.
+    # None means not checked yet (pre-module-60 posts, or a check that
+    # itself failed and was left unset rather than storing a partial one).
+    quality_report_json: Optional[str] = None
+    quality_checked_at: Optional[datetime] = None
     status: str
     image_url: Optional[str] = None
     slug: Optional[str] = None

@@ -837,3 +837,19 @@ span.flatpickr-weekday,
 .animate-toast-in {
   animation: toast-in 0.2s ease-out both;
 }
+
+/* ProgressBar (components/common/ProgressBar.tsx) in indeterminate mode —
+   a sliding segment, for operations that take real time but report no
+   percentage (e.g. an Ollama pass or a Playwright session). */
+@keyframes progress-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+.animate-progress-indeterminate {
+  animation: progress-indeterminate 1.4s ease-in-out infinite;
+}

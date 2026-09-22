@@ -625,6 +625,10 @@ class SeoSocialPost(Base):
     # (ai/seo/social_scheduler.py) auto-publishes this post once this
     # time arrives; NULL means manual-publish-only, unchanged behaviour.
     scheduled_for = Column(DateTime)
+    # Module 60 — plagiarism/humanization check result, JSON-encoded
+    # ContentQualityReportOut. NULL means not checked yet.
+    quality_report_json = Column(String)
+    quality_checked_at = Column(DateTime)
 
 
 class SeoFacebookAccount(Base):
@@ -703,6 +707,9 @@ class SeoBlogPost(Base):
     created_at = Column(DateTime)
     published_at = Column(DateTime)
     scheduled_at = Column(DateTime)
+    # Module 60 — same convention as seo_social_posts' own columns above.
+    quality_report_json = Column(String)
+    quality_checked_at = Column(DateTime)
 
 
 def init_db() -> None:

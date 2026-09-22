@@ -4,6 +4,7 @@ import { AlertCircle, Loader2, Plus, Search, Trash2, Users } from "lucide-react"
 
 import { Button } from "@/components/shadcn/button";
 import { Badge } from "@/components/shadcn/badge";
+import ProgressBar from "@/components/common/ProgressBar";
 import { createLead, deleteLead, getLeads, runLeadResearch, type LeadInput } from "@/api";
 import { useToast } from "@/context/ToastContext";
 import { serverErrorDetail } from "@/utils/serverError";
@@ -73,6 +74,14 @@ export default function LeadsPanel() {
         </Button>
       </div>
 
+      {researchMutation.isPending && (
+        <div>
+          <ProgressBar className="max-w-sm" />
+          <p className="mt-1.5 text-theme-xs text-gray-400">
+            Running a real search session against Google/LinkedIn — this can take up to two minutes.
+          </p>
+        </div>
+      )}
       {researchMutation.isError && (
         <div className="flex items-start gap-2 rounded-lg border border-warning-200 bg-warning-50 p-3 text-theme-xs text-warning-700 dark:border-warning-500/20 dark:bg-warning-500/10 dark:text-warning-400">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

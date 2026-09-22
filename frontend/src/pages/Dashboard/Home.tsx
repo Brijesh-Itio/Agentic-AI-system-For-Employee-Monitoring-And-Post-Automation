@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 
 import PageMeta from "../../components/common/PageMeta";
+import ProgressBar from "@/components/common/ProgressBar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/shadcn/card";
 import StatCard from "@/components/dashboard/StatCard";
 import StatusChip from "@/components/dashboard/StatusChip";
@@ -298,8 +299,9 @@ export default function DashboardHome() {
                 <QuickActionTile key={action.label} {...action} />
               ))}
             </div>
+            {darMutation.isPending && <ProgressBar className="mt-4" />}
             {darMessage && (
-              <p className="mt-4 text-theme-sm text-gray-500 dark:text-gray-400">{darMessage}</p>
+              <p className="mt-2 text-theme-sm text-gray-500 dark:text-gray-400">{darMessage}</p>
             )}
           </CardContent>
         </Card>

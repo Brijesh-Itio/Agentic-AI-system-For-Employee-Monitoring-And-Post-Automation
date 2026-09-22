@@ -1014,6 +1014,11 @@ export const getMetaRewrites = (siteId: number, status?: string, limit = 50) =>
     .get<MetaRewrite[]>("/api/seo/meta-rewrites", { params: { site_id: siteId, status, limit } })
     .then((r) => r.data);
 
+export const updateMetaRewrite = (
+  itemId: number,
+  payload: { suggested_title?: string | null; suggested_description?: string | null },
+) => api.patch<MetaRewrite>(`/api/seo/meta-rewrites/${itemId}`, payload).then((r) => r.data);
+
 export const approveMetaRewrite = (itemId: number) =>
   api.post<MetaRewrite>(`/api/seo/meta-rewrites/${itemId}/approve`, {}).then((r) => r.data);
 
@@ -1293,6 +1298,10 @@ export interface SocialPost {
   // Module 41 — set means "auto-publish at this time once approved";
   // null means manual-publish-only.
   scheduled_for: string | null;
+  // Module 60 — JSON-encoded ContentQualityReport; parse with
+  // parseQualityReport() below. null means not checked yet.
+  quality_report_json: string | null;
+  quality_checked_at: string | null;
 }
 
 export const generateSocialPosts = (payload: {
@@ -1371,6 +1380,11 @@ export const getSocialPosts = (siteId: number, status?: string) =>
 
 export const updateSocialPost = (postId: number, content: string) =>
   api.patch<SocialPost>(`/api/seo/social/${postId}`, { content }).then((r) => r.data);
+
+// Module 60 — manual re-check, e.g. after editing a draft's content. See
+// checkBlogPostQuality's own comment.
+export const checkSocialPostQuality = (postId: number) =>
+  api.post<SocialPost>(`/api/seo/social/${postId}/quality-check`, {}, { timeout: 30_000 }).then((r) => r.data);
 
 export const approveSocialPost = (postId: number) =>
   api.post<SocialPost>(`/api/seo/social/${postId}/approve`, {}).then((r) => r.data);
@@ -2128,6 +2142,64 @@ export interface StructureIssue {
   message: string;
 }
 
+// ── Module 60: content plagiarism & humanization check ──
+// See ai/seo/content_quality.py's module docstring for the honest scope of
+// each: plagiarism is checked against this install's own stored content
+// (not the internet), and humanization is a heuristic estimate (not a
+// certified AI-content detector) — both labelled as such in the UI.
+export interface FlaggedPhrase {
+  phrase: string;
+  reason: string;
+}
+
+export interface HumanizationReport {
+  score: number; // 0-100, higher reads more naturally human-varied
+  band: string;
+  word_count: number;
+  avg_sentence_length: number;
+  sentence_length_variety: number; // 0-100
+  lexical_diversity: number; // 0-100
+  flagged_phrases: FlaggedPhrase[];
+  notes: string[];
+}
+
+export interface PlagiarismMatch {
+  source_type: "blog" | "social";
+  source_id: number;
+  source_title: string;
+  similarity: number; // 0-100
+  matched_snippet: string;
+}
+
+export interface PlagiarismReport {
+  overall_similarity: number; // 0-100 — best match's similarity
+  verdict: string;
+  matches: PlagiarismMatch[];
+}
+
+export interface ContentQualityReport {
+  humanization: HumanizationReport;
+  plagiarism: PlagiarismReport;
+  checked_at: string;
+}
+
+/** Parses a post's quality_report_json, or null if never checked / unparseable. */
+export function parseQualityReport(json: string | null): ContentQualityReport | null {
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as ContentQualityReport;
+  } catch {
+    return null;
+  }
+}
+
+export const checkContentQuality = (payload: {
+  content_html: string;
+  site_id: number;
+  exclude_blog_post_id?: number;
+  exclude_social_post_id?: number;
+}) => api.post<ContentQualityReport>("/api/seo/content/quality-check", payload, { timeout: 30_000 }).then((r) => r.data);
+
 export interface BlogPost {
   id: number;
   site_id: number;
@@ -2138,6 +2210,10 @@ export interface BlogPost {
   content: string;
   structure_passed: boolean | null;
   structure_issues_json: string | null;
+  // Module 60 — JSON-encoded ContentQualityReport; parse with
+  // parseQualityReport() above. null means not checked yet.
+  quality_report_json: string | null;
+  quality_checked_at: string | null;
   status: BlogPostStatus;
   image_url: string | null;
   slug: string | null;
@@ -2171,6 +2247,12 @@ export const updateBlogPost = (postId: number, payload: { title: string; excerpt
 // WordPress slug/tags/categories the moment Publish creates the post.
 export const updateBlogPostTaxonomy = (postId: number, payload: { slug?: string; tags?: string[]; categories?: string[] }) =>
   api.patch<BlogPost>(`/api/seo/blog/${postId}/taxonomy`, payload).then((r) => r.data);
+
+// Module 60 — the automatic check runs once, at generation time; this is
+// the manual re-check, e.g. after editing a draft's content (updateBlogPost
+// above re-runs the structure checker but not this one).
+export const checkBlogPostQuality = (postId: number) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/quality-check`, {}, { timeout: 30_000 }).then((r) => r.data);
 
 export const approveBlogPost = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/approve`, {}).then((r) => r.data);

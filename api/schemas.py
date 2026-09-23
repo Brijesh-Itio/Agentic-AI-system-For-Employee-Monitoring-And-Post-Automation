@@ -1189,14 +1189,25 @@ class RelatedPageOut(BaseModel):
 class ContentAnalyzeRequest(BaseModel):
     content_html: str
     primary_keyword: Optional[str] = None
-    min_words: int = 600
-    max_words: int = 3000
+    secondary_keywords: Optional[list[str]] = None
+    min_words: int = 1200
+    max_words: int = 1500
 
 
 class StructureIssueOut(BaseModel):
     rule: str
     severity: str
     message: str
+
+
+class KeywordDensityOut(BaseModel):
+    keyword: str
+    role: str  # "primary" | "secondary"
+    count: int
+    density: float
+    target_min: float
+    target_max: float
+    in_range: bool
 
 
 class StructureReportOut(BaseModel):
@@ -1206,6 +1217,7 @@ class StructureReportOut(BaseModel):
     h3_count: int
     passed: bool
     issues: list[StructureIssueOut]
+    keyword_density: list[KeywordDensityOut] = []
 
 
 # Module 60 — content plagiarism & humanization check. See
@@ -1268,6 +1280,22 @@ class FaqRequest(BaseModel):
 class FaqPairOut(BaseModel):
     question: str
     answer: str
+
+
+class InternalLinkOut(BaseModel):
+    url: str
+    title: str
+
+
+class GrammarIssueOut(BaseModel):
+    original: str
+    suggestion: str
+    explanation: str
+
+
+class GrammarReportOut(BaseModel):
+    issues: list[GrammarIssueOut]
+    checked_word_count: int
 
 
 class TechnicalAuditRequest(BaseModel):
@@ -1871,7 +1899,13 @@ class BlogGenerateRequest(BaseModel):
     site_id: int
     topic: str
     primary_keyword: Optional[str] = None
-    min_words: int = 600
+    # Optional secondary/LSI keywords to track density for (target 0.5-1%
+    # each, vs. the primary keyword's 1-1.5% — see ai/seo/content_
+    # structure.py's SECONDARY_KEYWORD_DENSITY_TARGET). Purely a density-
+    # tracking input, not worked into the generation prompt itself.
+    secondary_keywords: Optional[list[str]] = None
+    min_words: int = 1200
+    max_words: int = 1500
 
 
 class ImageGenerateRequest(BaseModel):
@@ -1916,6 +1950,11 @@ class BlogTaxonomyUpdate(BaseModel):
     categories: Optional[list[str]] = None
 
 
+class BlogMetaUpdate(BaseModel):
+    meta_title: str
+    meta_description: str
+
+
 class BlogPostOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -1936,6 +1975,12 @@ class BlogPostOut(BaseModel):
     quality_checked_at: Optional[datetime] = None
     status: str
     image_url: Optional[str] = None
+    # Which image provider produced image_url — see ai/seo/image_pipeline.
+    # py's AI_GENERATED_IMAGE_PROVIDERS for which values mean AI-generated
+    # vs. real stock photography ("pexels") vs. a human's own file
+    # ("manual-upload"). None for an image attached before this column
+    # existed.
+    image_source: Optional[str] = None
     slug: Optional[str] = None
     # JSON-encoded arrays of plain names, same convention as
     # structure_issues_json above — the frontend JSON.parses these.
@@ -1947,6 +1992,30 @@ class BlogPostOut(BaseModel):
     created_at: Optional[datetime] = None
     published_at: Optional[datetime] = None
     scheduled_at: Optional[datetime] = None
+    # SEO meta title/description for this post's own search-snippet
+    # (ai/seo/blog_meta_generator.py) — generated automatically right
+    # after the draft, editable afterward via PATCH /blog/{id}/meta.
+    meta_title: Optional[str] = None
+    meta_description: Optional[str] = None
+    # Secondary keywords this post's density was tracked against (JSON-
+    # encoded list of strings) and the resulting density report
+    # (JSON-encoded list of api/schemas.py's KeywordDensityOut) — both
+    # computed once at generation/re-check time, same convention as
+    # structure_issues_json.
+    secondary_keywords_json: Optional[str] = None
+    keyword_density_json: Optional[str] = None
+    # Auto-generated FAQs (JSON-encoded list of FaqPairOut) and suggested
+    # internal links (JSON-encoded list of InternalLinkOut) — generated
+    # automatically right after the draft, same "surface alongside the
+    # draft" convention as quality_report_json, and manually
+    # regeneratable via their own endpoints below.
+    faqs_json: Optional[str] = None
+    internal_links_json: Optional[str] = None
+    # Grammar check & fix suggestions (ai/seo/grammar_checker.py),
+    # JSON-encoded GrammarReportOut — same convention as
+    # quality_report_json/quality_checked_at.
+    grammar_report_json: Optional[str] = None
+    grammar_checked_at: Optional[datetime] = None
 
 
 # Module 59 — bulk generation, content-calendar generation, scheduling,
@@ -1974,7 +2043,8 @@ class BlogBulkGenerateRequest(BaseModel):
     # own full draft post (title/excerpt/content + structure check),
     # same as calling /blog/generate once per topic but in one request.
     topics: list[str]
-    min_words: int = 600
+    min_words: int = 1200
+    max_words: int = 1500
     # A real AI-generated featured image for every post, not just text —
     # slower per post but matches /blog/{id}/publish's own auto-image
     # behavior instead of leaving every bulk post imageless until
@@ -1990,7 +2060,8 @@ class BlogCalendarGenerateRequest(BaseModel):
     days: int = 30
     # "HH:MM", the local time of day each day's post gets scheduled for.
     post_time: str = "10:00"
-    min_words: int = 600
+    min_words: int = 1200
+    max_words: int = 1500
     generate_image: bool = True
 
 

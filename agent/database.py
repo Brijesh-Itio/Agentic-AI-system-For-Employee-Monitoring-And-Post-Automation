@@ -1160,6 +1160,34 @@ _SEO_BLOG_POSTS_EXTRA_COLUMNS = {
     # quality_report_json/quality_checked_at above.
     "quality_report_json": "TEXT",
     "quality_checked_at": "DATETIME",
+    # Blog tool feedback round — SEO meta title/description for the post's
+    # own search-snippet (ai/seo/blog_meta_generator.py), the secondary
+    # keywords it was generated against (needed to recompute keyword
+    # density on a later re-check the same way it was computed at
+    # generation time), and the keyword-density result itself
+    # (JSON-encoded list of api/schemas.py's KeywordDensityOut).
+    "meta_title": "TEXT",
+    "meta_description": "TEXT",
+    "secondary_keywords_json": "TEXT",
+    "keyword_density_json": "TEXT",
+    # Auto-FAQs (JSON-encoded list of {question, answer}) and suggested
+    # internal links (JSON-encoded list of {url, title}) — both generated
+    # once automatically right after the draft's text, same "surface it
+    # alongside the draft" convention as quality_report_json above, and
+    # both re-generatable manually afterward.
+    "faqs_json": "TEXT",
+    "internal_links_json": "TEXT",
+    # Grammar check & fix suggestions (ai/seo/grammar_checker.py) — same
+    # JSON-blob-plus-checked-at convention as quality_report_json/
+    # quality_checked_at.
+    "grammar_report_json": "TEXT",
+    "grammar_checked_at": "DATETIME",
+    # AI Image Detection (provenance tracking) — which image provider
+    # produced image_url (see ai/seo/image_pipeline.py's
+    # AI_GENERATED_IMAGE_PROVIDERS), e.g. "fastsd", "pexels", or
+    # "manual-upload". NULL for any image attached before this column
+    # existed.
+    "image_source": "TEXT",
 }
 
 
@@ -2061,6 +2089,21 @@ def get_active_seo_sites():
     return conn.execute("SELECT * FROM seo_sites WHERE is_active = 1 ORDER BY id").fetchall()
 
 
+def delete_seo_site(site_id: int) -> bool:
+    """Removes a site and everything under it (job runs, GSC/GA4 history,
+    technical issues, blog/social drafts, backlinks, etc.) via the
+    seo_sites(id) ON DELETE CASCADE every child table already declares.
+    Deliberately goes through this module's connection rather than the
+    API's SQLAlchemy session — this is the connection _connect() enables
+    PRAGMA foreign_keys=ON for (api/database.py's SQLAlchemy engine never
+    does), so it's the only one where CASCADE is actually enforced instead
+    of silently leaving orphan rows behind. Returns False if no such site
+    existed."""
+    with write_cursor() as cur:
+        cur.execute("DELETE FROM seo_sites WHERE id = ?", (site_id,))
+        return cur.rowcount > 0
+
+
 def count_active_seo_sites() -> int:
     """Callers use this to decide whether falling back to the global
     GSC_SITE_URL/GA4_PROPERTY_ID .env values is safe: unambiguous when
@@ -2755,6 +2798,17 @@ def set_social_post_status(post_id: int, status: str) -> bool:
         return cur.rowcount > 0
 
 
+def delete_social_post(post_id: int) -> bool:
+    """Real deletion, not a status flag — a draft/rejected post a human
+    doesn't want cluttering the list should actually go away. Never
+    allowed on an already-'posted' row (see the route's own check): the
+    real post is still live on the platform, and deleting the local
+    record would just make it un-trackable, not un-post it."""
+    with write_cursor() as cur:
+        cur.execute("DELETE FROM seo_social_posts WHERE id = ?", (post_id,))
+        return cur.rowcount > 0
+
+
 def update_social_post_content(post_id: int, content: str) -> bool:
     """Manual post-generation edit — the AI draft is a starting point, not
     the final word; a human can revise the wording before approving it."""
@@ -3108,9 +3162,69 @@ def mark_blog_post_failed(post_id: int, error: str) -> None:
         cur.execute("UPDATE seo_blog_posts SET status = 'failed', error = ? WHERE id = ?", (error, post_id))
 
 
-def set_blog_post_image(post_id: int, image_url: str) -> None:
+def set_blog_post_image(post_id: int, image_url: str, image_source: Optional[str] = None) -> None:
+    """image_source (see ai/seo/image_pipeline.py's ImagePublishResult.
+    provider) is optional so any pre-existing caller that genuinely has no
+    provenance to record still works unchanged; every call site added
+    alongside this parameter passes it."""
     with write_cursor() as cur:
-        cur.execute("UPDATE seo_blog_posts SET image_url = ? WHERE id = ?", (image_url, post_id))
+        if image_source is not None:
+            cur.execute(
+                "UPDATE seo_blog_posts SET image_url = ?, image_source = ? WHERE id = ?",
+                (image_url, image_source, post_id),
+            )
+        else:
+            cur.execute("UPDATE seo_blog_posts SET image_url = ? WHERE id = ?", (image_url, post_id))
+
+
+def set_blog_post_seo_meta(
+    post_id: int,
+    meta_title: Optional[str] = None,
+    meta_description: Optional[str] = None,
+    secondary_keywords_json: Optional[str] = None,
+    keyword_density_json: Optional[str] = None,
+) -> None:
+    """Sparse setter — None means "leave this column untouched," same
+    convention as set_blog_post_taxonomy above, not "clear it." This
+    matters because both the generation route and the structure-recheck-
+    on-edit route call this: a re-check only ever recomputes keyword
+    density (content changed, meta tags didn't), and without sparse
+    semantics it would silently wipe out already-generated meta_title/
+    meta_description on every edit save."""
+    with write_cursor() as cur:
+        if meta_title is not None:
+            cur.execute("UPDATE seo_blog_posts SET meta_title = ? WHERE id = ?", (meta_title, post_id))
+        if meta_description is not None:
+            cur.execute("UPDATE seo_blog_posts SET meta_description = ? WHERE id = ?", (meta_description, post_id))
+        if secondary_keywords_json is not None:
+            cur.execute(
+                "UPDATE seo_blog_posts SET secondary_keywords_json = ? WHERE id = ?", (secondary_keywords_json, post_id)
+            )
+        if keyword_density_json is not None:
+            cur.execute(
+                "UPDATE seo_blog_posts SET keyword_density_json = ? WHERE id = ?", (keyword_density_json, post_id)
+            )
+
+
+def set_blog_post_faqs(post_id: int, faqs_json: str) -> bool:
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET faqs_json = ? WHERE id = ?", (faqs_json, post_id))
+        return cur.rowcount > 0
+
+
+def set_blog_post_internal_links(post_id: int, internal_links_json: str) -> bool:
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET internal_links_json = ? WHERE id = ?", (internal_links_json, post_id))
+        return cur.rowcount > 0
+
+
+def set_blog_post_grammar(post_id: int, grammar_report_json: str) -> bool:
+    with write_cursor() as cur:
+        cur.execute(
+            "UPDATE seo_blog_posts SET grammar_report_json = ?, grammar_checked_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (grammar_report_json, post_id),
+        )
+        return cur.rowcount > 0
 
 
 def set_blog_post_quality(post_id: int, quality_report_json: str) -> bool:

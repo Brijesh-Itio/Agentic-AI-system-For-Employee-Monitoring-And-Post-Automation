@@ -1,5 +1,5 @@
 import { Fragment, FormEvent, ReactElement, useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
@@ -57,6 +57,7 @@ import DOMPurify from "dompurify";
 
 import PageMeta from "@/components/common/PageMeta";
 import ProgressBar from "@/components/common/ProgressBar";
+import { Modal } from "@/components/ui/modal";
 import RichTextEditor, { type RichTextEditorHandle } from "@/components/Reports/RichTextEditor";
 import { Button } from "@/components/shadcn/button";
 import { Card, CardContent } from "@/components/shadcn/card";
@@ -77,6 +78,7 @@ import { useToast } from "@/context/ToastContext";
 import { serverErrorDetail } from "@/utils/serverError";
 import {
   adoptSheets,
+  AI_GENERATED_IMAGE_PROVIDERS,
   applyTechnicalIssueFix,
   approveBlogPost,
   BlogPost,
@@ -84,11 +86,13 @@ import {
   approveSocialPost,
   approveTechnicalIssue,
   BacklinkMention,
+  checkBlogPostGrammar,
   checkBlogPostQuality,
   checkPageSpeed,
   checkSocialPostQuality,
   ContentQualityReport,
   createSeoSite,
+  deleteSeoSite,
   analyzeContentStructure,
   DigestRollup,
   DigestRollupPeriod,
@@ -96,11 +100,16 @@ import {
   FaqPair,
   Ga4PageRow,
   generateBlogPost,
+  generateBlogPostFaqs,
   generateBlogPostImage,
+  generateBlogPostInterlinks,
+  generateBlogPostMeta,
   generateDigestRollup,
-  generateFaq,
   generateOgTags,
   generateSeoDigest,
+  GrammarReport,
+  InternalLink,
+  KeywordDensity,
   generateSocialPostImage,
   generateSocialPosts,
   generateTechnicalIssueAiSuggestion,
@@ -178,6 +187,8 @@ import {
   scheduleSocialPost,
   bulkApproveSocialPosts,
   bulkPublishSocialPosts,
+  deleteSocialPost,
+  bulkDeleteSocialPosts,
   bulkGenerateSocialPosts,
   generateSocialCalendar,
   exportSocialPostsToSheet,
@@ -219,10 +230,10 @@ import {
   pullBacklinks,
   pullGscPages,
   RankChange,
-  RelatedPage,
   rejectBlogPost,
   rejectMetaRewrite,
   updateBlogPost,
+  updateBlogPostMeta,
   updateBlogPostTaxonomy,
   updateMetaRewrite,
   uploadBlogPostImage,
@@ -244,7 +255,6 @@ import {
   StructureIssue,
   StructureReport,
   submitForIndexing,
-  suggestInterlinks,
   TechnicalIssue,
   updateSeoSiteCmsConfig,
   updateSeoSiteGoogleConfig,
@@ -370,7 +380,7 @@ function ContentQualityPanel({
     return (
       <Button size="sm" variant="outline" onClick={onCheck} disabled={checking}>
         {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-        Check originality & humanization
+        Check plagiarism & AI content detection
       </Button>
     );
   }
@@ -385,11 +395,11 @@ function ContentQualityPanel({
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={plagVariant} title={p.verdict}>
           <ShieldCheck className="h-3 w-3" />
-          Originality {originality}%
+          Plagiarism check — {originality}% original
         </Badge>
         <Badge variant={humanVariant} title={h.band}>
           <Sparkles className="h-3 w-3" />
-          Humanization {h.score}/100
+          AI content detection — {h.score}/100 human-like
         </Badge>
         <button
           onClick={() => setExpanded((v) => !v)}
@@ -409,7 +419,7 @@ function ContentQualityPanel({
       {expanded && (
         <div className="mt-2 space-y-2.5 rounded-lg border border-gray-100 bg-gray-50 p-3 text-theme-xs dark:border-gray-800 dark:bg-white/5">
           <div>
-            <p className="font-medium text-gray-700 dark:text-gray-200">Humanization — {h.band}</p>
+            <p className="font-medium text-gray-700 dark:text-gray-200">AI Content Detection — {h.band}</p>
             <p className="mt-0.5 text-gray-400">
               {h.word_count} words · avg {h.avg_sentence_length} words/sentence · sentence variety {h.sentence_length_variety}/100
               {" "}
@@ -434,7 +444,7 @@ function ContentQualityPanel({
           </div>
 
           <div className="border-t border-gray-200 pt-2 dark:border-gray-700">
-            <p className="font-medium text-gray-700 dark:text-gray-200">Originality — {p.verdict}</p>
+            <p className="font-medium text-gray-700 dark:text-gray-200">Plagiarism Check — {p.verdict}</p>
             {p.matches.map((m, i) => (
               <p key={i} className="mt-0.5 text-gray-400">
                 {m.similarity}% similar to your {m.source_type} post "{m.source_title}" — matched: "…{m.matched_snippet}…"
@@ -444,8 +454,9 @@ function ContentQualityPanel({
 
           <p className="border-t border-gray-200 pt-2 text-gray-400 dark:border-gray-700 dark:text-gray-500">
             {checkedAt && `Checked ${new Date(checkedAt).toLocaleString()}. `}
-            Originality is checked against this site's own saved content, not the public internet. Humanization is a
-            heuristic estimate of how AI-sounding the writing reads (sentence variety, wording, stock phrases) — not
+            The plagiarism check compares against this site's own saved content, not the public internet. AI content
+            detection is a heuristic estimate of how AI-sounding the writing reads (sentence variety, wording, stock
+            phrases) — not
             a certified AI-content detector. Both are a starting point for review, not a pass/fail gate.
           </p>
         </div>
@@ -3334,6 +3345,10 @@ function SocialTab({ siteId }: { siteId: number }) {
   // The 128px card thumbnail is too small to actually judge a generated/
   // uploaded image — clicking it opens this full-size preview instead.
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+  // Same confirm-before-destructive-action pattern as "Remove site" below
+  // — a real modal, not the browser's native window.confirm() popup.
+  const [deletePostId, setDeletePostId] = useState<number | null>(null);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
 
   const postsQuery = useQuery({ queryKey: ["seo", "social", siteId], queryFn: () => getSocialPosts(siteId) });
   const posts = postsQuery.data ?? [];
@@ -3373,6 +3388,20 @@ function SocialTab({ siteId }: { siteId: number }) {
     },
     onError: () => toast.error("Social content generation failed — check that Ollama is running."),
   });
+  // generateMutation.isPending resets to false the instant this component
+  // remounts (switching SEO tabs away and back unmounts/remounts
+  // SocialTab), even though generation is still running server-side —
+  // useIsMutating reads the same mutationKey from the global cache, which
+  // survives the remount, so this button/progress bar reflect reality.
+  // useIsMutating is its own statement, not the right side of `||` — a
+  // hook there gets skipped by short-circuiting whenever isPending is
+  // already true, which is a real, confirmed Rules-of-Hooks violation
+  // (React logged "change in the order of Hooks" for BlogTab's identical
+  // first draft of this), not just a style nitpick.
+  const isSingleGenerateMutating = useIsMutating({
+    mutationKey: ["seo", "content-generate", "social", "single", siteId],
+  });
+  const singleGeneratePending = generateMutation.isPending || isSingleGenerateMutating > 0;
 
   // Module 60 — see BlogTab's identical qualityCheckMutation for the
   // full comment; same shape, just the social-post endpoint.
@@ -3464,6 +3493,33 @@ function SocialTab({ siteId }: { siteId: number }) {
     onError: (err) => toast.error(serverErrorDetail(err, "Bulk publish failed.")),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => deleteSocialPost(id),
+    onSuccess: () => {
+      toast.success("Post deleted.");
+      setDeletePostId(null);
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => {
+      toast.error(serverErrorDetail(err, "Delete failed."));
+      setDeletePostId(null);
+    },
+  });
+
+  const bulkDeleteMutation = useMutation({
+    mutationFn: () => bulkDeleteSocialPosts(selectedPostIds),
+    onSuccess: (results) => {
+      summarizeBulkResults(results, "Deleted");
+      setSelectedPostIds([]);
+      setShowBulkDeleteConfirm(false);
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => {
+      toast.error(serverErrorDetail(err, "Bulk delete failed."));
+      setShowBulkDeleteConfirm(false);
+    },
+  });
+
   // Bulk topic-based generation — reuses the same platform/image/account
   // selection as the single-topic generator above, just with a list of
   // topics instead of one page_title/content_excerpt pair.
@@ -3485,6 +3541,12 @@ function SocialTab({ siteId }: { siteId: number }) {
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Bulk generation failed — check that Ollama is running.")),
   });
+  // See singleGeneratePending's comment above — same fix (and the same
+  // "hook must not sit on the right of ||" requirement), bulk mutationKey.
+  const isBulkGenerateMutating = useIsMutating({
+    mutationKey: ["seo", "content-generate", "social", "bulk", siteId],
+  });
+  const bulkGeneratePending = bulkGenerateMutation.isPending || isBulkGenerateMutating > 0;
 
   // 30-day (or however many) content calendar — its own topic list and
   // platform selection, independent of the single/bulk generators above,
@@ -3515,6 +3577,11 @@ function SocialTab({ siteId }: { siteId: number }) {
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Calendar generation failed — check that Ollama is running.")),
   });
+  // See singleGeneratePending's comment above — same fix, calendar mutationKey.
+  const isCalendarGenerateMutating = useIsMutating({
+    mutationKey: ["seo", "content-generate", "social", "calendar", siteId],
+  });
+  const calendarGeneratePending = calendarMutation.isPending || isCalendarGenerateMutating > 0;
 
   const exportMutation = useMutation({
     mutationFn: () => exportSocialPostsToSheet(siteId),
@@ -3756,12 +3823,12 @@ function SocialTab({ siteId }: { siteId: number }) {
           <Button
             className="mt-4"
             onClick={() => generateMutation.mutate()}
-            disabled={generateMutation.isPending || !pageTitle.trim() || !contentExcerpt.trim() || selectedPlatforms.length === 0}
+            disabled={singleGeneratePending || !pageTitle.trim() || !contentExcerpt.trim() || selectedPlatforms.length === 0}
           >
-            {generateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+            {singleGeneratePending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
             Generate
           </Button>
-          {generateMutation.isPending && <ProgressBar className="mt-3 max-w-sm" />}
+          {singleGeneratePending && <ProgressBar className="mt-3 max-w-sm" />}
 
           <div className="mt-6 border-t border-gray-100 pt-6 dark:border-gray-800">
             <h3 className="mb-2 text-theme-sm font-semibold text-gray-900 dark:text-white">
@@ -3781,12 +3848,12 @@ function SocialTab({ siteId }: { siteId: number }) {
               className="mt-3"
               variant="outline"
               onClick={() => bulkGenerateMutation.mutate()}
-              disabled={bulkGenerateMutation.isPending || !bulkTopics.trim() || selectedPlatforms.length === 0}
+              disabled={bulkGeneratePending || !bulkTopics.trim() || selectedPlatforms.length === 0}
             >
-              {bulkGenerateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              {bulkGeneratePending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               Bulk generate
             </Button>
-            {bulkGenerateMutation.isPending && <ProgressBar className="mt-3 max-w-sm" />}
+            {bulkGeneratePending && <ProgressBar className="mt-3 max-w-sm" />}
             {(() => {
               const topicCount = bulkTopics.split("\n").map((t) => t.trim()).filter(Boolean).length;
               const combos = topicCount * selectedPlatforms.length;
@@ -3867,17 +3934,17 @@ function SocialTab({ siteId }: { siteId: number }) {
             className="mt-4"
             onClick={() => calendarMutation.mutate()}
             disabled={
-              calendarMutation.isPending ||
+              calendarGeneratePending ||
               !calendarTopics.trim() ||
               !calendarStartDate ||
               calendarPlatforms.length === 0 ||
               calendarDays < 1
             }
           >
-            {calendarMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarIcon className="h-4 w-4" />}
+            {calendarGeneratePending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarIcon className="h-4 w-4" />}
             Generate {calendarDays}-day calendar
           </Button>
-          {calendarMutation.isPending && (
+          {calendarGeneratePending && (
             <>
               <ProgressBar className="mt-3 max-w-sm" />
               <p className="mt-2 text-theme-xs text-gray-400">
@@ -3963,6 +4030,15 @@ function SocialTab({ siteId }: { siteId: number }) {
                 >
                   {bulkPublishMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
                   Bulk publish
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setShowBulkDeleteConfirm(true)}
+                  disabled={bulkDeleteMutation.isPending}
+                >
+                  {bulkDeleteMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                  Bulk delete
                 </Button>
                 <Button size="sm" variant="outline" onClick={() => setSelectedPostIds([])}>
                   Clear selection
@@ -4080,6 +4156,19 @@ function SocialTab({ siteId }: { siteId: number }) {
                       >
                         <Pencil className="h-3.5 w-3.5" />
                         Edit
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setDeletePostId(post.id)}
+                        disabled={deleteMutation.isPending && deleteMutation.variables === post.id}
+                      >
+                        {deleteMutation.isPending && deleteMutation.variables === post.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3.5 w-3.5" />
+                        )}
+                        Delete
                       </Button>
                     </div>
                   )}
@@ -4208,6 +4297,69 @@ function SocialTab({ siteId }: { siteId: number }) {
           />
         </div>
       )}
+
+      <Modal isOpen={deletePostId !== null} onClose={() => setDeletePostId(null)} className="max-w-md p-6">
+        <div className="flex items-start gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600 dark:bg-red-500/10 dark:text-red-400">
+            <Trash2 className="h-5 w-5" />
+          </span>
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Delete this post?</h3>
+            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              This permanently removes the draft and its content. This cannot be undone.
+            </p>
+          </div>
+        </div>
+        <div className="mt-6 flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={() => setDeletePostId(null)} disabled={deleteMutation.isPending}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            onClick={() => deletePostId !== null && deleteMutation.mutate(deletePostId)}
+            disabled={deleteMutation.isPending}
+            className="bg-red-600 text-white hover:bg-red-700"
+          >
+            {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            Delete post
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal isOpen={showBulkDeleteConfirm} onClose={() => setShowBulkDeleteConfirm(false)} className="max-w-md p-6">
+        <div className="flex items-start gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600 dark:bg-red-500/10 dark:text-red-400">
+            <Trash2 className="h-5 w-5" />
+          </span>
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+              Delete {selectedPostIds.length} post{selectedPostIds.length === 1 ? "" : "s"}?
+            </h3>
+            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              This permanently removes the selected drafts and their content. This cannot be undone.
+            </p>
+          </div>
+        </div>
+        <div className="mt-6 flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setShowBulkDeleteConfirm(false)}
+            disabled={bulkDeleteMutation.isPending}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            onClick={() => bulkDeleteMutation.mutate()}
+            disabled={bulkDeleteMutation.isPending}
+            className="bg-red-600 text-white hover:bg-red-700"
+          >
+            {bulkDeleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            Delete {selectedPostIds.length} post{selectedPostIds.length === 1 ? "" : "s"}
+          </Button>
+        </div>
+      </Modal>
     </>
   );
 }
@@ -4221,11 +4373,14 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
   const toast = useToast();
   const [imagePrompt, setImagePrompt] = useState("");
   const [ogTags, setOgTags] = useState<OgTags | null>(null);
-  const [related, setRelated] = useState<RelatedPage[] | null>(null);
-  const [faqs, setFaqs] = useState<FaqPair[] | null>(null);
   // The old UI only showed the image URL as a text link — no way to
   // actually see what was generated/uploaded without opening a new tab.
   const [showImagePreview, setShowImagePreview] = useState(false);
+  const [editingMeta, setEditingMeta] = useState(false);
+  const [editMetaTitle, setEditMetaTitle] = useState(post.meta_title ?? "");
+  const [editMetaDescription, setEditMetaDescription] = useState(post.meta_description ?? "");
+
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
 
   const imageMutation = useMutation({
     mutationFn: () => generateBlogPostImage(post.id, imagePrompt.trim() || undefined),
@@ -4263,23 +4418,59 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
     onError: (err) => toast.error(serverErrorDetail(err, "OG tag generation failed.")),
   });
 
+  // Persisted versions — 3-4 links / up to 5 FAQs are already generated
+  // automatically right after the draft (see api/routes/seo.py's
+  // _generate_and_store_internal_links / _generate_and_store_blog_faqs);
+  // these buttons are for regenerating afterward (e.g. following a
+  // content edit), and save the result on the post the same way, unlike
+  // the old ephemeral suggestInterlinks/generateFaq calls that only ever
+  // held their result in this component's local state.
   const interlinkMutation = useMutation({
-    mutationFn: () =>
-      suggestInterlinks({ site_id: siteId, url: post.cms_post_link || `draft:${post.id}`, title: post.title, content: post.content }),
-    onSuccess: (data) => {
-      setRelated(data);
-      if (data.length === 0) toast.info("No related pages found yet — publish more posts first so there's something to link to.");
+    mutationFn: () => generateBlogPostInterlinks(post.id),
+    onSuccess: (updated) => {
+      const links: InternalLink[] = updated.internal_links_json ? JSON.parse(updated.internal_links_json) : [];
+      if (links.length === 0) toast.info("No related pages found yet — publish more posts first so there's something to link to.");
+      else toast.success("Internal links updated.");
+      invalidate();
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Interlink suggestion failed.")),
   });
 
   const faqMutation = useMutation({
-    mutationFn: () => generateFaq({ site_id: siteId, page_title: post.title }),
-    onSuccess: (data) => {
-      setFaqs(data);
-      toast.success("FAQ generated.");
+    mutationFn: () => generateBlogPostFaqs(post.id),
+    onSuccess: () => {
+      toast.success("FAQs updated.");
+      invalidate();
     },
     onError: (err) => toast.error(serverErrorDetail(err, "FAQ generation failed.")),
+  });
+
+  const metaMutation = useMutation({
+    mutationFn: () => generateBlogPostMeta(post.id),
+    onSuccess: () => {
+      toast.success("Meta tags updated.");
+      invalidate();
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Meta tag generation failed.")),
+  });
+
+  const saveMetaMutation = useMutation({
+    mutationFn: () => updateBlogPostMeta(post.id, { meta_title: editMetaTitle, meta_description: editMetaDescription }),
+    onSuccess: () => {
+      toast.success("Meta tags saved.");
+      setEditingMeta(false);
+      invalidate();
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't save these changes.")),
+  });
+
+  const grammarMutation = useMutation({
+    mutationFn: () => checkBlogPostGrammar(post.id),
+    onSuccess: () => {
+      toast.success("Grammar checked.");
+      invalidate();
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Grammar check failed.")),
   });
 
   // Publishing already does this automatically — this is for a post
@@ -4292,21 +4483,34 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
     onError: (err) => toast.error(serverErrorDetail(err, "Indexing failed.")),
   });
 
+  const faqs: FaqPair[] = post.faqs_json ? JSON.parse(post.faqs_json) : [];
+  const internalLinks: InternalLink[] = post.internal_links_json ? JSON.parse(post.internal_links_json) : [];
+  const keywordDensity: KeywordDensity[] = post.keyword_density_json ? JSON.parse(post.keyword_density_json) : [];
+  const grammarReport: GrammarReport | null = post.grammar_report_json ? JSON.parse(post.grammar_report_json) : null;
+  const isAiGeneratedImage = post.image_source ? AI_GENERATED_IMAGE_PROVIDERS.has(post.image_source) : false;
+
   return (
     <div className="mt-3 space-y-3 rounded-md border border-gray-100 bg-gray-50 p-3 dark:border-gray-800 dark:bg-white/5">
       <div>
         <p className="mb-1.5 text-theme-xs font-medium text-gray-500 dark:text-gray-400">Featured image</p>
         {post.image_url && (
-          <button type="button" onClick={() => setShowImagePreview(true)} className="mb-1.5 block" title="Click to preview full size">
-            <img
-              src={post.image_url}
-              alt=""
-              className="h-24 w-24 rounded-md object-cover transition-opacity hover:opacity-80"
-              onError={(e) => {
-                (e.target as HTMLImageElement).style.display = "none";
-              }}
-            />
-          </button>
+          <>
+            <button type="button" onClick={() => setShowImagePreview(true)} className="mb-1.5 block" title="Click to preview full size">
+              <img
+                src={post.image_url}
+                alt=""
+                className="h-24 w-24 rounded-md object-cover transition-opacity hover:opacity-80"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).style.display = "none";
+                }}
+              />
+            </button>
+            {post.image_source && (
+              <Badge variant={isAiGeneratedImage ? "warning" : "outline"} className="mb-1.5">
+                {isAiGeneratedImage ? `AI-generated (${post.image_source})` : post.image_source === "manual-upload" ? "Manually uploaded" : `Stock photo (${post.image_source})`}
+              </Badge>
+            )}
+          </>
         )}
         {showImagePreview && post.image_url && (
           <div
@@ -4363,13 +4567,21 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
           {ogMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
           Generate OG tags
         </Button>
+        <Button size="sm" variant="outline" onClick={() => metaMutation.mutate()} disabled={metaMutation.isPending}>
+          {metaMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          {post.meta_title ? "Regenerate meta tags" : "Generate meta tags"}
+        </Button>
         <Button size="sm" variant="outline" onClick={() => interlinkMutation.mutate()} disabled={interlinkMutation.isPending}>
           {interlinkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-          Suggest interlinks
+          {internalLinks.length > 0 ? "Regenerate internal links" : "Suggest internal links"}
         </Button>
         <Button size="sm" variant="outline" onClick={() => faqMutation.mutate()} disabled={faqMutation.isPending}>
           {faqMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-          Generate FAQ
+          {faqs.length > 0 ? "Regenerate FAQs" : "Generate FAQs"}
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => grammarMutation.mutate()} disabled={grammarMutation.isPending}>
+          {grammarMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          {grammarReport ? "Re-check grammar" : "Check grammar"}
         </Button>
         <Button size="sm" variant="outline" onClick={() => reindexMutation.mutate()} disabled={reindexMutation.isPending}>
           {reindexMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
@@ -4384,9 +4596,93 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
         </div>
       )}
 
-      {related && related.length > 0 && (
+      <div className="rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
+        <div className="mb-1 flex items-center justify-between">
+          <p className="font-medium text-gray-700 dark:text-gray-300">SEO meta tags</p>
+          {!editingMeta && (post.meta_title || post.meta_description) && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditMetaTitle(post.meta_title ?? "");
+                setEditMetaDescription(post.meta_description ?? "");
+                setEditingMeta(true);
+              }}
+              className="text-brand-600 hover:underline dark:text-brand-400"
+            >
+              Edit
+            </button>
+          )}
+        </div>
+        {editingMeta ? (
+          <div className="space-y-2">
+            <div>
+              <label className="mb-1 flex items-center text-gray-400">
+                Meta title
+                <MetaLengthCounter text={editMetaTitle} kind="title" />
+              </label>
+              <Input value={editMetaTitle} onChange={(e) => setEditMetaTitle(e.target.value)} />
+            </div>
+            <div>
+              <label className="mb-1 flex items-center text-gray-400">
+                Meta description
+                <MetaLengthCounter text={editMetaDescription} kind="description" />
+              </label>
+              <textarea
+                value={editMetaDescription}
+                onChange={(e) => setEditMetaDescription(e.target.value)}
+                rows={2}
+                className="w-full rounded-lg border border-gray-300 bg-transparent p-2 text-theme-xs text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+              />
+            </div>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                onClick={() => saveMetaMutation.mutate()}
+                disabled={saveMetaMutation.isPending || !editMetaTitle.trim() || !editMetaDescription.trim()}
+              >
+                {saveMetaMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                Save
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setEditingMeta(false)} disabled={saveMetaMutation.isPending}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : post.meta_title || post.meta_description ? (
+          <>
+            <p>
+              <span className="text-gray-400">Title — </span>
+              {post.meta_title}
+              {post.meta_title && <MetaLengthCounter text={post.meta_title} kind="title" />}
+            </p>
+            <p className="mt-1">
+              <span className="text-gray-400">Description — </span>
+              {post.meta_description}
+              {post.meta_description && <MetaLengthCounter text={post.meta_description} kind="description" />}
+            </p>
+          </>
+        ) : (
+          <p className="text-gray-400">Not generated yet.</p>
+        )}
+      </div>
+
+      {keywordDensity.length > 0 && (
+        <div className="rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
+          <p className="mb-1 font-medium text-gray-700 dark:text-gray-300">Keyword density</p>
+          <div className="space-y-1">
+            {keywordDensity.map((k) => (
+              <p key={k.keyword} className={k.in_range ? "text-success-600 dark:text-success-400" : "text-warning-600 dark:text-warning-400"}>
+                <span className="text-gray-400">{k.role === "primary" ? "Primary" : "Secondary"} — </span>
+                {k.keyword}: {k.density}% ({k.count}×) — target {k.target_min}-{k.target_max}%
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {internalLinks.length > 0 && (
         <ul className="rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
-          {related.map((p) => (
+          {internalLinks.map((p) => (
             <li key={p.url} className="truncate">
               <a href={p.url} target="_blank" rel="noreferrer" className="text-brand-600 underline dark:text-brand-400">
                 {p.title}
@@ -4396,12 +4692,30 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
         </ul>
       )}
 
-      {faqs && faqs.length > 0 && (
+      {faqs.length > 0 && (
         <div className="space-y-2 rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
           {faqs.map((f, idx) => (
             <div key={idx}>
               <p className="font-medium text-gray-700 dark:text-gray-300">{f.question}</p>
               <p className="text-gray-500 dark:text-gray-400">{f.answer}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {grammarReport && (
+        <div className="rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
+          <p className="mb-1 font-medium text-gray-700 dark:text-gray-300">
+            Grammar check — {grammarReport.issues.length === 0 ? "no issues found" : `${grammarReport.issues.length} suggestion(s)`}
+          </p>
+          {grammarReport.issues.map((issue, idx) => (
+            <div key={idx} className="mt-1.5 border-t border-gray-100 pt-1.5 dark:border-gray-800">
+              <p>
+                <span className="text-error-600 line-through dark:text-error-400">{issue.original}</span>
+                {" → "}
+                <span className="text-success-600 dark:text-success-400">{issue.suggestion}</span>
+              </p>
+              <p className="text-gray-400">{issue.explanation}</p>
             </div>
           ))}
         </div>
@@ -4484,6 +4798,7 @@ function BlogTab({ siteId }: { siteId: number }) {
   const toast = useToast();
   const [topic, setTopic] = useState("");
   const [primaryKeyword, setPrimaryKeyword] = useState("");
+  const [secondaryKeywords, setSecondaryKeywords] = useState("");
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [seoToolsId, setSeoToolsId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -4539,17 +4854,56 @@ function BlogTab({ siteId }: { siteId: number }) {
     onError: (err) => toast.error(serverErrorDetail(err, "Could not save these changes.")),
   });
 
+  // Structure findings (H1/H2/word-count/keyword) are computed once at
+  // generation time and stored — they never refresh on their own. A post
+  // generated before a prompt/prompt-fix can be stuck showing stale
+  // findings that no longer match its actual (already-fine) content.
+  // This reuses the exact same recompute-on-save path the Edit form's
+  // updateMutation above already exercises, just with the post's own
+  // current title/excerpt/content unchanged — a one-click refresh with
+  // no backend change needed.
+  const recheckStructureMutation = useMutation({
+    mutationFn: (post: BlogPost) => updateBlogPost(post.id, { title: post.title, excerpt: post.excerpt ?? undefined, content: post.content }),
+    onSuccess: () => {
+      toast.success("Structure re-checked.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Re-check failed.")),
+  });
+
   const generateMutation = useMutation({
     // Module 61 — see SocialTab's identical generateMutation for the full
     // comment on why this exists.
     mutationKey: ["seo", "content-generate", "blog", "single", siteId],
-    mutationFn: () => generateBlogPost({ site_id: siteId, topic, primary_keyword: primaryKeyword.trim() || undefined }),
+    mutationFn: () =>
+      generateBlogPost({
+        site_id: siteId,
+        topic,
+        primary_keyword: primaryKeyword.trim() || undefined,
+        secondary_keywords: splitCsv(secondaryKeywords),
+      }),
     onSuccess: () => {
       toast.success("Blog post drafted.");
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
     onError: () => toast.error("Blog post generation failed — check that Ollama is running."),
   });
+  // generateMutation.isPending resets to false the instant this component
+  // remounts — switching to another SEO tab and back unmounts/remounts
+  // BlogTab, even though the generation itself is still running
+  // server-side (that part was already fine — see ContentGenerationStatusBar).
+  // useIsMutating reads the same mutationKey from TanStack Query's global
+  // cache, which survives the remount, so this button's own spinner and
+  // progress bar reflect reality again instead of resetting to "idle".
+  // useIsMutating is its own statement, not the right side of `||` — React
+  // itself flagged the first draft of this ("change in the order of Hooks
+  // called by BlogTab") because a hook after `||` gets skipped by short-
+  // circuiting the moment isPending is already true, which is a real
+  // Rules-of-Hooks violation, not a style nitpick.
+  const isSingleGenerateMutating = useIsMutating({
+    mutationKey: ["seo", "content-generate", "blog", "single", siteId],
+  });
+  const singleGeneratePending = generateMutation.isPending || isSingleGenerateMutating > 0;
 
   // Module 60 — the automatic check runs at generation time; this is the
   // manual re-check button ContentQualityPanel shows (e.g. after editing
@@ -4674,6 +5028,12 @@ function BlogTab({ siteId }: { siteId: number }) {
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Bulk generation failed — check that Ollama is running.")),
   });
+  // See singleGeneratePending's comment above — same fix (and the same
+  // "hook must not sit on the right of ||" requirement), bulk mutationKey.
+  const isBulkGenerateMutating = useIsMutating({
+    mutationKey: ["seo", "content-generate", "blog", "bulk", siteId],
+  });
+  const bulkGeneratePending = bulkGenerateMutation.isPending || isBulkGenerateMutating > 0;
 
   // Content calendar — cycles topics across a date range, one post per
   // day, pre-scheduled and awaiting review/approval before the
@@ -4700,6 +5060,11 @@ function BlogTab({ siteId }: { siteId: number }) {
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Calendar generation failed — check that Ollama is running.")),
   });
+  // See singleGeneratePending's comment above — same fix, calendar mutationKey.
+  const isCalendarGenerateMutating = useIsMutating({
+    mutationKey: ["seo", "content-generate", "blog", "calendar", siteId],
+  });
+  const calendarGeneratePending = calendarMutation.isPending || isCalendarGenerateMutating > 0;
 
   const exportMutation = useMutation({
     mutationFn: () => exportBlogPostsToSheet(siteId),
@@ -4760,20 +5125,30 @@ function BlogTab({ siteId }: { siteId: number }) {
               <Label htmlFor="blog-keyword">Primary keyword (optional)</Label>
               <Input id="blog-keyword" value={primaryKeyword} onChange={(e) => setPrimaryKeyword(e.target.value)} />
             </div>
+            <div className="sm:col-span-2">
+              <Label htmlFor="blog-secondary-keywords">Secondary keywords (optional, comma-separated)</Label>
+              <Input
+                id="blog-secondary-keywords"
+                value={secondaryKeywords}
+                onChange={(e) => setSecondaryKeywords(e.target.value)}
+                placeholder="e.g. remote work tools, employee monitoring"
+              />
+            </div>
           </div>
           <Button
             className="mt-4"
             onClick={() => generateMutation.mutate()}
-            disabled={generateMutation.isPending || !topic.trim()}
+            disabled={singleGeneratePending || !topic.trim()}
           >
-            {generateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
+            {singleGeneratePending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
             Generate
           </Button>
-          {generateMutation.isPending && (
+          {singleGeneratePending && (
             <>
               <ProgressBar className="mt-3 max-w-sm" />
               <p className="mt-2 text-theme-xs text-gray-400">
-                A full post takes a minute or two — this uses the slower, higher-quality model on purpose.
+                Can take several minutes — the higher-quality model may retry internally to hit the 1,200-1,500 word
+                target, then meta tags, FAQs, internal links, and a grammar check all run automatically afterward.
               </p>
             </>
           )}
@@ -4805,12 +5180,12 @@ function BlogTab({ siteId }: { siteId: number }) {
               className="mt-3"
               variant="outline"
               onClick={() => bulkGenerateMutation.mutate()}
-              disabled={bulkGenerateMutation.isPending || !bulkTopics.trim()}
+              disabled={bulkGeneratePending || !bulkTopics.trim()}
             >
-              {bulkGenerateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              {bulkGeneratePending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               Bulk generate
             </Button>
-            {bulkGenerateMutation.isPending && <ProgressBar className="mt-3 max-w-sm" />}
+            {bulkGeneratePending && <ProgressBar className="mt-3 max-w-sm" />}
             {(() => {
               const topicCount = bulkTopics.split("\n").map((t) => t.trim()).filter(Boolean).length;
               if (topicCount === 0) return null;
@@ -4880,12 +5255,12 @@ function BlogTab({ siteId }: { siteId: number }) {
           <Button
             className="mt-4"
             onClick={() => calendarMutation.mutate()}
-            disabled={calendarMutation.isPending || !calendarTopics.trim() || !calendarStartDate || calendarDays < 1}
+            disabled={calendarGeneratePending || !calendarTopics.trim() || !calendarStartDate || calendarDays < 1}
           >
-            {calendarMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarIcon className="h-4 w-4" />}
+            {calendarGeneratePending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarIcon className="h-4 w-4" />}
             Generate {calendarDays}-day calendar
           </Button>
-          {calendarMutation.isPending && (
+          {calendarGeneratePending && (
             <>
               <ProgressBar className="mt-3 max-w-sm" />
               <p className="mt-2 text-theme-xs text-gray-400">
@@ -5062,6 +5437,19 @@ function BlogTab({ siteId }: { siteId: number }) {
                           </li>
                         ))}
                       </ul>
+                    )}
+                    {post.structure_passed !== null && (
+                      <button
+                        type="button"
+                        onClick={() => recheckStructureMutation.mutate(post)}
+                        disabled={recheckStructureMutation.isPending && recheckStructureMutation.variables?.id === post.id}
+                        className="mt-1 text-theme-xs text-brand-600 underline hover:text-brand-700 disabled:opacity-50 dark:text-brand-400"
+                        title="Findings are computed once at generation time and don't update on their own — use this if a finding looks stale."
+                      >
+                        {recheckStructureMutation.isPending && recheckStructureMutation.variables?.id === post.id
+                          ? "Re-checking…"
+                          : "Re-check structure"}
+                      </button>
                     )}
                     <ContentQualityPanel
                       reportJson={post.quality_report_json}
@@ -8696,6 +9084,7 @@ function readStoredSiteId(): number | null {
 }
 
 export default function SeoPage() {
+  const queryClient = useQueryClient();
   const [siteId, setSiteIdState] = useState<number | null>(readStoredSiteId);
   const setSiteId = (id: number) => {
     setSiteIdState(id);
@@ -8734,6 +9123,32 @@ export default function SeoPage() {
   }, [sites, siteId]);
 
   const selectedSite = sites.find((s) => s.id === siteId) ?? null;
+
+  const [showRemoveSiteConfirm, setShowRemoveSiteConfirm] = useState(false);
+
+  const deleteSiteMutation = useMutation({
+    mutationFn: (id: number) => deleteSeoSite(id),
+    onSuccess: () => {
+      // Doesn't need to touch siteId itself even when the removed site was
+      // selected — the effect above already falls back to sites[0] the
+      // moment the stored id no longer matches anything in the refetched
+      // list (its own comment calls out "e.g. it was deleted" as exactly
+      // this case).
+      toast.success("Site removed.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "sites"] });
+      setShowRemoveSiteConfirm(false);
+    },
+    onError: (err) => {
+      const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
+      toast.error(detail || "Could not remove this site.");
+      setShowRemoveSiteConfirm(false);
+    },
+  });
+
+  const handleRemoveSite = () => {
+    if (!selectedSite) return;
+    setShowRemoveSiteConfirm(true);
+  };
 
   return (
     <>
@@ -8777,6 +9192,21 @@ export default function SeoPage() {
                 >
                   <Plus className="h-4 w-4" />
                   Add site
+                </Button>
+              )}
+              {selectedSite && !showAddSite && (
+                <Button
+                  variant="outline"
+                  onClick={handleRemoveSite}
+                  disabled={deleteSiteMutation.isPending}
+                  className="border-white/25 bg-white/10 text-white hover:bg-red-500/30"
+                >
+                  {deleteSiteMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4" />
+                  )}
+                  Remove site
                 </Button>
               )}
             </div>
@@ -8845,6 +9275,50 @@ export default function SeoPage() {
           )
         )}
       </div>
+
+      <Modal
+        isOpen={showRemoveSiteConfirm}
+        onClose={() => setShowRemoveSiteConfirm(false)}
+        className="max-w-md p-6"
+      >
+        <div className="flex items-start gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600 dark:bg-red-500/10 dark:text-red-400">
+            <Trash2 className="h-5 w-5" />
+          </span>
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+              Remove "{selectedSite?.name}"?
+            </h3>
+            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              This permanently deletes all of its data — job history, Search Console/Analytics data, technical
+              issues, blog and social drafts, backlinks — everything. This cannot be undone.
+            </p>
+          </div>
+        </div>
+        <div className="mt-6 flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setShowRemoveSiteConfirm(false)}
+            disabled={deleteSiteMutation.isPending}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            onClick={() => selectedSite && deleteSiteMutation.mutate(selectedSite.id)}
+            disabled={deleteSiteMutation.isPending}
+            className="bg-red-600 text-white hover:bg-red-700"
+          >
+            {deleteSiteMutation.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4" />
+            )}
+            Remove site
+          </Button>
+        </div>
+      </Modal>
     </>
   );
 }

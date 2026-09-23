@@ -826,6 +826,8 @@ export const createSeoSite = (payload: {
 
 // Lets a site's Search Console/Analytics property be set from the UI
 // instead of editing .env and restarting the backend for every site.
+export const deleteSeoSite = (siteId: number) => api.delete(`/api/seo/sites/${siteId}`).then(() => undefined);
+
 export const updateSeoSiteGoogleConfig = (
   siteId: number,
   payload: { gsc_site_url?: string; ga4_property_id?: string }
@@ -1330,6 +1332,11 @@ export const bulkPublishSocialPosts = (postIds: number[]) =>
   api
     .post<SocialBulkActionResult[]>("/api/seo/social/bulk-publish", { post_ids: postIds }, { timeout: 180_000 })
     .then((r) => r.data);
+
+export const deleteSocialPost = (postId: number) => api.delete(`/api/seo/social/${postId}`);
+
+export const bulkDeleteSocialPosts = (postIds: number[]) =>
+  api.post<SocialBulkActionResult[]>("/api/seo/social/bulk-delete", { post_ids: postIds }).then((r) => r.data);
 
 export const bulkGenerateSocialPosts = (payload: {
   site_id: number;
@@ -2216,6 +2223,12 @@ export interface BlogPost {
   quality_checked_at: string | null;
   status: BlogPostStatus;
   image_url: string | null;
+  // Which image provider produced image_url ("fastsd"/"stability"/
+  // "puter"/"image_worker" = AI-generated, "pexels" = real stock
+  // photography, "manual-upload" = a human's own file). null for an
+  // image attached before this field existed. See AI_GENERATED_IMAGE_
+  // PROVIDERS below for the same classification the backend uses.
+  image_source: string | null;
   slug: string | null;
   // JSON-encoded arrays of plain names — JSON.parse before use, same
   // convention as structure_issues_json above.
@@ -2227,13 +2240,45 @@ export interface BlogPost {
   created_at: string | null;
   published_at: string | null;
   scheduled_at: string | null;
+  // SEO meta title/description for this post's own search-snippet,
+  // generated automatically right after the draft and editable
+  // afterward via updateBlogPostMeta.
+  meta_title: string | null;
+  meta_description: string | null;
+  // JSON-encoded list of the secondary keywords this post's density was
+  // tracked against, and the resulting density report — JSON.parse
+  // keyword_density_json into KeywordDensity[] before use.
+  secondary_keywords_json: string | null;
+  keyword_density_json: string | null;
+  // JSON-encoded FaqPair[] and InternalLink[] — generated automatically
+  // right after the draft, JSON.parse before use, same convention as
+  // structure_issues_json.
+  faqs_json: string | null;
+  internal_links_json: string | null;
+  // JSON-encoded GrammarReport — JSON.parse before use.
+  grammar_report_json: string | null;
+  grammar_checked_at: string | null;
 }
+
+// Same classification the backend's ai/seo/image_pipeline.py uses for
+// AI_GENERATED_IMAGE_PROVIDERS — kept in sync by hand since this is a
+// small, rarely-changing set of provider names, not worth a round trip.
+export const AI_GENERATED_IMAGE_PROVIDERS = new Set(["fastsd", "stability", "puter", "image_worker"]);
 
 // A real, full-length post via the slower/better model (module 25's
 // fast=False path) — genuinely takes over a minute, not the 20-40s a
-// short social caption needs.
-export const generateBlogPost = (payload: { site_id: number; topic: string; primary_keyword?: string; min_words?: number }) =>
-  api.post<BlogPost>("/api/seo/blog/generate", payload, { timeout: 180_000 }).then((r) => r.data);
+// short social caption needs. Now also retries internally up to 3 times
+// against a 1,200-1,500 word / real-H1 target (see ai/seo/blog_content.
+// py) plus generates meta tags, FAQs, internal links, and a grammar
+// check right after — a single call can genuinely take several minutes.
+export const generateBlogPost = (payload: {
+  site_id: number;
+  topic: string;
+  primary_keyword?: string;
+  secondary_keywords?: string[];
+  min_words?: number;
+  max_words?: number;
+}) => api.post<BlogPost>("/api/seo/blog/generate", payload, { timeout: 0 }).then((r) => r.data);
 
 export const getBlogPosts = (siteId: number, status?: string) =>
   api.get<BlogPost[]>("/api/seo/blog", { params: { site_id: siteId, status } }).then((r) => r.data);
@@ -2247,6 +2292,53 @@ export const updateBlogPost = (postId: number, payload: { title: string; excerpt
 // WordPress slug/tags/categories the moment Publish creates the post.
 export const updateBlogPostTaxonomy = (postId: number, payload: { slug?: string; tags?: string[]; categories?: string[] }) =>
   api.patch<BlogPost>(`/api/seo/blog/${postId}/taxonomy`, payload).then((r) => r.data);
+
+// Editing the AI-drafted meta title/description — same edit window as
+// taxonomy above.
+export const updateBlogPostMeta = (postId: number, payload: { meta_title: string; meta_description: string }) =>
+  api.patch<BlogPost>(`/api/seo/blog/${postId}/meta`, payload).then((r) => r.data);
+
+// Manual regenerate for meta tags / FAQs / internal links — each is also
+// generated automatically right after the draft; these are for
+// afterward (e.g. following a content edit), and persist on the post
+// same as the automatic pass rather than only existing in memory.
+export const generateBlogPostMeta = (postId: number) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/meta/generate`, {}, { timeout: 60_000 }).then((r) => r.data);
+
+export const generateBlogPostFaqs = (postId: number) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/faqs/generate`, {}, { timeout: 60_000 }).then((r) => r.data);
+
+export const generateBlogPostInterlinks = (postId: number) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/interlinks/generate`, {}, { timeout: 30_000 }).then((r) => r.data);
+
+export const checkBlogPostGrammar = (postId: number) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/grammar-check`, {}, { timeout: 60_000 }).then((r) => r.data);
+
+export interface KeywordDensity {
+  keyword: string;
+  role: "primary" | "secondary";
+  count: number;
+  density: number;
+  target_min: number;
+  target_max: number;
+  in_range: boolean;
+}
+
+export interface InternalLink {
+  url: string;
+  title: string;
+}
+
+export interface GrammarIssue {
+  original: string;
+  suggestion: string;
+  explanation: string;
+}
+
+export interface GrammarReport {
+  issues: GrammarIssue[];
+  checked_word_count: number;
+}
 
 // Module 60 — the automatic check runs once, at generation time; this is
 // the manual re-check, e.g. after editing a draft's content (updateBlogPost
@@ -2296,6 +2388,7 @@ export const bulkGenerateBlogPosts = (payload: {
   site_id: number;
   topics: string[];
   min_words?: number;
+  max_words?: number;
   generate_image?: boolean;
 }) => api.post<BlogPost[]>("/api/seo/blog/bulk-generate", payload, { timeout: 0 }).then((r) => r.data);
 
@@ -2306,6 +2399,7 @@ export const generateBlogCalendar = (payload: {
   days: number;
   post_time: string;
   min_words?: number;
+  max_words?: number;
   generate_image?: boolean;
 }) => api.post<BlogPost[]>("/api/seo/blog/generate-calendar", payload, { timeout: 0 }).then((r) => r.data);
 
@@ -2385,10 +2479,16 @@ export interface StructureReport {
   h3_count: number;
   passed: boolean;
   issues: StructureIssue[];
+  keyword_density: KeywordDensity[];
 }
 
-export const analyzeContentStructure = (payload: { content_html: string; primary_keyword?: string; min_words?: number; max_words?: number }) =>
-  api.post<StructureReport>("/api/seo/content/analyze", payload).then((r) => r.data);
+export const analyzeContentStructure = (payload: {
+  content_html: string;
+  primary_keyword?: string;
+  secondary_keywords?: string[];
+  min_words?: number;
+  max_words?: number;
+}) => api.post<StructureReport>("/api/seo/content/analyze", payload).then((r) => r.data);
 
 export interface FaqPair {
   question: string;

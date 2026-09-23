@@ -51,6 +51,7 @@ from api.schemas import (
     BlogExportRequest,
     BlogExportResult,
     BlogGenerateRequest,
+    BlogMetaUpdate,
     BlogPostOut,
     BlogPostUpdate,
     BlogScheduleRequest,
@@ -69,6 +70,8 @@ from api.schemas import (
     FlaggedPhraseOut,
     Ga4PageRowOut,
     Ga4PullRequest,
+    GrammarIssueOut,
+    GrammarReportOut,
     GscPageRowOut,
     GscPullRequest,
     GscQueryRowOut,
@@ -77,8 +80,10 @@ from api.schemas import (
     IndexingSubmitRequest,
     IndexStatusOut,
     ImageGenerateRequest,
+    InternalLinkOut,
     InterlinkPage,
     InterlinkSuggestRequest,
+    KeywordDensityOut,
     LlmUsageLogOut,
     MetaRewriteOut,
     MetaRewriteUpdate,
@@ -190,9 +195,11 @@ from api.schemas import (
     UrlInspectRequest,
 )
 from ai.seo.blog_content import generate_blog_post
+from ai.seo.blog_meta_generator import generate_blog_meta_tags
 from ai.seo.content_quality import assess_humanization, check_plagiarism
 from ai.seo.content_structure import analyze_structure, generate_faq
 from ai.seo.daily_digest import generate_daily_digest
+from ai.seo.grammar_checker import check_grammar
 from ai.seo.image_pipeline import generate_and_publish_image, upload_image_bytes
 from ai.seo.image_prompt import derive_image_prompt
 from ai.seo.interlink_engine import find_related_pages, index_page
@@ -327,6 +334,19 @@ def create_site(payload: SeoSiteCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(row)
     return row
+
+
+@router.delete("/sites/{site_id}", status_code=204)
+def delete_site(site_id: int, db: Session = Depends(get_db)):
+    """Stops monitoring a site and permanently removes its history — job
+    runs, GSC/GA4 data, technical issues, blog/social drafts, backlinks,
+    everything under it (agent.database.delete_seo_site relies on
+    ON DELETE CASCADE, which only the connection it uses actually
+    enforces). The frontend is expected to confirm with the user before
+    calling this; there's no undo once it runs."""
+    if not database.delete_seo_site(site_id):
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+    db.expire_all()
 
 
 @router.patch("/sites/{site_id}/google-config", response_model=SeoSiteOut)
@@ -1716,14 +1736,7 @@ def suggest_interlinks_route(payload: InterlinkSuggestRequest, db: Session = Dep
     )
 
 
-@router.post("/content/analyze", response_model=StructureReportOut)
-def analyze_content_route(payload: ContentAnalyzeRequest):
-    report = analyze_structure(
-        payload.content_html,
-        primary_keyword=payload.primary_keyword,
-        min_words=payload.min_words,
-        max_words=payload.max_words,
-    )
+def _structure_report_out(report) -> StructureReportOut:
     return StructureReportOut(
         word_count=report.word_count,
         h1_count=report.h1_count,
@@ -1731,7 +1744,26 @@ def analyze_content_route(payload: ContentAnalyzeRequest):
         h3_count=report.h3_count,
         passed=report.passed,
         issues=[{"rule": i.rule, "severity": i.severity, "message": i.message} for i in report.issues],
+        keyword_density=[
+            KeywordDensityOut(
+                keyword=k.keyword, role=k.role, count=k.count, density=k.density,
+                target_min=k.target_min, target_max=k.target_max, in_range=k.in_range,
+            )
+            for k in report.keyword_density
+        ],
     )
+
+
+@router.post("/content/analyze", response_model=StructureReportOut)
+def analyze_content_route(payload: ContentAnalyzeRequest):
+    report = analyze_structure(
+        payload.content_html,
+        primary_keyword=payload.primary_keyword,
+        secondary_keywords=payload.secondary_keywords,
+        min_words=payload.min_words,
+        max_words=payload.max_words,
+    )
+    return _structure_report_out(report)
 
 
 # Module 60 — content plagiarism & humanization check. See
@@ -2502,6 +2534,40 @@ def update_social_post_route(post_id: int, payload: SocialPostUpdate, db: Sessio
     return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
 
 
+@router.delete("/social/{post_id}", status_code=204)
+def delete_social_post_route(post_id: int, db: Session = Depends(get_db)):
+    """Real deletion — a draft/rejected/failed post a human doesn't want
+    cluttering the list actually goes away, not just gets hidden.
+    Blocked once a post is 'posted': the real post is still live on the
+    platform, so deleting the local record would only make it
+    un-trackable, not un-post it — same reasoning as the edit/schedule
+    routes' 'posted' guard above."""
+    row = db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No social post {post_id}")
+    if row.status == "posted":
+        raise HTTPException(status_code=409, detail="Can't delete a post that's already been published")
+    database.delete_social_post(post_id)
+
+
+@router.post("/social/bulk-delete", response_model=list[SocialBulkActionResultOut])
+def bulk_delete_social_posts_route(payload: SocialBulkIdsRequest, db: Session = Depends(get_db)):
+    results = []
+    for post_id in payload.post_ids:
+        row = db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+        if row is None:
+            results.append(SocialBulkActionResultOut(post_id=post_id, ok=False, detail=f"No social post {post_id}"))
+            continue
+        if row.status == "posted":
+            results.append(
+                SocialBulkActionResultOut(post_id=post_id, ok=False, detail="Can't delete a post that's already been published")
+            )
+            continue
+        ok = database.delete_social_post(post_id)
+        results.append(SocialBulkActionResultOut(post_id=post_id, ok=ok, detail="Deleted" if ok else "Delete failed"))
+    return results
+
+
 @router.post("/social/{post_id}/approve", response_model=SocialPostOut)
 def approve_social_post_route(post_id: int, db: Session = Depends(get_db)):
     ok = database.set_social_post_status(post_id, "approved")
@@ -2967,6 +3033,92 @@ def get_content_backup_route(backup_id: int):
     return dict(row)
 
 
+def _keyword_density_json(report) -> str:
+    return json.dumps(
+        [
+            {
+                "keyword": k.keyword, "role": k.role, "count": k.count, "density": k.density,
+                "target_min": k.target_min, "target_max": k.target_max, "in_range": k.in_range,
+            }
+            for k in report.keyword_density
+        ]
+    )
+
+
+def _generate_and_store_blog_meta(
+    post_id: int, *, site_id: int, title: str, excerpt: Optional[str], primary_keyword: Optional[str],
+    secondary_keywords_json: Optional[str], keyword_density_json: str,
+) -> None:
+    """Blog tool feedback round — SEO meta title/description for the
+    post's own search-snippet. Keyword density was already computed
+    (pure, no LLM call) by the caller from analyze_structure and is stored
+    unconditionally; only the LLM-backed meta-tag half can fail, and never
+    blocks the draft itself from existing — same graceful-degrade
+    convention as _check_and_store_blog_quality."""
+    meta_title = meta_description = None
+    try:
+        tags = generate_blog_meta_tags(title, excerpt or title, primary_keyword, site_id=site_id)
+        if tags:
+            meta_title, meta_description = tags.meta_title, tags.meta_description
+    except Exception:
+        logger.exception("Meta tag generation failed for blog post %s — post saved without one", post_id)
+    database.set_blog_post_seo_meta(post_id, meta_title, meta_description, secondary_keywords_json, keyword_density_json)
+
+
+def _generate_and_store_blog_faqs(post_id: int, site_id: int, title: str) -> None:
+    """Auto-FAQs — reuses the same generate_faq (ai/seo/content_structure.
+    py) and real-GSC-query seeding /content/faq already offers manually,
+    just run automatically right after the draft and persisted on the
+    post itself instead of only ever existing as an ephemeral response.
+    Never raises — a failure here must not block the draft being created."""
+    try:
+        gsc_rows = database.list_gsc_queries(site_id, limit=15)
+        seed_queries = [row["query"] for row in gsc_rows]
+        faqs = generate_faq(title, seed_queries, site_id=site_id, max_pairs=5)
+        if faqs:
+            faqs_json = json.dumps([{"question": f.question, "answer": f.answer} for f in faqs])
+            database.set_blog_post_faqs(post_id, faqs_json)
+    except Exception:
+        logger.exception("Auto-FAQ generation failed for blog post %s — post saved without FAQs", post_id)
+
+
+def _generate_and_store_internal_links(post_id: int, site_id: int, title: str, content_html: str) -> None:
+    """Blog tool feedback round — suggests 3-4 already-published pages on
+    the same site to link to (ai/seo/interlink_engine.py's semantic
+    match, a stronger signal than plain keyword overlap), computed once
+    here and stored so what a reviewer sees before approving is exactly
+    what _do_publish_blog_post injects at publish time (see its own
+    updated docstring) rather than a second, possibly different, live
+    recompute. Never raises — a failure here must not block the draft."""
+    try:
+        related = find_related_pages(site_id, f"blog-draft:{post_id}", title, content_html, n_results=4)
+        if related:
+            links_json = json.dumps([{"url": p.url, "title": p.title} for p in related])
+            database.set_blog_post_internal_links(post_id, links_json)
+    except Exception:
+        logger.exception("Auto internal-link suggestion failed for blog post %s — post saved without any", post_id)
+
+
+def _generate_and_store_blog_grammar(post_id: int, site_id: int, content_html: str) -> None:
+    """Grammar check & fix suggestions (ai/seo/grammar_checker.py). Never
+    raises — a failure here must not block the draft being created."""
+    try:
+        report = check_grammar(content_html, site_id=site_id)
+        if report is not None:
+            report_json = json.dumps(
+                {
+                    "issues": [
+                        {"original": i.original, "suggestion": i.suggestion, "explanation": i.explanation}
+                        for i in report.issues
+                    ],
+                    "checked_word_count": report.checked_word_count,
+                }
+            )
+            database.set_blog_post_grammar(post_id, report_json)
+    except Exception:
+        logger.exception("Grammar check failed for blog post %s — post saved without one", post_id)
+
+
 @router.post("/blog/generate", response_model=BlogPostOut, status_code=201)
 def generate_blog_post_route(payload: BlogGenerateRequest, db: Session = Depends(get_db)):
     """Generates a full blog post draft, immediately runs it through
@@ -2975,19 +3127,32 @@ def generate_blog_post_route(payload: BlogGenerateRequest, db: Session = Depends
     count/keyword findings AND originality/AI-pattern findings right
     alongside the draft rather than as a separate manual step, and stores
     it as 'draft' — no CMS call happens here. See /blog/{id}/publish for
-    what approval leads to."""
+    what approval leads to.
+
+    Blog tool feedback round — also auto-generates and stores this post's
+    own SEO meta title/description, its keyword-density report, up to 5
+    FAQs, and 3-4 suggested internal links, and runs a grammar check —
+    each independently best-effort (see their own _generate_and_store_*
+    docstrings above) so a failure in any one of them never blocks the
+    draft itself from being created. This makes a single generate call
+    noticeably slower than before (several more LLM calls on top of the
+    main draft, which itself can now retry up to 3 times — see ai/seo/
+    blog_content.py's generate_blog_post) in exchange for a draft that
+    actually needs less manual follow-up work before it's ready to review."""
     site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
     draft = generate_blog_post(
-        payload.topic, payload.primary_keyword, site_id=payload.site_id, min_words=payload.min_words
+        payload.topic, payload.primary_keyword, site_id=payload.site_id,
+        min_words=payload.min_words, max_words=payload.max_words,
     )
     if draft is None:
         raise HTTPException(status_code=502, detail="Blog post generation failed — see server logs")
 
     structure = analyze_structure(
-        draft.content_html, primary_keyword=payload.primary_keyword, min_words=payload.min_words
+        draft.content_html, primary_keyword=payload.primary_keyword, secondary_keywords=payload.secondary_keywords,
+        min_words=payload.min_words, max_words=payload.max_words,
     )
     structure_issues_json = json.dumps(
         [{"rule": i.rule, "severity": i.severity, "message": i.message} for i in structure.issues]
@@ -3004,6 +3169,15 @@ def generate_blog_post_route(payload: BlogGenerateRequest, db: Session = Depends
         structure_issues_json,
     )
     _check_and_store_blog_quality(db, post_id, payload.site_id, draft.content_html)
+    _generate_and_store_blog_meta(
+        post_id, site_id=payload.site_id, title=draft.title, excerpt=draft.excerpt,
+        primary_keyword=payload.primary_keyword,
+        secondary_keywords_json=json.dumps(payload.secondary_keywords) if payload.secondary_keywords else None,
+        keyword_density_json=_keyword_density_json(structure),
+    )
+    _generate_and_store_blog_faqs(post_id, payload.site_id, draft.title)
+    _generate_and_store_internal_links(post_id, payload.site_id, draft.title, draft.content_html)
+    _generate_and_store_blog_grammar(post_id, payload.site_id, draft.content_html)
     _log_to_sheet_safe(
         "Content Pipeline",
         [date_cls.today().isoformat(), site.name, payload.topic, draft.title, "draft", structure.passed],
@@ -3033,7 +3207,7 @@ def generate_blog_post_image_route(post_id: int, payload: ImageGenerateRequest, 
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
 
-    database.set_blog_post_image(post_id, result.url)
+    database.set_blog_post_image(post_id, result.url, image_source=result.provider)
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
 
@@ -3059,7 +3233,7 @@ async def upload_blog_post_image_route(post_id: int, file: UploadFile = File(...
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
 
-    database.set_blog_post_image(post_id, result.url)
+    database.set_blog_post_image(post_id, result.url, image_source=result.provider)
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
 
@@ -3091,11 +3265,16 @@ def update_blog_post_route(post_id: int, payload: BlogPostUpdate, db: Session = 
             status_code=409, detail=f"Can't edit a post that's already in the CMS (current status: {row.status})"
         )
 
-    structure = analyze_structure(payload.content, primary_keyword=row.primary_keyword)
+    secondary_keywords = json.loads(row.secondary_keywords_json) if row.secondary_keywords_json else None
+    structure = analyze_structure(payload.content, primary_keyword=row.primary_keyword, secondary_keywords=secondary_keywords)
     structure_issues_json = json.dumps(
         [{"rule": i.rule, "severity": i.severity, "message": i.message} for i in structure.issues]
     )
     database.update_blog_post(post_id, payload.title, payload.excerpt, payload.content, structure.passed, structure_issues_json)
+    # Keyword density depends on the content just edited — recomputed the
+    # same way generate_blog_post_route does, but meta_title/description
+    # are left untouched (see set_blog_post_seo_meta's own comment).
+    database.set_blog_post_seo_meta(post_id, keyword_density_json=_keyword_density_json(structure))
 
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
@@ -3128,6 +3307,99 @@ def update_blog_post_taxonomy_route(post_id: int, payload: BlogTaxonomyUpdate, d
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
 
 
+@router.patch("/blog/{post_id}/meta", response_model=BlogPostOut)
+def update_blog_post_meta_route(post_id: int, payload: BlogMetaUpdate, db: Session = Depends(get_db)):
+    """Blog tool feedback round — lets a reviewer edit the AI-drafted
+    meta title/description before publishing, same "the draft is a
+    starting point" reasoning as the meta-rewrite queue's own PATCH
+    endpoint. Same edit window as taxonomy above."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+    if row.status not in ("draft", "approved", "failed"):
+        raise HTTPException(
+            status_code=409, detail=f"Can't edit a post that's already in the CMS (current status: {row.status})"
+        )
+
+    database.set_blog_post_seo_meta(post_id, meta_title=payload.meta_title, meta_description=payload.meta_description)
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/{post_id}/meta/generate", response_model=BlogPostOut)
+def generate_blog_post_meta_route(post_id: int, db: Session = Depends(get_db)):
+    """Manual regenerate — e.g. after editing the title/excerpt, since the
+    automatic pass only ran once at generation time."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+
+    tags = generate_blog_meta_tags(row.title, row.excerpt or row.title, row.primary_keyword, site_id=row.site_id)
+    if tags is None:
+        raise HTTPException(status_code=502, detail="Meta tag generation failed — see server logs")
+    database.set_blog_post_seo_meta(post_id, meta_title=tags.meta_title, meta_description=tags.meta_description)
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/{post_id}/faqs/generate", response_model=BlogPostOut)
+def generate_blog_post_faqs_route(post_id: int, db: Session = Depends(get_db)):
+    """Manual regenerate for the auto-FAQ step — persists the result on
+    the post (unlike the older, purely ephemeral /content/faq call the
+    frontend's "Generate FAQ" button used before), so it survives a
+    reload same as everything else on the post."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+
+    gsc_rows = database.list_gsc_queries(row.site_id, limit=15)
+    seed_queries = [r["query"] for r in gsc_rows]
+    faqs = generate_faq(row.title, seed_queries, site_id=row.site_id, max_pairs=5)
+    if faqs is None:
+        raise HTTPException(status_code=502, detail="FAQ generation failed — see server logs")
+    database.set_blog_post_faqs(post_id, json.dumps([{"question": f.question, "answer": f.answer} for f in faqs]))
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/{post_id}/interlinks/generate", response_model=BlogPostOut)
+def generate_blog_post_interlinks_route(post_id: int, db: Session = Depends(get_db)):
+    """Manual regenerate for the auto-internal-links step — persists the
+    result (unlike the older, purely ephemeral /interlinks/suggest call
+    the frontend's "Suggest interlinks" button used before) so it's what
+    _inject_interlinks actually publishes, not just a preview."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+
+    related = find_related_pages(row.site_id, f"blog-draft:{post_id}", row.title, row.content, n_results=4)
+    database.set_blog_post_internal_links(post_id, json.dumps([{"url": p.url, "title": p.title} for p in related]))
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/{post_id}/grammar-check", response_model=BlogPostOut)
+def check_blog_post_grammar_route(post_id: int, db: Session = Depends(get_db)):
+    """Manual re-check — e.g. after editing a draft's content, since the
+    automatic check only ran once, at generation time."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+
+    report = check_grammar(row.content, site_id=row.site_id)
+    if report is None:
+        raise HTTPException(status_code=502, detail="Grammar check failed — see server logs")
+    report_json = json.dumps(
+        {
+            "issues": [{"original": i.original, "suggestion": i.suggestion, "explanation": i.explanation} for i in report.issues],
+            "checked_word_count": report.checked_word_count,
+        }
+    )
+    database.set_blog_post_grammar(post_id, report_json)
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
 @router.post("/blog/{post_id}/approve", response_model=BlogPostOut)
 def approve_blog_post_route(post_id: int, db: Session = Depends(get_db)):
     ok = database.set_blog_post_status(post_id, "approved")
@@ -3146,7 +3418,7 @@ def reject_blog_post_route(post_id: int, db: Session = Depends(get_db)):
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
 
 
-def _inject_interlinks(site_id: int, post_id: int, title: str, content_html: str) -> str:
+def _inject_interlinks(site_id: int, post_id: int, title: str, content_html: str, stored_links_json: Optional[str] = None) -> str:
     """Module 36 — closes the "no on-publish automation" gap for
     interlinking: queries the vector index (ai/seo/interlink_engine.py)
     for semantically related already-published pages and appends a real
@@ -3154,9 +3426,25 @@ def _inject_interlinks(site_id: int, post_id: int, title: str, content_html: str
     interlink_engine's /interlinks/suggest endpoint as something nobody
     ever calls. Never raises — logs and returns content_html unchanged
     on any failure, since a missing related-reading section is not a
-    reason to block publishing."""
+    reason to block publishing.
+
+    Blog tool feedback round — prefers stored_links_json (the 3-4 links
+    _generate_and_store_internal_links already computed and saved right
+    after the draft, so a reviewer could see them before approving) over a
+    fresh live query, so what gets published is exactly what was reviewed
+    instead of a second, possibly different, recompute. Falls back to a
+    live query when it's None/empty — a draft created before this feature
+    existed, or one whose auto-suggestion step failed."""
+    if stored_links_json:
+        try:
+            stored = json.loads(stored_links_json)
+            items = "".join(f'<li><a href="{p["url"]}">{p["title"]}</a></li>' for p in stored)
+            return f"{content_html}\n<h2>Related Reading</h2>\n<ul>\n{items}\n</ul>"
+        except (json.JSONDecodeError, KeyError, TypeError):
+            logger.warning("Stored internal_links_json for blog post %s was malformed — falling back to a live lookup", post_id)
+
     try:
-        related = find_related_pages(site_id, f"blog-draft:{post_id}", title, content_html, n_results=5)
+        related = find_related_pages(site_id, f"blog-draft:{post_id}", title, content_html, n_results=4)
     except Exception:
         logger.exception("Interlink lookup failed for blog post %s — publishing without it", post_id)
         return content_html
@@ -3265,14 +3553,14 @@ def _do_publish_blog_post(post_id: int, db: Session, go_live: bool = False) -> t
             image_result = generate_and_publish_image(site, image_prompt, task="blog_post")
             if image_result.ok:
                 image_url = image_result.url
-                database.set_blog_post_image(post_id, image_url)
+                database.set_blog_post_image(post_id, image_url, image_source=image_result.provider)
         except Exception:
             logger.exception("Auto image generation failed for post %s — publishing without one", post_id)
 
     content = row.content
     if image_url:
         content = f'<img src="{image_url}" alt="{row.title}" />\n{content}'
-    content = _inject_interlinks(row.site_id, post_id, row.title, content)
+    content = _inject_interlinks(row.site_id, post_id, row.title, content, stored_links_json=row.internal_links_json)
 
     client = _cms_client_for(site)
     result = client.create_post(
@@ -3370,7 +3658,8 @@ def bulk_publish_blog_posts_route(payload: BlogBulkIdsRequest, db: Session = Dep
 
 
 def _generate_and_save_blog_post(
-    db: Session, site: SeoSite, topic: str, min_words: int, generate_image: bool, candidates=None
+    db: Session, site: SeoSite, topic: str, min_words: int, generate_image: bool, candidates=None,
+    max_words: int = 1500,
 ) -> Optional[int]:
     """Shared by bulk-generate and generate-calendar below: one full
     draft (text via generate_blog_post + structure check, matching
@@ -3381,12 +3670,18 @@ def _generate_and_save_blog_post(
     same graceful-degrade convention as publish's own auto-image step).
     `candidates` — see _check_and_store_blog_quality's own comment; the
     caller passes one site-wide pool it loaded once, grown as each post
-    is created, so a whole bulk/calendar run doesn't re-query per post."""
-    draft = generate_blog_post(topic, None, site_id=site.id, min_words=min_words)
+    is created, so a whole bulk/calendar run doesn't re-query per post.
+
+    Blog tool feedback round — also runs the same auto-meta/FAQ/interlink/
+    grammar steps generate_blog_post_route does (see their own
+    _generate_and_store_* docstrings); no primary/secondary keyword is
+    known for a bulk/calendar topic, so keyword density is simply empty
+    for these, same as it always was for the primary-keyword intro check."""
+    draft = generate_blog_post(topic, None, site_id=site.id, min_words=min_words, max_words=max_words)
     if draft is None:
         return None
 
-    structure = analyze_structure(draft.content_html, primary_keyword=None, min_words=min_words)
+    structure = analyze_structure(draft.content_html, primary_keyword=None, min_words=min_words, max_words=max_words)
     structure_issues_json = json.dumps(
         [{"rule": i.rule, "severity": i.severity, "message": i.message} for i in structure.issues]
     )
@@ -3394,6 +3689,13 @@ def _generate_and_save_blog_post(
         site.id, topic, None, draft.title, draft.excerpt, draft.content_html, structure.passed, structure_issues_json
     )
     _check_and_store_blog_quality(db, post_id, site.id, draft.content_html, candidates=candidates)
+    _generate_and_store_blog_meta(
+        post_id, site_id=site.id, title=draft.title, excerpt=draft.excerpt, primary_keyword=None,
+        secondary_keywords_json=None, keyword_density_json=_keyword_density_json(structure),
+    )
+    _generate_and_store_blog_faqs(post_id, site.id, draft.title)
+    _generate_and_store_internal_links(post_id, site.id, draft.title, draft.content_html)
+    _generate_and_store_blog_grammar(post_id, site.id, draft.content_html)
     if candidates is not None:
         candidates.append(("blog", post_id, draft.title, draft.content_html))
 
@@ -3402,7 +3704,7 @@ def _generate_and_save_blog_post(
             image_prompt = derive_image_prompt(draft.content_html, title=draft.title, site_id=site.id) or draft.title
             image_result = generate_and_publish_image(site, image_prompt, task="blog_post")
             if image_result.ok:
-                database.set_blog_post_image(post_id, image_result.url)
+                database.set_blog_post_image(post_id, image_result.url, image_source=image_result.provider)
         except Exception:
             logger.exception("Bulk-generate: image generation failed for post %s — draft still saved without one", post_id)
 
@@ -3430,7 +3732,9 @@ def bulk_generate_blog_posts_route(payload: BlogBulkGenerateRequest, db: Session
         topic = topic.strip()
         if not topic:
             continue
-        post_id = _generate_and_save_blog_post(db, site, topic, payload.min_words, payload.generate_image, candidates=candidates)
+        post_id = _generate_and_save_blog_post(
+            db, site, topic, payload.min_words, payload.generate_image, candidates=candidates, max_words=payload.max_words
+        )
         if post_id is not None:
             created_ids.append(post_id)
 
@@ -3470,7 +3774,9 @@ def generate_blog_calendar_route(payload: BlogCalendarGenerateRequest, db: Sessi
         topic = topics[day_offset % len(topics)]
         scheduled_at = datetime.combine(day, time(post_hour, post_minute)).strftime("%Y-%m-%d %H:%M:%S")
 
-        post_id = _generate_and_save_blog_post(db, site, topic, payload.min_words, payload.generate_image, candidates=candidates)
+        post_id = _generate_and_save_blog_post(
+            db, site, topic, payload.min_words, payload.generate_image, candidates=candidates, max_words=payload.max_words
+        )
         if post_id is not None:
             database.set_blog_post_schedule(post_id, scheduled_at)
             created_ids.append(post_id)

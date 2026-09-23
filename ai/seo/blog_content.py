@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ai.llm.factory import get_provider
+from ai.seo.content_structure import analyze_structure
 
 logger = logging.getLogger(__name__)
 
@@ -30,40 +31,109 @@ class BlogPostDraft:
 
 
 def generate_blog_post(
-    topic: str, primary_keyword: Optional[str] = None, *, site_id: Optional[int] = None, min_words: int = 600
+    topic: str,
+    primary_keyword: Optional[str] = None,
+    *,
+    site_id: Optional[int] = None,
+    min_words: int = 1200,
+    max_words: int = 1500,
+    max_attempts: int = 3,
 ) -> Optional[BlogPostDraft]:
     """Never raises — returns None on LLM failure or unparseable output,
-    matching this codebase's graceful-degrade convention."""
+    matching this codebase's graceful-degrade convention.
+
+    A local Ollama model routinely ignores a length/structure ask on the
+    first try (a well-documented small-model failure mode) — the original
+    version of this function just asked once and accepted whatever came
+    back, which is why posts were showing up under 600 words with no real
+    H1/H2/H3 tags despite the prompt asking for them. This now checks the
+    draft against the same rules the reviewer sees (ai.seo.content_
+    structure.analyze_structure) and retries up to max_attempts times
+    whenever the two things a retry can actually fix — word count and a
+    real single H1 — are still wrong, before falling back to the best
+    attempt seen. H2/H3 counts are surfaced to the reviewer as warnings
+    either way (see analyze_structure) but don't trigger a retry on their
+    own, since local-model variance there is less predictable and a
+    reviewer can fix a missing subheading far faster than another 1-3
+    minute regeneration."""
     keyword_line = f'Primary SEO keyword to work naturally into the first paragraph: "{primary_keyword}".\n' if primary_keyword else ""
     prompt = (
-        f'Write a complete, well-structured blog post about: "{topic}".\n'
+        f'Write a complete, in-depth blog post about: "{topic}".\n'
         f"{keyword_line}"
-        f"At least {min_words} words. Direct, factual, no marketing fluff or filler.\n\n"
+        f"Target length: {min_words}-{max_words} words — this is a real constraint, not a suggestion. Reach it "
+        "with genuinely useful detail, examples, and explanation; never pad with repetition or filler.\n\n"
         "Output ONLY these three sections, each on its own line, in this exact format "
         "(no markdown code fences, no extra commentary):\n"
         "TITLE: <the post title, no HTML>\n"
         "EXCERPT: <a 1-2 sentence summary, no HTML>\n"
         "CONTENT: <the full post body as HTML — exactly one <h1> matching the title, "
-        "3 or more <h2> sections, <p> paragraphs, no <html>/<body> wrapper tags. "
-        "Use real HTML tags for ALL formatting — <strong> for bold, <em> for italics, "
-        "<ul><li> for lists. Never use markdown syntax like **bold**, *italic*, or "
-        "\"- item\" bullet dashes anywhere in the output.>"
+        "at least 4 <h2> section headings, and at least 2 <h3> subheadings nested under different <h2> "
+        "sections for more detailed sub-topics, <p> paragraphs, no <html>/<body> wrapper tags. "
+        "Use real HTML heading/formatting tags for ALL structure — <strong> for bold, <em> for italics, "
+        "<ul><li> for lists. Never use markdown syntax like **bold**, *italic*, or \"- item\" bullet dashes, "
+        "and never fake a heading with bold text instead of a real <h2>/<h3> tag.>"
     )
-    result = get_provider(task="blog_post", site_id=site_id).generate(prompt, fast=False)
-    if not result.ok:
-        logger.warning("Blog post generation failed for topic %r: %s", topic, result.error)
+
+    best_draft: Optional[BlogPostDraft] = None
+    for attempt in range(1, max_attempts + 1):
+        result = get_provider(task="blog_post", site_id=site_id).generate(prompt, fast=False)
+        if not result.ok:
+            logger.warning("Blog post generation failed for topic %r (attempt %d): %s", topic, attempt, result.error)
+            continue
+
+        parsed = _parse_sections(result.text)
+        if parsed is None:
+            logger.warning(
+                "Blog post generation returned unparseable output for topic %r (attempt %d): %r",
+                topic, attempt, result.text[:300],
+            )
+            continue
+
+        draft = BlogPostDraft(
+            title=_clean_markdown_artifacts(parsed.title),
+            excerpt=_clean_markdown_artifacts(parsed.excerpt),
+            content_html=_clean_markdown_artifacts(parsed.content_html),
+        )
+        check = analyze_structure(draft.content_html, min_words=min_words, max_words=max_words)
+        if best_draft is None:
+            best_draft = draft
+        if check.h1_count == 1 and check.word_count >= min_words:
+            return draft
+
+        logger.info(
+            "Blog post draft for topic %r (attempt %d/%d) under target — %d words, %d H1 — retrying",
+            topic, attempt, max_attempts, check.word_count, check.h1_count,
+        )
+        best_draft = draft  # keep the most recent attempt as the fallback — usually closer than an earlier one
+
+    if best_draft is None:
         return None
 
-    parsed = _parse_sections(result.text)
-    if parsed is None:
-        logger.warning("Blog post generation returned unparseable output for topic %r: %r", topic, result.text[:300])
-        return None
+    # Final deterministic fix for the one structural defect that's safe to
+    # correct without fabricating content: a missing/duplicated H1 is
+    # replaced with a single one built from the real title, exactly what
+    # the prompt already asked the model to write itself. Word count is
+    # never padded here — an honestly-short post still shows as a
+    # word_count issue to the reviewer (see analyze_structure) rather than
+    # being silently stretched with filler.
+    if _count_h1(best_draft.content_html) != 1:
+        best_draft = BlogPostDraft(
+            title=best_draft.title,
+            excerpt=best_draft.excerpt,
+            content_html=f"<h1>{best_draft.title}</h1>\n{_strip_existing_h1(best_draft.content_html)}",
+        )
+    return best_draft
 
-    return BlogPostDraft(
-        title=_clean_markdown_artifacts(parsed.title),
-        excerpt=_clean_markdown_artifacts(parsed.excerpt),
-        content_html=_clean_markdown_artifacts(parsed.content_html),
-    )
+
+def _count_h1(content_html: str) -> int:
+    return len(re.findall(r"<h1[\s>]", content_html, re.IGNORECASE))
+
+
+def _strip_existing_h1(content_html: str) -> str:
+    """Removes any existing (wrong-count) <h1> tags before this module
+    prepends the one real one it trusts — avoids ending up with two H1s
+    when the model emitted zero or several."""
+    return re.sub(r"<h1[^>]*>.*?</h1>\s*", "", content_html, flags=re.IGNORECASE | re.DOTALL)
 
 
 def _clean_markdown_artifacts(text: str) -> str:

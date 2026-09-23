@@ -822,11 +822,11 @@ span.flatpickr-weekday,
   animation: auth-fade-up 0.6s ease-out both;
 }
 
-/* Toast notifications (ToastContext) — slide up + fade in on mount. */
+/* Toast notifications (ToastContext) — top-center: slide down + fade in on mount. */
 @keyframes toast-in {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.98);
+    transform: translateY(-8px) scale(0.98);
   }
   to {
     opacity: 1;

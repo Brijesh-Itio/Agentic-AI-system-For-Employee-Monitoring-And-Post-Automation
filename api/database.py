@@ -710,6 +710,17 @@ class SeoBlogPost(Base):
     # Module 60 — same convention as seo_social_posts' own columns above.
     quality_report_json = Column(String)
     quality_checked_at = Column(DateTime)
+    # Blog tool feedback round — see agent/database.py's
+    # _SEO_BLOG_POSTS_EXTRA_COLUMNS for what each of these holds.
+    meta_title = Column(String)
+    meta_description = Column(String)
+    secondary_keywords_json = Column(String)
+    keyword_density_json = Column(String)
+    faqs_json = Column(String)
+    internal_links_json = Column(String)
+    grammar_report_json = Column(String)
+    grammar_checked_at = Column(DateTime)
+    image_source = Column(String)
 
 
 def init_db() -> None:

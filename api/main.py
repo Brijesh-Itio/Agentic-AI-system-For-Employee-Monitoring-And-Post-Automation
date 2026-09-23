@@ -192,6 +192,8 @@ async def lifespan(app: FastAPI):
     )
 
     if settings.SEO_AUTOMATION_ENABLED:
+        from datetime import datetime, timedelta
+
         from ai.seo_master_agent import run_daily_cycle_for_all_sites
 
         seo_scheduler.add_job(
@@ -204,6 +206,29 @@ async def lifespan(app: FastAPI):
             misfire_grace_time=3600,
         )
         logger.info("SEO daily automation scheduled for %02d:00 local time", settings.SEO_AUTOMATION_HOUR)
+
+        # This app is started and stopped by hand through the day
+        # (start.bat) rather than run as an always-on server, so the fixed
+        # cron trigger above often never actually fires in practice: if
+        # nothing is running at SEO_AUTOMATION_HOUR, and the server doesn't
+        # happen to come back up within misfire_grace_time (1 hour) of it,
+        # APScheduler just skips that day and waits for tomorrow — which is
+        # exactly why "Daily automation — Not run yet today" could sit
+        # there all day even after starting the server later on. Catch up
+        # once, a few seconds after every startup: run_daily_cycle_for_
+        # all_sites is already idempotent per (site, job_type, day) via
+        # start_job_run's own dedup check (see ai/seo_master_agent.py), so
+        # this is a genuine no-op on a day the 06:00 cron did already fire,
+        # and a real catch-up run on a day it didn't. Delayed rather than
+        # run inline here so it doesn't hold up the server becoming ready
+        # to serve requests.
+        seo_scheduler.add_job(
+            run_daily_cycle_for_all_sites,
+            trigger="date",
+            run_date=datetime.now() + timedelta(seconds=15),
+            id="seo_daily_cycle_catchup",
+            replace_existing=True,
+        )
 
     seo_scheduler.start()
     logger.info("Server file backup cleanup scheduled for 03:30 local time (15-day retention)")

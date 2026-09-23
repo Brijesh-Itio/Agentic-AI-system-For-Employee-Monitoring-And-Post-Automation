@@ -41,6 +41,20 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_SUBDIR = "wp-content/uploads/seo-agent"
 
+# AI Image Detection (provenance tracking) — ImagePublishResult.provider
+# already tells us exactly which path produced an image; these are the
+# provider names (see ai/images/providers/*.py's own `name` attributes)
+# that are genuinely AI-generated, as opposed to "pexels" (real stock
+# photography) or "manual-upload" (a human's own file). No ML image
+# classifier is wired up anywhere in this codebase — this is provenance
+# we already know for certain from having made the image ourselves, not a
+# guess about an image's origin from its pixels.
+AI_GENERATED_IMAGE_PROVIDERS = {"fastsd", "stability", "puter", "image_worker"}
+
+
+def is_ai_generated_image_provider(provider: Optional[str]) -> bool:
+    return provider in AI_GENERATED_IMAGE_PROVIDERS
+
 # Facebook and LinkedIn both recommend a ~1.91:1 landscape crop for a
 # feed post's image (1200x630 / 1200x627) — a real, specific requirement,
 # not an arbitrary choice. A blog post's featured image follows a

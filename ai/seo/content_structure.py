@@ -35,11 +35,32 @@ def _count_tag(html: str, tag: str) -> int:
     return len(re.findall(rf"<{tag}[\s>]", html, re.IGNORECASE))
 
 
+def _tag_inner_texts(html: str, tag: str) -> List[str]:
+    """Plain-text content of every <tag>...</tag> occurrence, in document
+    order — used for heading-length checks (h1_count/h2_count above only
+    count tags, not what's inside them)."""
+    return [_strip_html(m) for m in re.findall(rf"<{tag}[^>]*>(.*?)</{tag}>", html, re.IGNORECASE | re.DOTALL)]
+
+
 @dataclass
 class StructureIssue:
     rule: str
     severity: str  # "error" | "warning"
     message: str
+
+
+@dataclass
+class KeywordDensity:
+    keyword: str
+    role: str  # "primary" | "secondary"
+    count: int
+    density: float  # percent of total word count, e.g. 1.2 == 1.2%
+    target_min: float
+    target_max: float
+
+    @property
+    def in_range(self) -> bool:
+        return self.target_min <= self.density <= self.target_max
 
 
 @dataclass
@@ -49,18 +70,34 @@ class StructureReport:
     h2_count: int
     h3_count: int
     issues: List[StructureIssue] = field(default_factory=list)
+    keyword_density: List[KeywordDensity] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
         return not any(i.severity == "error" for i in self.issues)
 
 
+# Keyword-stuffing avoidance targets: dense enough to signal relevance to
+# search engines, sparse enough not to read as spam. Secondary keywords get
+# a lower target since an article naturally mentions its primary term more.
+PRIMARY_KEYWORD_DENSITY_TARGET = (1.0, 1.5)
+SECONDARY_KEYWORD_DENSITY_TARGET = (0.5, 1.0)
+
+
+def _keyword_density(plain_text_lower: str, word_count: int, keyword: str) -> float:
+    if not keyword or word_count == 0:
+        return 0.0
+    count = plain_text_lower.count(keyword.lower())
+    return round((count / word_count) * 100, 2)
+
+
 def analyze_structure(
     content_html: str,
     *,
     primary_keyword: Optional[str] = None,
-    min_words: int = 600,
-    max_words: int = 3000,
+    secondary_keywords: Optional[List[str]] = None,
+    min_words: int = 1200,
+    max_words: int = 1500,
 ) -> StructureReport:
     """Pure, synchronous, no external calls — safe to run on every draft
     before it's ever pushed anywhere. Heading detection is a light regex
@@ -68,6 +105,7 @@ def analyze_structure(
     for well-formed content this pipeline generates itself, not meant to
     survive arbitrary hostile markup."""
     plain_text = _strip_html(content_html)
+    plain_text_lower = plain_text.lower()
     word_count = len(plain_text.split())
     h1_count = _count_tag(content_html, "h1")
     h2_count = _count_tag(content_html, "h2")
@@ -77,9 +115,32 @@ def analyze_structure(
 
     if h1_count != 1:
         issues.append(StructureIssue("h1_count", "error", f"Expected exactly 1 H1, found {h1_count}"))
-    if h2_count < 3:
+    else:
+        h1_text = _tag_inner_texts(content_html, "h1")[0]
+        h1_len, h1_words = len(h1_text), len(h1_text.split())
+        if not (20 <= h1_len <= 70 and 5 <= h1_words <= 8):
+            issues.append(
+                StructureIssue(
+                    "h1_length", "warning",
+                    f"H1 is {h1_len} characters / {h1_words} words — aim for 20-70 characters and 5-8 words",
+                )
+            )
+    if h2_count < 4:
         issues.append(
-            StructureIssue("h2_count", "warning", f"Expected at least 3 H2 sections, found {h2_count}")
+            StructureIssue("h2_count", "warning", f"Expected at least 4 H2 sections, found {h2_count}")
+        )
+    h2_texts = _tag_inner_texts(content_html, "h2")
+    out_of_range_h2 = [t for t in h2_texts if not (45 <= len(t) <= 60)]
+    if out_of_range_h2:
+        issues.append(
+            StructureIssue(
+                "h2_length", "warning",
+                f"{len(out_of_range_h2)} of {len(h2_texts)} H2 headings are outside the 45-60 character guideline",
+            )
+        )
+    if h3_count < 2:
+        issues.append(
+            StructureIssue("h3_count", "warning", f"Expected at least 2 H3 subheadings, found {h3_count}")
         )
     if word_count < min_words:
         issues.append(
@@ -103,8 +164,39 @@ def analyze_structure(
                 )
             )
 
+    keyword_density: List[KeywordDensity] = []
+    if primary_keyword:
+        count = plain_text_lower.count(primary_keyword.lower())
+        density = _keyword_density(plain_text_lower, word_count, primary_keyword)
+        lo, hi = PRIMARY_KEYWORD_DENSITY_TARGET
+        keyword_density.append(KeywordDensity(primary_keyword, "primary", count, density, lo, hi))
+        if not (lo <= density <= hi):
+            issues.append(
+                StructureIssue(
+                    "keyword_density_primary", "warning",
+                    f"Primary keyword {primary_keyword!r} density is {density}% — target {lo}-{hi}% "
+                    "to avoid under-optimizing or keyword stuffing",
+                )
+            )
+    for kw in secondary_keywords or []:
+        kw = kw.strip()
+        if not kw:
+            continue
+        count = plain_text_lower.count(kw.lower())
+        density = _keyword_density(plain_text_lower, word_count, kw)
+        lo, hi = SECONDARY_KEYWORD_DENSITY_TARGET
+        keyword_density.append(KeywordDensity(kw, "secondary", count, density, lo, hi))
+        if not (lo <= density <= hi):
+            issues.append(
+                StructureIssue(
+                    "keyword_density_secondary", "warning",
+                    f"Secondary keyword {kw!r} density is {density}% — target {lo}-{hi}%",
+                )
+            )
+
     return StructureReport(
-        word_count=word_count, h1_count=h1_count, h2_count=h2_count, h3_count=h3_count, issues=issues
+        word_count=word_count, h1_count=h1_count, h2_count=h2_count, h3_count=h3_count,
+        issues=issues, keyword_density=keyword_density,
     )
 
 

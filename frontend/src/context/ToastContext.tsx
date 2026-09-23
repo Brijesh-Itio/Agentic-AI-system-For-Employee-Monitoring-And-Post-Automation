@@ -66,8 +66,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={api}>
       {children}
-      <div className="pointer-events-none fixed inset-x-4 bottom-4 z-[9999] flex flex-col items-center gap-2 sm:inset-x-auto sm:right-4 sm:items-end">
-        {toasts.map((t) => {
+      <div className="pointer-events-none fixed left-1/2 top-4 z-[9999] flex w-full max-w-sm -translate-x-1/2 flex-col items-center gap-2 px-4">
+        {/* Newest toast rendered first (closest to the top edge this
+            container is anchored to) — feels like it drops in above
+            whatever's already showing, not below it. */}
+        {[...toasts].reverse().map((t) => {
           const meta = VARIANT_META[t.variant];
           const Icon = meta.icon;
           return (

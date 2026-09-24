@@ -206,6 +206,7 @@ from ai.seo.interlink_engine import find_related_pages, index_page
 from ai.seo.issue_remediation import generate_ai_suggestion, generate_fix_value
 from ai.seo.outreach_drafter import draft_outreach_email
 from ai.seo.rank_alerts import compute_rank_changes, dropped_out_of_top_10, top_movers
+from ai.seo.report_metrics import REPORT_METRICS, validate_metrics
 from ai.seo.rollup_digest import generate_rollup_digest
 from ai.seo.social_content import generate_social_post
 from ai.seo.social_scheduler import publish_one as publish_one_social_post
@@ -1055,6 +1056,7 @@ def _gsc_dimension_route(payload: GscDimensionRequest, db: Session, fetch_fn):
         site_url=_effective_gsc_url(site),
         country=payload.country,
         page=payload.page,
+        query=payload.query,
     )
     if rows is None:
         raise HTTPException(status_code=502, detail="GSC fetch failed — see server logs")
@@ -2232,10 +2234,16 @@ def generate_digest_route(payload: DigestGenerateRequest, db: Session = Depends(
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
+    try:
+        metrics = validate_metrics(payload.metrics)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     run_date = payload.run_date or date_cls.today()
-    digest = generate_daily_digest(payload.site_id, site.name, run_date=run_date)
+    digest = generate_daily_digest(payload.site_id, site.name, run_date=run_date, metrics=metrics)
     stats_json = json.dumps(
         {
+            "metrics": metrics,
             "pending_issues": digest.stats.pending_issues,
             "critical_issues": digest.stats.critical_issues,
             "latest_performance_score": digest.stats.latest_performance_score,
@@ -2264,6 +2272,14 @@ def generate_digest_route(payload: DigestGenerateRequest, db: Session = Depends(
         .filter(SeoDailyDigest.site_id == payload.site_id, SeoDailyDigest.run_date == run_date)
         .first()
     )
+
+
+@router.get("/digest/metrics")
+def list_report_metrics_route():
+    """The metrics a report can be limited to — feeds the frontend's picker
+    so its list can't drift from what generate_daily_digest/
+    generate_rollup_digest actually accept."""
+    return [{"key": key, **info} for key, info in REPORT_METRICS.items()]
 
 
 @router.get("/digest", response_model=list[DigestOut])
@@ -2299,9 +2315,15 @@ def generate_digest_rollup_route(period: str, payload: DigestRollupGenerateReque
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
+    try:
+        metrics = validate_metrics(payload.metrics)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     report = generate_rollup_digest(
         payload.site_id, site.name, period,
         reference_date=payload.reference_date, custom_start=payload.start_date, custom_end=payload.end_date,
+        metrics=metrics,
     )
     slack_delivered = False
     if payload.send_to_slack:
@@ -3236,6 +3258,54 @@ async def upload_blog_post_image_route(post_id: int, file: UploadFile = File(...
     database.set_blog_post_image(post_id, result.url, image_source=result.provider)
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+_MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+@router.post("/sites/{site_id}/images/upload")
+async def upload_site_image_route(site_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Inline blog-editor image: same WebP-conversion-then-upload-to-the-
+    site's-own-server pipeline as a post's featured image
+    (.../blog/{post_id}/image/upload), but tied to the site rather than one
+    post and it does NOT change any post's featured image — the editor
+    just gets the published URL back to drop into the body. Same Server
+    Access requirement and failure-reason surfacing."""
+    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(image_bytes) > _MAX_INLINE_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image is larger than 10 MB")
+
+    result = upload_image_bytes(site, image_bytes, file.filename or f"{site.name}-image")
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+    return {"url": result.url}
+
+
+@router.get("/sites/{site_id}/images")
+def list_site_images_route(site_id: int, limit: int = 60):
+    """Media Library for the blog editor: every image already published for
+    this site through the app (blog featured images and social post
+    images), newest first. Not the CMS's own media library — the app has
+    no CMS media-listing integration, so this is what it can honestly
+    show."""
+    conn = database.get_connection()
+    rows = conn.execute(
+        """
+        SELECT image_url AS url, MAX(created_at) AS created_at FROM (
+            SELECT image_url, created_at FROM seo_blog_posts WHERE site_id = ? AND image_url IS NOT NULL AND image_url != ''
+            UNION ALL
+            SELECT image_url, created_at FROM seo_social_posts WHERE site_id = ? AND image_url IS NOT NULL AND image_url != ''
+        ) GROUP BY image_url ORDER BY created_at DESC LIMIT ?
+        """,
+        (site_id, site_id, max(1, min(limit, 200))),
+    ).fetchall()
+    return [{"url": r["url"]} for r in rows]
 
 
 @router.get("/blog", response_model=list[BlogPostOut])

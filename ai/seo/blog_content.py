@@ -12,6 +12,7 @@ structure (module 27.5) — run automatically right after generation, see
 api/routes/seo.py's /blog/generate — checks a real, complete document
 instead of one that would always fail its own H1-count rule.
 """
+import html
 import logging
 import re
 from dataclasses import dataclass
@@ -56,9 +57,14 @@ def generate_blog_post(
     own, since local-model variance there is less predictable and a
     reviewer can fix a missing subheading far faster than another 1-3
     minute regeneration."""
+    # The topic the user typed IS the post's title and its H1, word for word
+    # (enforced deterministically below — a small model rewords titles no
+    # matter how it's asked, so the prompt alone can't be trusted with this).
+    topic = " ".join(topic.split())
     keyword_line = f'Primary SEO keyword to work naturally into the first paragraph: "{primary_keyword}".\n' if primary_keyword else ""
     prompt = (
         f'Write a complete, in-depth blog post about: "{topic}".\n'
+        f'The post title, and the single <h1>, must be exactly: "{topic}" — do not reword it.\n'
         f"{keyword_line}"
         f"Target length: {min_words}-{max_words} words — this is a real constraint, not a suggestion. Reach it "
         "with genuinely useful detail, examples, and explanation; never pad with repetition or filler.\n\n"
@@ -90,9 +96,10 @@ def generate_blog_post(
             continue
 
         draft = BlogPostDraft(
-            title=_clean_markdown_artifacts(parsed.title),
+            title=topic,
             excerpt=_clean_markdown_artifacts(parsed.excerpt),
-            content_html=_clean_markdown_artifacts(parsed.content_html),
+            content_html=f"<h1>{html.escape(topic)}</h1>\n"
+            + _strip_existing_h1(_clean_markdown_artifacts(parsed.content_html)),
         )
         check = analyze_structure(draft.content_html, min_words=min_words, max_words=max_words)
         if best_draft is None:

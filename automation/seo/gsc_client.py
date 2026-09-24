@@ -85,6 +85,7 @@ def _query_search_analytics(
     site_url: Optional[str],
     country: Optional[str] = None,
     page: Optional[str] = None,
+    query: Optional[str] = None,
 ) -> Optional[list]:
     """Shared searchAnalytics.query POST every dimension pull in this
     module builds on — same endpoint and auth, only the requested
@@ -124,6 +125,8 @@ def _query_search_analytics(
         filters.append({"dimension": "country", "operator": "equals", "expression": country.lower()})
     if page:
         filters.append({"dimension": "page", "operator": "equals", "expression": page})
+    if query:
+        filters.append({"dimension": "query", "operator": "equals", "expression": query})
     if filters:
         body["dimensionFilterGroups"] = [{"filters": filters}]
 
@@ -151,13 +154,14 @@ def fetch_search_analytics(
     site_url: Optional[str] = None,
     country: Optional[str] = None,
     page: Optional[str] = None,
+    query: Optional[str] = None,
 ) -> Optional[List[GscQueryRow]]:
     """Query-dimension pull — see _query_search_analytics for the shared
     request/auth/error-handling this and fetch_search_analytics_by_page
     both build on. country/page filter to one country/exact page URL,
     e.g. clicking a country or page row in the UI and drilling into its
     queries."""
-    rows = _query_search_analytics(start_date, end_date, "query", row_limit, site_url, country=country, page=page)
+    rows = _query_search_analytics(start_date, end_date, "query", row_limit, site_url, country=country, page=page, query=query)
     if rows is None:
         return None
     return [
@@ -179,6 +183,7 @@ def fetch_search_analytics_by_page(
     site_url: Optional[str] = None,
     country: Optional[str] = None,
     page: Optional[str] = None,
+    query: Optional[str] = None,
 ) -> Optional[List[GscPageRow]]:
     """Page-dimension pull — per-URL clicks/impressions/CTR/position,
     the data the query-dimension pull above can't give you (a query row
@@ -186,7 +191,7 @@ def fetch_search_analytics_by_page(
     reporting and the meta-rewrite opportunity detector (ai/seo_master_
     agent.py's meta_opportunity_node), which needs a real page URL to
     draft a rewrite against."""
-    rows = _query_search_analytics(start_date, end_date, "page", row_limit, site_url, country=country, page=page)
+    rows = _query_search_analytics(start_date, end_date, "page", row_limit, site_url, country=country, page=page, query=query)
     if rows is None:
         return None
     return [
@@ -209,8 +214,9 @@ def _fetch_by_dimension(
     site_url: Optional[str],
     country: Optional[str] = None,
     page: Optional[str] = None,
+    query: Optional[str] = None,
 ) -> Optional[List[GscDimensionRow]]:
-    rows = _query_search_analytics(start_date, end_date, dimension, row_limit, site_url, country=country, page=page)
+    rows = _query_search_analytics(start_date, end_date, dimension, row_limit, site_url, country=country, page=page, query=query)
     if rows is None:
         return None
     return [
@@ -232,10 +238,11 @@ def fetch_search_analytics_by_country(
     site_url: Optional[str] = None,
     country: Optional[str] = None,
     page: Optional[str] = None,
+    query: Optional[str] = None,
 ) -> Optional[List[GscDimensionRow]]:
     """Country-dimension pull (ISO 3166-1 alpha-3 codes, Google's own
     convention for this field — e.g. "usa", "gbr", not "US"/"GB")."""
-    return _fetch_by_dimension("country", start_date, end_date, row_limit, site_url, country=country, page=page)
+    return _fetch_by_dimension("country", start_date, end_date, row_limit, site_url, country=country, page=page, query=query)
 
 
 def fetch_search_analytics_by_device(
@@ -245,10 +252,11 @@ def fetch_search_analytics_by_device(
     site_url: Optional[str] = None,
     country: Optional[str] = None,
     page: Optional[str] = None,
+    query: Optional[str] = None,
 ) -> Optional[List[GscDimensionRow]]:
     """Device-dimension pull — Google's own values are "DESKTOP",
     "MOBILE", "TABLET"."""
-    return _fetch_by_dimension("device", start_date, end_date, row_limit, site_url, country=country, page=page)
+    return _fetch_by_dimension("device", start_date, end_date, row_limit, site_url, country=country, page=page, query=query)
 
 
 def fetch_search_analytics_by_search_appearance(
@@ -258,13 +266,14 @@ def fetch_search_analytics_by_search_appearance(
     site_url: Optional[str] = None,
     country: Optional[str] = None,
     page: Optional[str] = None,
+    query: Optional[str] = None,
 ) -> Optional[List[GscDimensionRow]]:
     """Search-appearance-dimension pull — which rich-result/SERP feature
     type each impression came from (e.g. "AMP_BLUE_LINK", "RICHCARD",
     "VIDEO"). Returns an empty list (not an error) for a property with no
     rows using any non-default search appearance — a real, common,
     honest outcome, not a failure."""
-    return _fetch_by_dimension("searchAppearance", start_date, end_date, row_limit, site_url, country=country, page=page)
+    return _fetch_by_dimension("searchAppearance", start_date, end_date, row_limit, site_url, country=country, page=page, query=query)
 
 
 @dataclass
@@ -283,6 +292,7 @@ def fetch_search_analytics_by_date(
     site_url: Optional[str] = None,
     country: Optional[str] = None,
     page: Optional[str] = None,
+    query: Optional[str] = None,
 ) -> Optional[List[GscDateRow]]:
     """Date-dimension pull — one row per real calendar day, the data a
     trend chart needs (Search Console's own Performance report shows
@@ -290,7 +300,7 @@ def fetch_search_analytics_by_date(
     defaults far higher than the other dimensions here since even a
     3-month range is only ~90 rows, well under any real pagination
     concern, and a truncated trend chart would be actively misleading."""
-    rows = _query_search_analytics(start_date, end_date, "date", row_limit, site_url, country=country, page=page)
+    rows = _query_search_analytics(start_date, end_date, "date", row_limit, site_url, country=country, page=page, query=query)
     if rows is None:
         return None
     return sorted(

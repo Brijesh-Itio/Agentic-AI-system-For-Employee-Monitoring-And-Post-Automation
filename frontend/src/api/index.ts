@@ -1168,9 +1168,27 @@ export const getSeoDigests = (siteId: number) =>
 // Sheets tab only any more. Digest generation calls the LLM factory —
 // generous timeout for local CPU inference, same reasoning as
 // reports.dar.generate.
+// The metrics an AI report can be limited to (see ai/seo/report_metrics.py —
+// the backend owns this list, the picker just renders it).
+export interface ReportMetric {
+  key: string;
+  label: string;
+  hint: string;
+}
+
+export const getReportMetrics = () =>
+  api.get<ReportMetric[]>("/api/seo/digest/metrics").then((r) => r.data);
+
 export const generateSeoDigest = (
   siteId: number,
-  opts: { sendToSlack?: boolean; runDate?: string | null; sendEmail?: boolean; emailRecipient?: string | null } = {}
+  opts: {
+    sendToSlack?: boolean;
+    runDate?: string | null;
+    sendEmail?: boolean;
+    emailRecipient?: string | null;
+    // null/omitted = cover every metric
+    metrics?: string[] | null;
+  } = {}
 ) =>
   api
     .post<SeoDigest>(
@@ -1181,6 +1199,7 @@ export const generateSeoDigest = (
         run_date: opts.runDate || undefined,
         send_email: opts.sendEmail ?? false,
         email_recipient: opts.emailRecipient || undefined,
+        metrics: opts.metrics ?? undefined,
       },
       { timeout: 120_000 }
     )
@@ -1221,6 +1240,8 @@ export const generateDigestRollup = (
     endDate?: string | null;
     sendEmail?: boolean;
     emailRecipient?: string | null;
+    // null/omitted = cover every metric
+    metrics?: string[] | null;
   } = {}
 ) =>
   api
@@ -1234,6 +1255,7 @@ export const generateDigestRollup = (
         end_date: opts.endDate || undefined,
         send_email: opts.sendEmail ?? false,
         email_recipient: opts.emailRecipient || undefined,
+        metrics: opts.metrics ?? undefined,
       },
       { timeout: 120_000 }
     )
@@ -1821,6 +1843,8 @@ export interface GscFilterParams {
   daysBack?: number;
   country?: string | null;
   page?: string | null;
+  // Exact search query — scopes pages/countries/devices to that one query.
+  query?: string | null;
   startDate?: string | null;
   endDate?: string | null;
   rowLimit?: number;
@@ -1836,6 +1860,7 @@ const fetchGscDimension = <T>(path: string, siteId: number, filters: GscFilterPa
         row_limit: filters.rowLimit,
         country: filters.country || undefined,
         page: filters.page || undefined,
+        query: filters.query || undefined,
         start_date: filters.startDate || undefined,
         end_date: filters.endDate || undefined,
       },
@@ -2433,6 +2458,19 @@ export const uploadBlogPostImage = (postId: number, file: File) => {
     .post<BlogPost>(`/api/seo/blog/${postId}/image/upload`, form, { timeout: 60_000 })
     .then((r) => r.data);
 };
+
+// Blog editor's inline "Image" block: uploads through the same pipeline but
+// returns just the published URL — no post's featured image is touched.
+export const uploadSiteImage = (siteId: number, file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api
+    .post<{ url: string }>(`/api/seo/sites/${siteId}/images/upload`, form, { timeout: 60_000 })
+    .then((r) => r.data.url);
+};
+
+export const getSiteImageLibrary = (siteId: number) =>
+  api.get<{ url: string }[]>(`/api/seo/sites/${siteId}/images`).then((r) => r.data);
 
 export const uploadSocialPostImage = (postId: number, file: File) => {
   const form = new FormData();

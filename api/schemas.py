@@ -1364,6 +1364,8 @@ class DigestGenerateRequest(BaseModel):
     run_date: Optional[date_type] = None
     send_email: bool = False
     email_recipient: Optional[str] = None
+    # Keys from GET /api/seo/digest/metrics; omitted/null = cover everything.
+    metrics: Optional[list[str]] = None
 
 
 class DigestOut(BaseModel):
@@ -1393,6 +1395,8 @@ class DigestRollupGenerateRequest(BaseModel):
     end_date: Optional[date_type] = None
     send_email: bool = False
     email_recipient: Optional[str] = None
+    # Keys from GET /api/seo/digest/metrics; omitted/null = cover everything.
+    metrics: Optional[list[str]] = None
 
 
 class DigestRollupOut(BaseModel):
@@ -1594,6 +1598,9 @@ class GscDimensionRequest(BaseModel):
     # filter. Given as its own field (not folded into `country`) since a
     # human/UI caller may combine both, matching the real UI's filter chips.
     page: Optional[str] = None
+    # Exact search query — drills into one query's pages/countries/devices
+    # (the global search's "details for this query" view).
+    query: Optional[str] = None
     # Explicit range, overriding days_back when both are given — the
     # "Custom" date-range option in the real Search Console UI. Plain
     # ISO date strings ("YYYY-MM-DD"), not datetimes — GSC's own API is

@@ -16,6 +16,7 @@ from typing import List, Optional
 
 from agent import database
 from ai.llm.factory import get_provider
+from ai.seo.report_metrics import metric_labels
 from ai.seo.rank_alerts import compute_rank_changes, dropped_out_of_top_10, top_movers
 
 logger = logging.getLogger(__name__)
@@ -88,19 +89,24 @@ def _gather_stats(site_id: int) -> DigestStats:
     )
 
 
-def _fallback_narrative(site_name: str, stats: DigestStats) -> str:
+def _fallback_narrative(site_name: str, stats: DigestStats, metrics: Optional[List[str]] = None) -> str:
     score = stats.latest_performance_score if stats.latest_performance_score is not None else "n/a"
-    return (
-        f"SEO digest for {site_name}: {stats.pending_issues} pending technical issue(s) "
-        f"({stats.critical_issues} critical), latest PageSpeed score {score}, "
-        f"{stats.recent_job_failures} recent job failure(s), "
-        f"{len(stats.rank_drops)} keyword(s) fell out of the top 10, "
-        f"{stats.meta_opportunities_queued} page(s) queued for a meta rewrite. "
-        "(LLM unavailable — narrative skipped.)"
-    )
+    facts = {
+        "issues": f"{stats.pending_issues} pending technical issue(s) ({stats.critical_issues} critical)",
+        "performance": f"latest PageSpeed score {score}",
+        "search_queries": f"top search queries {stats.top_gsc_queries}",
+        "traffic_pages": f"top traffic pages {stats.top_ga4_pages}",
+        "rankings": f"{len(stats.rank_drops)} keyword(s) fell out of the top 10",
+        "meta_opportunities": f"{stats.meta_opportunities_queued} page(s) queued for a meta rewrite",
+        "job_failures": f"{stats.recent_job_failures} recent job failure(s)",
+    }
+    chosen = [facts[m] for m in (metrics or facts)]
+    return f"SEO digest for {site_name}: {', '.join(chosen)}. (LLM unavailable — narrative skipped.)"
 
 
-def generate_daily_digest(site_id: int, site_name: str, run_date: Optional[date_cls] = None) -> DigestReport:
+def generate_daily_digest(
+    site_id: int, site_name: str, run_date: Optional[date_cls] = None, metrics: Optional[List[str]] = None
+) -> DigestReport:
     """Never raises — a digest is always produced, LLM-written when
     possible, factually assembled when not.
 
@@ -111,25 +117,42 @@ def generate_daily_digest(site_id: int, site_name: str, run_date: Optional[date_
     was never a point-in-time historical snapshot even for today's own
     digest), so a backfilled digest is honestly a "report as of now,
     filed under this date," not a reconstruction of what things looked
-    like back then."""
+    like back then.
+
+    metrics (keys of ai.seo.report_metrics.REPORT_METRICS) limits both the
+    data handed to the LLM and what the digest is told to cover; None means
+    every metric, exactly as before."""
     stats = _gather_stats(site_id)
     effective_date = run_date or date_cls.today()
 
+    sections = {
+        "issues": f"PENDING TECHNICAL ISSUES: {stats.pending_issues} total, {stats.critical_issues} critical\n",
+        "performance": f"LATEST PAGESPEED SCORE: {stats.latest_performance_score}\n",
+        "search_queries": f"TOP SEARCH QUERIES: {stats.top_gsc_queries}\n",
+        "traffic_pages": f"TOP TRAFFIC PAGES: {stats.top_ga4_pages}\n",
+        "job_failures": f"RECENT JOB FAILURES: {stats.recent_job_failures}\n",
+        "rankings": (
+            f"KEYWORDS THAT FELL OUT OF THE TOP 10 SINCE THE LAST PULL: {stats.rank_drops}\n"
+            f"BIGGEST RANK MOVERS (either direction): {stats.rank_movers}\n"
+        ),
+        "meta_opportunities": (
+            f"PAGES CURRENTLY QUEUED FOR A META REWRITE (high impressions, low CTR): {stats.meta_opportunities_queued}\n"
+        ),
+    }
+    chosen = metrics or list(sections)
+    focus = (
+        ""
+        if metrics is None
+        else f"Cover ONLY these areas: {', '.join(metric_labels(metrics))}. Do not mention anything else.\n"
+    )
     prompt = (
         f"You are an autonomous SEO operations agent writing a short daily status digest "
         f'for "{site_name}". Write 3-5 sentences: notable facts, the biggest issue to act '
-        "on, and one recommended next action. Be direct and factual, no filler.\n\n"
-        f"PENDING TECHNICAL ISSUES: {stats.pending_issues} total, {stats.critical_issues} critical\n"
-        f"LATEST PAGESPEED SCORE: {stats.latest_performance_score}\n"
-        f"TOP SEARCH QUERIES: {stats.top_gsc_queries}\n"
-        f"TOP TRAFFIC PAGES: {stats.top_ga4_pages}\n"
-        f"RECENT JOB FAILURES: {stats.recent_job_failures}\n"
-        f"KEYWORDS THAT FELL OUT OF THE TOP 10 SINCE THE LAST PULL: {stats.rank_drops}\n"
-        f"BIGGEST RANK MOVERS (either direction): {stats.rank_movers}\n"
-        f"PAGES CURRENTLY QUEUED FOR A META REWRITE (high impressions, low CTR): {stats.meta_opportunities_queued}"
+        "on, and one recommended next action. Be direct and factual, no filler.\n"
+        f"{focus}\n" + "".join(sections[m] for m in sections if m in chosen).rstrip("\n")
     )
     result = get_provider(task="daily_digest", site_id=site_id).generate(prompt, fast=True)
-    narrative = result.text.strip() if result.ok else _fallback_narrative(site_name, stats)
+    narrative = result.text.strip() if result.ok else _fallback_narrative(site_name, stats, metrics)
 
     return DigestReport(
         site_id=site_id, run_date=effective_date.isoformat(), narrative=narrative, stats=stats

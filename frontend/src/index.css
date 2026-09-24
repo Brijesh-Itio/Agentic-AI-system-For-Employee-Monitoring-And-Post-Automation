@@ -853,3 +853,89 @@ span.flatpickr-weekday,
 .animate-progress-indeterminate {
   animation: progress-indeterminate 1.4s ease-in-out infinite;
 }
+
+/* Tables in the rich text editor (blog editor / structure checker). The saved
+   HTML uses the classic border/frame/rules attributes; Tailwind's reset hides
+   those inside the editor, so the same looks are drawn here from data-borders. */
+.ProseMirror table {
+  border-collapse: collapse;
+  width: 100%;
+  table-layout: fixed;
+  margin: 0.75rem 0;
+  overflow: hidden;
+  --tbl-line: #9ca3af;
+}
+.dark .ProseMirror table {
+  --tbl-line: #6b7280;
+}
+.ProseMirror th,
+.ProseMirror td {
+  position: relative;
+  min-width: 1em;
+  padding: 6px 10px;
+  vertical-align: top;
+  text-align: left;
+}
+.ProseMirror th {
+  font-weight: 600;
+  background: rgba(0, 0, 0, 0.04);
+}
+.dark .ProseMirror th {
+  background: rgba(255, 255, 255, 0.06);
+}
+.ProseMirror td > p,
+.ProseMirror th > p {
+  margin: 0;
+}
+.ProseMirror .selectedCell {
+  background: rgba(70, 95, 255, 0.14);
+}
+/* A table with no data-borders came from elsewhere: faint guides only so its cells are visible while editing (never saved). */
+.ProseMirror table:not([data-borders]) td,
+.ProseMirror table:not([data-borders]) th {
+  border: 1px dashed rgba(156, 163, 175, 0.6);
+}
+.ProseMirror table[data-borders="all"] {
+  border: 1px solid var(--tbl-line);
+}
+.ProseMirror table[data-borders="all"] td,
+.ProseMirror table[data-borders="all"] th {
+  border: 1px solid var(--tbl-line);
+}
+.ProseMirror table[data-borders="outside"] {
+  border: 1px solid var(--tbl-line);
+}
+.ProseMirror table[data-borders="inside"] td,
+.ProseMirror table[data-borders="inside"] th {
+  border: 1px solid var(--tbl-line);
+}
+.ProseMirror table[data-borders="inside"] tr > :first-child {
+  border-left: 0;
+}
+.ProseMirror table[data-borders="inside"] tr > :last-child {
+  border-right: 0;
+}
+.ProseMirror table[data-borders="inside"] tr:first-child > * {
+  border-top: 0;
+}
+.ProseMirror table[data-borders="inside"] tr:last-child > * {
+  border-bottom: 0;
+}
+.ProseMirror table[data-borders="horizontal"] td,
+.ProseMirror table[data-borders="horizontal"] th {
+  border-top: 1px solid var(--tbl-line);
+  border-bottom: 1px solid var(--tbl-line);
+}
+.ProseMirror table[data-borders="vertical"] td,
+.ProseMirror table[data-borders="vertical"] th {
+  border-left: 1px solid var(--tbl-line);
+  border-right: 1px solid var(--tbl-line);
+}
+.ProseMirror table[data-borders="topbottom"] {
+  border-top: 1px solid var(--tbl-line);
+  border-bottom: 1px solid var(--tbl-line);
+}
+.ProseMirror table[data-borders="leftright"] {
+  border-left: 1px solid var(--tbl-line);
+  border-right: 1px solid var(--tbl-line);
+}

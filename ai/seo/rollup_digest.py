@@ -18,6 +18,7 @@ from typing import Literal, Optional
 
 from agent import database
 from ai.llm.factory import get_provider
+from ai.seo.report_metrics import metric_labels
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ def generate_rollup_digest(
     reference_date: Optional[date_cls] = None,
     custom_start: Optional[date_cls] = None,
     custom_end: Optional[date_cls] = None,
+    metrics: Optional[list[str]] = None,
 ) -> RollupReport:
     """Never raises — falls back to a plain factual summary if the LLM
     call fails or if no daily digests exist yet for the period, same
@@ -75,7 +77,13 @@ def generate_rollup_digest(
     keep today's behavior exactly as before. custom_start/custom_end are
     required when period == "custom" (the route validates this before
     calling); ValueError otherwise, since there's no sensible default
-    range for an explicitly custom period."""
+    range for an explicitly custom period.
+
+    metrics (keys of ai.seo.report_metrics.REPORT_METRICS) narrows what the
+    roll-up talks about. The daily notes it reads are already-written
+    prose, so this can only be done by instruction, not by filtering data:
+    the prompt names the areas to cover and tells the model to ignore the
+    rest. None means everything, as before."""
     if period == "custom":
         if custom_start is None or custom_end is None:
             raise ValueError("custom_start and custom_end are required when period == 'custom'")
@@ -91,13 +99,20 @@ def generate_rollup_digest(
         narrative = _fallback_narrative(site_name, period, 0, start, end)
     else:
         joined = "\n".join(f"- {n}" for n in narratives)
+        focus = (
+            ""
+            if metrics is None
+            else f"Cover ONLY these areas: {', '.join(metric_labels(metrics))}. The daily notes may "
+            "mention other topics — ignore them completely.\n"
+        )
         prompt = (
             f"You are an autonomous SEO operations agent writing a {period} roll-up for "
             f'"{site_name}", covering {start.isoformat()} to {end.isoformat()}. Below are that '
             f"period's daily digest notes, oldest first. Write a {'5-7' if period == 'monthly' else '3-5'} "
             "sentence summary: the overall trend direction (improving/declining/flat), the single "
             "biggest recurring issue, and one recommended priority for next period. Be direct and "
-            "factual, no filler.\n\n"
+            "factual, no filler.\n"
+            f"{focus}\n"
             f"DAILY NOTES:\n{joined}"
         )
         result = get_provider(task=f"{period}_digest", site_id=site_id).generate(prompt, fast=True)

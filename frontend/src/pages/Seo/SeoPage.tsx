@@ -93,6 +93,8 @@ import {
   ContentQualityReport,
   createSeoSite,
   deleteSeoSite,
+  getSiteImageLibrary,
+  uploadSiteImage,
   analyzeContentStructure,
   DigestRollup,
   DigestRollupPeriod,
@@ -176,6 +178,7 @@ import {
   getSemrushBacklinks,
   getSemrushMetrics,
   getDigestRollups,
+  getReportMetrics,
   getSemrushReferringDomains,
   getSeoJobs,
   getSeoSites,
@@ -2022,8 +2025,61 @@ function SheetsConnectCard({ kind, title, description }: { kind: SheetsKind; tit
   );
 }
 
+// Which metrics an AI report (daily digest / roll-up) should cover. Starts as
+// "everything"; `request` is what to send to the API — null means everything,
+// so a report generated without touching the picker behaves exactly as it
+// always did (and picks up metrics added later).
+function useReportMetrics() {
+  const metricsQuery = useQuery({ queryKey: ["seo", "report-metrics"], queryFn: getReportMetrics, staleTime: Infinity });
+  const all = metricsQuery.data ?? [];
+  const [picked, setPicked] = useState<string[] | null>(null);
+  const selected = picked ?? all.map((m) => m.key);
+  const toggle = (key: string) => {
+    const next = selected.includes(key) ? selected.filter((k) => k !== key) : [...selected, key];
+    if (next.length === 0) return; // a report about nothing isn't a report
+    setPicked(next.length === all.length ? null : next);
+  };
+  return { all, selected, toggle, selectAll: () => setPicked(null), request: picked };
+}
+
+function ReportMetricPicker({ pick, idPrefix }: { pick: ReturnType<typeof useReportMetrics>; idPrefix: string }) {
+  if (pick.all.length === 0) return null;
+  const allSelected = pick.request === null;
+  return (
+    <fieldset className="mb-3 rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+      <legend className="px-1 text-theme-xs font-medium text-gray-500 dark:text-gray-400">
+        Include in the report ({pick.selected.length} of {pick.all.length})
+      </legend>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        {pick.all.map((m) => (
+          <label
+            key={m.key}
+            htmlFor={`${idPrefix}-${m.key}`}
+            title={m.hint}
+            className="flex cursor-pointer items-center gap-1.5 text-theme-sm text-gray-700 dark:text-gray-300"
+          >
+            <input
+              id={`${idPrefix}-${m.key}`}
+              type="checkbox"
+              checked={pick.selected.includes(m.key)}
+              onChange={() => pick.toggle(m.key)}
+            />
+            {m.label}
+          </label>
+        ))}
+        {!allSelected && (
+          <button type="button" onClick={pick.selectAll} className="text-theme-xs text-brand-600 hover:underline dark:text-brand-400">
+            Select all
+          </button>
+        )}
+      </div>
+    </fieldset>
+  );
+}
+
 function ReportingPanel({ siteId }: { siteId: number }) {
   const toast = useToast();
+  const metricPick = useReportMetrics();
   const [rollupPeriod, setRollupPeriod] = useState<DigestRollupPeriod>("weekly");
   const [rollup, setRollup] = useState<DigestRollup | null>(null);
   // Module 58 — referenceDate anchors weekly/monthly to a chosen past
@@ -2045,6 +2101,7 @@ function ReportingPanel({ siteId }: { siteId: number }) {
     referenceDate: rollupPeriod !== "custom" ? referenceDate || null : null,
     startDate: rollupPeriod === "custom" ? customStart || null : null,
     endDate: rollupPeriod === "custom" ? customEnd || null : null,
+    metrics: metricPick.request,
   });
 
   const rollupMutation = useMutation({
@@ -2158,6 +2215,7 @@ function ReportingPanel({ siteId }: { siteId: number }) {
               Generate now
             </Button>
           </div>
+          <ReportMetricPicker pick={metricPick} idPrefix="rollup-metric" />
           {rollupsQuery.isLoading ? (
             <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
           ) : shown ? (
@@ -2270,8 +2328,9 @@ function OverviewTab({
     },
   });
 
+  const digestMetricPick = useReportMetrics();
   const digestMutation = useMutation({
-    mutationFn: () => generateSeoDigest(siteId, { runDate: digestRunDate || null }),
+    mutationFn: () => generateSeoDigest(siteId, { runDate: digestRunDate || null, metrics: digestMetricPick.request }),
     onSuccess: () => {
       toast.success(digestRunDate ? `Digest generated for ${digestRunDate}.` : "Digest generated.");
       queryClient.invalidateQueries({ queryKey: ["seo", "digests", siteId] });
@@ -2284,7 +2343,13 @@ function OverviewTab({
   // instead of building a second one. Regenerates (same as "Generate
   // Digest" above) rather than re-sending a stale cached narrative.
   const digestEmailMutation = useMutation({
-    mutationFn: () => generateSeoDigest(siteId, { runDate: digestRunDate || null, sendEmail: true, emailRecipient: digestEmailAddr || null }),
+    mutationFn: () =>
+      generateSeoDigest(siteId, {
+        runDate: digestRunDate || null,
+        sendEmail: true,
+        emailRecipient: digestEmailAddr || null,
+        metrics: digestMetricPick.request,
+      }),
     onSuccess: (data) => {
       if (data.emailed_at) toast.success(`Digest emailed${digestEmailAddr ? ` to ${digestEmailAddr}` : ""}.`);
       else toast.error("Digest generated but the email failed — check GMAIL_ADDRESS/GMAIL_APP_PASSWORD in .env.");
@@ -2454,6 +2519,7 @@ function OverviewTab({
           title="Backfill a specific past day instead of today"
         />
       </div>
+      <ReportMetricPicker pick={digestMetricPick} idPrefix="digest-metric" />
       {(auditMutation.isPending || digestMutation.isPending) && (
         <div>
           <ProgressBar />
@@ -5574,6 +5640,10 @@ function BlogTab({ siteId }: { siteId: number }) {
                             onChange={setEditContent}
                             headings
                             placeholder="Post body…"
+                            imageBlocks={{
+                              uploadImage: (file) => uploadSiteImage(siteId, file),
+                              listLibrary: () => getSiteImageLibrary(siteId),
+                            }}
                           />
                         </div>
                         <div className="grid gap-3 sm:grid-cols-3">
@@ -6099,6 +6169,32 @@ interface GscPerfRow {
   rawKey?: string;
 }
 
+type GscGlobalType = "Query" | "Page" | "Country";
+interface GscGlobalRow extends GscPerfRow {
+  type: GscGlobalType;
+}
+
+type GscFocusTab = "queries" | "pages" | "countries" | "devices";
+// What's worth breaking a page / query / country down by (a page's own
+// "pages" tab, say, would just be itself).
+const GSC_FOCUS_TABS: Record<GscGlobalType, { key: GscFocusTab; label: string }[]> = {
+  Page: [
+    { key: "queries", label: "Queries" },
+    { key: "countries", label: "Countries" },
+    { key: "devices", label: "Devices" },
+  ],
+  Query: [
+    { key: "pages", label: "Pages" },
+    { key: "countries", label: "Countries" },
+    { key: "devices", label: "Devices" },
+  ],
+  Country: [
+    { key: "queries", label: "Queries" },
+    { key: "pages", label: "Pages" },
+    { key: "devices", label: "Devices" },
+  ],
+};
+
 // GA4's own dimension values are already human-readable (full country
 // names, "google"/"(direct)" for source) unlike GSC's coded values —
 // the only one worth reformatting here is deviceCategory's lowercase
@@ -6223,49 +6319,83 @@ function formatDayLabel(dateStr: string): string {
   return Number.isNaN(d.getTime()) ? dateStr : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function GscTrendChart({ data }: { data: GscDateRow[] }) {
-  const [showClicks, setShowClicks] = useState(true);
-  const [showImpressions, setShowImpressions] = useState(true);
-  const chartData = data.map((d) => ({ ...d, label: formatDayLabel(d.date) }));
+type GscMetricKey = "clicks" | "impressions" | "ctr" | "position";
+
+const GSC_METRIC_COLORS: Record<GscMetricKey, string> = {
+  clicks: "#465fff",
+  impressions: "#a855f7",
+  ctr: "#059669",
+  position: "#f59e0b",
+};
+
+const GSC_METRIC_LABELS: Record<GscMetricKey, string> = {
+  clicks: "Clicks",
+  impressions: "Impressions",
+  ctr: "CTR",
+  position: "Position",
+};
+
+function GscTrendChart({
+  data,
+  visible,
+  onToggle,
+}: {
+  data: GscDateRow[];
+  visible: Record<GscMetricKey, boolean>;
+  onToggle: (key: GscMetricKey) => void;
+}) {
+  // ctr is stored as a 0-1 fraction; shown as a percentage everywhere else in this panel.
+  const chartData = data.map((d) => ({ ...d, ctr: d.ctr * 100, label: formatDayLabel(d.date) }));
 
   return (
     <div>
       <div className="mb-2 flex flex-wrap gap-4 text-theme-xs">
-        <label className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
-          <input type="checkbox" checked={showClicks} onChange={(e) => setShowClicks(e.target.checked)} />
-          <span className="inline-block h-2 w-2 rounded-full bg-brand-500" /> Clicks
-        </label>
-        <label className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
-          <input type="checkbox" checked={showImpressions} onChange={(e) => setShowImpressions(e.target.checked)} />
-          <span className="inline-block h-2 w-2 rounded-full bg-purple-500" /> Impressions
-        </label>
+        {(Object.keys(GSC_METRIC_COLORS) as GscMetricKey[]).map((key) => (
+          <label key={key} className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
+            <input type="checkbox" checked={visible[key]} onChange={() => onToggle(key)} />
+            <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: GSC_METRIC_COLORS[key] }} />
+            {GSC_METRIC_LABELS[key]}
+          </label>
+        ))}
       </div>
-      <ResponsiveContainer width="100%" height={220}>
-        <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" className="stroke-gray-100 dark:stroke-gray-800" />
-          <XAxis dataKey="label" tick={{ fontSize: 11 }} minTickGap={30} />
-          <YAxis yAxisId="clicks" tick={{ fontSize: 11 }} width={40} />
-          <YAxis yAxisId="impressions" orientation="right" tick={{ fontSize: 11 }} width={40} />
-          <Tooltip
-            formatter={(value, name) => [value, name === "clicks" ? "Clicks" : "Impressions"]}
-            labelFormatter={(label) => label}
-          />
-          {showClicks && (
-            <Line yAxisId="clicks" type="monotone" dataKey="clicks" stroke="#465fff" strokeWidth={2} dot={false} name="clicks" />
-          )}
-          {showImpressions && (
-            <Line
-              yAxisId="impressions"
-              type="monotone"
-              dataKey="impressions"
-              stroke="#a855f7"
-              strokeWidth={2}
-              dot={false}
-              name="impressions"
-            />
-          )}
-        </LineChart>
-      </ResponsiveContainer>
+    <ResponsiveContainer width="100%" height={220}>
+      <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" className="stroke-gray-100 dark:stroke-gray-800" />
+        <XAxis dataKey="label" tick={{ fontSize: 11 }} minTickGap={30} />
+        <YAxis yAxisId="clicks" tick={{ fontSize: 11 }} width={40} />
+        <YAxis yAxisId="impressions" orientation="right" tick={{ fontSize: 11 }} width={40} />
+        {/* CTR and position each get their own hidden scale — they'd be flattened
+            against clicks/impressions on a shared axis. Position is reversed so a
+            better rank (1) plots higher, same as Search Console's own chart. */}
+        <YAxis yAxisId="ctr" hide domain={[0, "auto"]} />
+        <YAxis yAxisId="position" hide reversed domain={[1, "auto"]} />
+        <Tooltip
+          formatter={(value, name) => {
+            const key = name as GscMetricKey;
+            const num = Number(value);
+            if (key === "ctr") return [`${num.toFixed(1)}%`, GSC_METRIC_LABELS.ctr];
+            if (key === "position") return [num.toFixed(1), GSC_METRIC_LABELS.position];
+            return [num.toLocaleString(), GSC_METRIC_LABELS[key] ?? String(name)];
+          }}
+          labelFormatter={(label) => label}
+        />
+        {(Object.keys(GSC_METRIC_COLORS) as GscMetricKey[]).map(
+          (key) =>
+            visible[key] && (
+              <Line
+                key={key}
+                yAxisId={key}
+                type="monotone"
+                dataKey={key}
+                stroke={GSC_METRIC_COLORS[key]}
+                strokeWidth={2}
+                dot={false}
+                name={key}
+              />
+            )
+        )}
+      </LineChart>
+    </ResponsiveContainer>
     </div>
   );
 }
@@ -6279,6 +6409,54 @@ function GscPerformancePanel({ siteId }: { siteId: number }) {
   const [customEnd, setCustomEnd] = useState("");
   const [countryFilter, setCountryFilter] = useState<string | null>(null);
   const [pageFilter, setPageFilter] = useState<string | null>(null);
+  const [visibleMetrics, setVisibleMetrics] = useState<Record<GscMetricKey, boolean>>({
+    clicks: true,
+    impressions: true,
+    ctr: false,
+    position: false,
+  });
+  const toggleMetric = (key: GscMetricKey) =>
+    setVisibleMetrics((prev) => {
+      // At least one line always stays on — an empty chart isn't a useful state.
+      const onCount = Object.values(prev).filter(Boolean).length;
+      if (prev[key] && onCount === 1) return prev;
+      return { ...prev, [key]: !prev[key] };
+    });
+
+  // Global search: one box that searches queries, pages and countries at once,
+  // plus metric filters (min clicks / min impressions / best average position).
+  const [globalSearch, setGlobalSearch] = useState("");
+  const [globalType, setGlobalType] = useState<"all" | GscGlobalType>("all");
+  const [minClicks, setMinClicks] = useState("");
+  const [minImpressions, setMinImpressions] = useState("");
+  const [maxPosition, setMaxPosition] = useState("");
+  const parseMetricFilter = (v: string) => (v.trim() === "" || Number.isNaN(Number(v)) ? null : Number(v));
+  const searchTerms = globalSearch.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const minClicksN = parseMetricFilter(minClicks);
+  const minImpressionsN = parseMetricFilter(minImpressions);
+  const maxPositionN = parseMetricFilter(maxPosition);
+  const globalActive =
+    searchTerms.length > 0 || minClicksN !== null || minImpressionsN !== null || maxPositionN !== null;
+  // Drill-down: the one page / query / country a search is "about" (chosen by
+  // clicking a result, or picked automatically when the search narrows to a
+  // single result or exactly names one) — its queries / pages / countries /
+  // devices are shown in a details panel above the results.
+  const [manualFocus, setManualFocus] = useState<GscGlobalRow | null>(null);
+  const [focusDismissedFor, setFocusDismissedFor] = useState<string | null>(null);
+  // The chosen sub-tab is remembered together with WHICH page/query/country it
+  // was chosen for, so a different focus always opens on its own first tab
+  // instead of inheriting e.g. "Devices" from the previous one.
+  const [focusTabChoice, setFocusTabChoice] = useState<{ forKey: string; tab: GscFocusTab } | null>(null);
+  const clearGlobal = () => {
+    setGlobalSearch("");
+    setGlobalType("all");
+    setMinClicks("");
+    setMinImpressions("");
+    setMaxPosition("");
+    setManualFocus(null);
+    setFocusDismissedFor(null);
+    setFocusTabChoice(null);
+  };
 
   const activeRange = GSC_DATE_RANGES.find((r) => r.key === rangeKey)!;
   const customReady = rangeKey === "custom" && !!customStart && !!customEnd;
@@ -6328,6 +6506,120 @@ function GscPerformancePanel({ siteId }: { siteId: number }) {
     queryFn: () => getGscBySearchAppearance(siteId, filters),
     enabled: tab === "search-appearance" && rangeIsReady,
   });
+
+  // The tab tables above return only Search Console's default top 100 rows,
+  // which would make "global" search miss anything ranked lower — so search
+  // mode pulls a much larger slice (own cache keys; only fetched while a
+  // search or metric filter is active).
+  const globalFilters: GscFilterParams = { ...filters, rowLimit: 1000 };
+  const globalQueriesQuery = useQuery({
+    queryKey: ["seo", "gsc-global-queries", siteId, globalFilters],
+    queryFn: () => getGscQueriesLive(siteId, globalFilters),
+    enabled: globalActive && rangeIsReady,
+  });
+  const globalPagesQuery = useQuery({
+    queryKey: ["seo", "gsc-global-pages", siteId, globalFilters],
+    queryFn: () => getGscPagesLive(siteId, globalFilters),
+    enabled: globalActive && rangeIsReady,
+  });
+  const globalCountriesQuery = useQuery({
+    queryKey: ["seo", "gsc-global-countries", siteId, globalFilters.daysBack, globalFilters.startDate, globalFilters.endDate, globalFilters.page],
+    queryFn: () => getGscByCountry(siteId, { ...globalFilters, country: undefined }),
+    enabled: globalActive && rangeIsReady,
+  });
+  const globalQueryStates = [globalQueriesQuery, globalPagesQuery, globalCountriesQuery];
+  const globalLoading = globalQueryStates.some((q) => q.isLoading);
+  const globalError = globalQueryStates.find((q) => q.isError)?.error;
+  // Matches on the search text and metric filters only. The type buttons
+  // (Queries / Pages / Countries) are applied afterwards, because they do two
+  // jobs: they narrow a broad search to one kind of result, but once the
+  // search pins down one specific page/query/country they pick which
+  // breakdown of it to show — a URL only ever matches a Page row, so filtering
+  // it by "Queries" up front would wrongly report "nothing matches".
+  const matchesAnyType: GscGlobalRow[] = globalActive
+    ? [
+        ...(globalQueriesQuery.data ?? []).map((r) => ({
+          type: "Query" as const, label: r.query, rawKey: undefined as string | undefined, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position,
+        })),
+        ...(globalPagesQuery.data ?? []).map((r) => ({
+          type: "Page" as const, label: r.page, rawKey: r.page, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position,
+        })),
+        ...(globalCountriesQuery.data ?? []).map((r) => ({
+          type: "Country" as const, label: formatGscDimensionKey("country", r.key), rawKey: r.key,
+          clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position,
+        })),
+      ]
+        .filter(
+          (r) =>
+            searchTerms.every((t) => r.label.toLowerCase().includes(t) || (r.rawKey ?? "").toLowerCase().includes(t)) &&
+            (minClicksN === null || r.clicks >= minClicksN) &&
+            (minImpressionsN === null || r.impressions >= minImpressionsN) &&
+            (maxPositionN === null || r.position <= maxPositionN)
+        )
+        .sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions)
+    : [];
+
+  const globalMatches = globalType === "all" ? matchesAnyType : matchesAnyType.filter((r) => r.type === globalType);
+
+  const exactTerm = globalSearch.trim().toLowerCase();
+  const autoFocus: GscGlobalRow | null =
+    !globalActive || matchesAnyType.length === 0
+      ? null
+      : matchesAnyType.length === 1
+        ? matchesAnyType[0]
+        : exactTerm
+          ? (matchesAnyType.find((r) => r.label.toLowerCase() === exactTerm) ?? null)
+          : null;
+  const focus = manualFocus ?? (focusDismissedFor === globalSearch ? null : autoFocus);
+  const focusTabs = focus ? GSC_FOCUS_TABS[focus.type] : [];
+  const focusKey = focus ? `${focus.type}:${focus.rawKey ?? focus.label}` : null;
+  const chosenFocusTab = focusTabChoice && focusTabChoice.forKey === focusKey ? focusTabChoice.tab : null;
+  // With a page/query/country in focus, the type buttons choose the breakdown
+  // shown (Queries button -> its queries, Countries -> its countries, ...).
+  // An explicit click on a details tab wins until a type button is pressed again.
+  const typeButtonTab: GscFocusTab | null =
+    globalType === "Query" ? "queries" : globalType === "Page" ? "pages" : globalType === "Country" ? "countries" : null;
+  const activeFocusTab = focus
+    ? (focusTabs.find((t) => t.key === chosenFocusTab) ?? focusTabs.find((t) => t.key === typeButtonTab) ?? focusTabs[0]).key
+    : null;
+  const focusScope: GscFilterParams | null = focus
+    ? {
+        daysBack: filters.daysBack,
+        startDate: filters.startDate,
+        endDate: filters.endDate,
+        country: focus.type === "Country" ? focus.rawKey : undefined,
+        page: focus.type === "Page" ? focus.rawKey : undefined,
+        query: focus.type === "Query" ? focus.label : undefined,
+      }
+    : null;
+  const focusQuery = useQuery({
+    queryKey: ["seo", "gsc-focus", siteId, focus?.type, focus?.rawKey ?? focus?.label, activeFocusTab, filters.daysBack, filters.startDate, filters.endDate],
+    queryFn: async (): Promise<GscPerfRow[]> => {
+      const scope = focusScope!;
+      if (activeFocusTab === "queries")
+        return (await getGscQueriesLive(siteId, scope)).map((r) => ({ label: r.query, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position }));
+      if (activeFocusTab === "pages")
+        return (await getGscPagesLive(siteId, scope)).map((r) => ({ label: r.page, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position }));
+      if (activeFocusTab === "countries")
+        return (await getGscByCountry(siteId, scope)).map((r) => ({ label: formatGscDimensionKey("country", r.key), clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position }));
+      return (await getGscByDevice(siteId, scope)).map((r) => ({ label: formatGscDimensionKey("device", r.key), clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position }));
+    },
+    enabled: !!focus && !!activeFocusTab && rangeIsReady,
+  });
+  const closeFocus = () => {
+    setManualFocus(null);
+    setFocusDismissedFor(globalSearch);
+  };
+  const applyFocusAsFilter = () => {
+    if (!focus?.rawKey) return;
+    if (focus.type === "Country") {
+      setCountryFilter(focus.rawKey);
+      setTab("queries");
+    } else if (focus.type === "Page") {
+      setPageFilter(focus.rawKey);
+    }
+    clearGlobal();
+  };
 
   const activeQuery = {
     queries: queriesQuery,
@@ -6567,22 +6859,39 @@ function GscPerformancePanel({ siteId }: { siteId: number }) {
         {rangeIsReady && (
           <>
             <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <div className="rounded-lg border border-brand-200 bg-brand-50 p-3 dark:border-brand-500/30 dark:bg-brand-500/10">
-                <p className="text-theme-xs text-brand-700 dark:text-brand-300">Total clicks</p>
-                <p className="text-xl font-semibold text-brand-800 dark:text-brand-200">{totals.clicks.toLocaleString()}</p>
-              </div>
-              <div className="rounded-lg border border-purple-200 bg-purple-50 p-3 dark:border-purple-500/30 dark:bg-purple-500/10">
-                <p className="text-theme-xs text-purple-700 dark:text-purple-300">Total impressions</p>
-                <p className="text-xl font-semibold text-purple-800 dark:text-purple-200">{totals.impressions.toLocaleString()}</p>
-              </div>
-              <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
-                <p className="text-theme-xs text-gray-400">Average CTR</p>
-                <p className="text-xl font-semibold text-gray-900 dark:text-white">{(avgCtr * 100).toFixed(1)}%</p>
-              </div>
-              <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
-                <p className="text-theme-xs text-gray-400">Average position</p>
-                <p className="text-xl font-semibold text-gray-900 dark:text-white">{avgPosition.toFixed(1)}</p>
-              </div>
+              {(
+                [
+                  { key: "clicks", label: "Total clicks", value: totals.clicks.toLocaleString() },
+                  { key: "impressions", label: "Total impressions", value: totals.impressions.toLocaleString() },
+                  { key: "ctr", label: "Average CTR", value: `${(avgCtr * 100).toFixed(1)}%` },
+                  { key: "position", label: "Average position", value: avgPosition.toFixed(1) },
+                ] as { key: GscMetricKey; label: string; value: string }[]
+              ).map(({ key, label, value }) => {
+                const active = visibleMetrics[key];
+                const color = GSC_METRIC_COLORS[key];
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => toggleMetric(key)}
+                    title={active ? `Hide ${GSC_METRIC_LABELS[key]} on the chart` : `Show ${GSC_METRIC_LABELS[key]} on the chart`}
+                    className={`rounded-lg border p-3 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-brand-500/30 ${
+                      active ? "" : "border-gray-100 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-white/5"
+                    }`}
+                    style={active ? { borderColor: `${color}55`, backgroundColor: `${color}14` } : undefined}
+                  >
+                    <p className="flex items-center gap-1.5 text-theme-xs" style={{ color: active ? color : undefined }}>
+                      <span
+                        className="inline-block h-2 w-2 rounded-full"
+                        style={{ backgroundColor: active ? color : "#d1d5db" }}
+                      />
+                      <span className={active ? "" : "text-gray-400"}>{label}</span>
+                    </p>
+                    <p className="text-xl font-semibold text-gray-900 dark:text-white">{value}</p>
+                  </button>
+                );
+              })}
             </div>
 
             {timeseriesQuery.isLoading ? (
@@ -6595,12 +6904,235 @@ function GscPerformancePanel({ siteId }: { siteId: number }) {
               <p className="mb-4 text-theme-sm text-gray-400">No data for this date range.</p>
             ) : (
               <div className="mb-4">
-                <GscTrendChart data={timeseries} />
+                <GscTrendChart data={timeseries} visible={visibleMetrics} onToggle={toggleMetric} />
               </div>
             )}
           </>
         )}
 
+        <div className="mb-4 rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+            <Label htmlFor="gsc-global-search" className="sr-only">
+              Global search
+            </Label>
+            <Input
+              id="gsc-global-search"
+              value={globalSearch}
+              onChange={(e) => {
+                setGlobalSearch(e.target.value);
+                setManualFocus(null);
+                setFocusDismissedFor(null);
+              }}
+              placeholder="Search all queries, pages and countries…"
+              className="pl-9"
+            />
+          </div>
+          <div className="mt-3 flex flex-wrap items-end gap-x-4 gap-y-2">
+            <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-white/5" role="group" aria-label="Search in">
+              {(["all", "Query", "Page", "Country"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  aria-pressed={globalType === t}
+                  onClick={() => {
+                    setGlobalType(t);
+                    setFocusTabChoice(null);
+                  }}
+                  className={`rounded-md px-3 py-1 text-theme-xs font-medium transition-colors ${
+                    globalType === t ? "bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-white" : "text-gray-500"
+                  }`}
+                >
+                  {{ all: "All", Query: "Queries", Page: "Pages", Country: "Countries" }[t]}
+                </button>
+              ))}
+            </div>
+            <div>
+              <Label htmlFor="gsc-min-clicks" className="mb-1">Min clicks</Label>
+              <Input id="gsc-min-clicks" type="number" min="0" value={minClicks} onChange={(e) => setMinClicks(e.target.value)} className="w-28" />
+            </div>
+            <div>
+              <Label htmlFor="gsc-min-impressions" className="mb-1">Min impressions</Label>
+              <Input id="gsc-min-impressions" type="number" min="0" value={minImpressions} onChange={(e) => setMinImpressions(e.target.value)} className="w-32" />
+            </div>
+            <div>
+              <Label htmlFor="gsc-max-position" className="mb-1">Best avg. position (≤)</Label>
+              <Input id="gsc-max-position" type="number" min="0" value={maxPosition} onChange={(e) => setMaxPosition(e.target.value)} className="w-32" />
+            </div>
+            <Button size="sm" variant="outline" onClick={() => setMaxPosition("10")}>
+              Top 10 rankings
+            </Button>
+            {globalActive && (
+              <Button size="sm" variant="outline" onClick={clearGlobal}>
+                <XCircle className="h-3.5 w-3.5" />
+                Clear search
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {globalActive && rangeIsReady && focus && activeFocusTab && (
+          <div
+            data-testid="gsc-focus-panel"
+            className="mb-4 rounded-lg border border-brand-200 bg-brand-50/40 p-4 dark:border-brand-500/30 dark:bg-brand-500/5"
+          >
+            <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-theme-xs text-gray-500 dark:text-gray-400">Details for this {focus.type.toLowerCase()}</p>
+                <div className="flex flex-wrap items-center gap-2 break-all text-theme-sm font-semibold text-gray-900 dark:text-white">
+                  <Badge variant="outline">{focus.type}</Badge>
+                  {focus.label}
+                </div>
+              </div>
+              <div className="flex gap-2">
+                {(focus.type === "Page" || focus.type === "Country") && focus.rawKey && (
+                  <Button size="sm" variant="outline" onClick={applyFocusAsFilter}>
+                    Filter the whole dashboard
+                  </Button>
+                )}
+                <Button size="sm" variant="outline" onClick={closeFocus}>
+                  <XCircle className="h-3.5 w-3.5" />
+                  Close details
+                </Button>
+              </div>
+            </div>
+            <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {[
+                ["Clicks", focus.clicks.toLocaleString()],
+                ["Impressions", focus.impressions.toLocaleString()],
+                ["CTR", `${(focus.ctr * 100).toFixed(1)}%`],
+                ["Avg. position", focus.position.toFixed(1)],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-md bg-white p-2 dark:bg-white/5">
+                  <p className="text-theme-xs text-gray-400">{label}</p>
+                  <p className="text-theme-sm font-semibold text-gray-900 dark:text-white">{value}</p>
+                </div>
+              ))}
+            </div>
+            <div className="mb-3 flex flex-wrap gap-4 border-b border-gray-100 dark:border-gray-800" role="tablist" aria-label="Details">
+              {focusTabs.map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeFocusTab === t.key}
+                  onClick={() => focusKey && setFocusTabChoice({ forKey: focusKey, tab: t.key })}
+                  className={`-mb-px border-b-2 pb-2 text-theme-xs font-semibold tracking-wide uppercase transition-colors ${
+                    activeFocusTab === t.key
+                      ? "border-brand-500 text-gray-900 dark:text-white"
+                      : "border-transparent text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            {focusQuery.isLoading ? (
+              <div className="flex h-16 items-center justify-center text-gray-400">
+                <Loader2 className="h-5 w-5 animate-spin" />
+              </div>
+            ) : focusQuery.isError ? (
+              <p className="text-theme-sm text-error-500">{serverErrorDetail(focusQuery.error, "GSC fetch failed.")}</p>
+            ) : (focusQuery.data ?? []).length === 0 ? (
+              <p className="text-theme-sm text-gray-400">No {activeFocusTab} data for this {focus.type.toLowerCase()} in the selected date range.</p>
+            ) : (
+              <div className="max-h-96 overflow-auto">
+                <table className="w-full text-left text-theme-sm">
+                  <thead className="sticky top-0 bg-brand-50 dark:bg-gray-900">
+                    <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                      <th className="py-2 pr-3 font-medium">{focusTabs.find((t) => t.key === activeFocusTab)?.label.replace(/ies$/, "y").replace(/s$/, "")}</th>
+                      <th className="py-2 pr-3 font-medium">Clicks</th>
+                      <th className="py-2 pr-3 font-medium">Impressions</th>
+                      <th className="py-2 pr-3 font-medium">CTR</th>
+                      <th className="py-2 font-medium">Avg. position</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(focusQuery.data ?? []).map((r, i) => (
+                      <tr key={`${r.label}-${i}`} className="border-b border-gray-50 dark:border-gray-800/50">
+                        <td className="max-w-md truncate py-2 pr-3 text-gray-700 dark:text-gray-300">{r.label}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.clicks}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.impressions}</td>
+                        <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{(r.ctr * 100).toFixed(1)}%</td>
+                        <td className="py-2 text-gray-500 dark:text-gray-400">{r.position.toFixed(1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {globalActive && rangeIsReady && (
+          <div className="mb-2">
+            {globalLoading ? (
+              <div className="flex h-16 items-center justify-center text-gray-400">
+                <Loader2 className="h-5 w-5 animate-spin" />
+              </div>
+            ) : globalError ? (
+              <p className="text-theme-sm text-error-500">{serverErrorDetail(globalError, "GSC fetch failed.")}</p>
+            ) : globalMatches.length === 0 ? (
+              focus ? null : (
+                <p className="text-theme-sm text-gray-400">Nothing matches this search in the selected date range.</p>
+              )
+            ) : (
+              <div className="overflow-x-auto">
+                <p className="mb-2 text-theme-xs text-gray-500 dark:text-gray-400">
+                  {globalMatches.length.toLocaleString()} result{globalMatches.length === 1 ? "" : "s"}
+                  {globalMatches.length > 100 ? " — showing the top 100 by clicks" : ""}
+                </p>
+                <table className="w-full text-left text-theme-sm">
+                  <thead>
+                    <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                      <th className="py-2 pr-3 font-medium">Type</th>
+                      <th className="py-2 pr-3 font-medium">Match</th>
+                      <th className="py-2 pr-3 font-medium">Clicks</th>
+                      <th className="py-2 pr-3 font-medium">Impressions</th>
+                      <th className="py-2 pr-3 font-medium">CTR</th>
+                      <th className="py-2 font-medium">Avg. position</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {globalMatches.slice(0, 100).map((r, i) => {
+                      const clickable = true;
+                      const isFocused = focus !== null && focus.type === r.type && focus.label === r.label;
+                      return (
+                        <tr
+                          key={`${r.type}-${r.rawKey ?? r.label}-${i}`}
+                          onClick={() => {
+                            setManualFocus(r);
+                          }}
+                          title="Click for this row's queries / pages / countries / devices"
+                          className={`border-b border-gray-50 dark:border-gray-800/50 ${
+                            clickable ? "cursor-pointer hover:bg-gray-50 dark:hover:bg-white/5" : ""
+                          } ${isFocused ? "bg-brand-50/60 dark:bg-brand-500/10" : ""}`}
+                        >
+                          <td className="py-2 pr-3">
+                            <Badge variant="outline">{r.type}</Badge>
+                          </td>
+                          <td
+                            className={`max-w-xs truncate py-2 pr-3 ${
+                              clickable ? "text-brand-600 hover:underline dark:text-brand-400" : "text-gray-700 dark:text-gray-300"
+                            }`}
+                          >
+                            {r.label}
+                          </td>
+                          <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.clicks}</td>
+                          <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{r.impressions}</td>
+                          <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{(r.ctr * 100).toFixed(1)}%</td>
+                          <td className="py-2 text-gray-500 dark:text-gray-400">{r.position.toFixed(1)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!globalActive && (
         <div className="mb-3 flex flex-wrap gap-4 border-b border-gray-100 dark:border-gray-800">
           {GSC_TABS.map((t) => (
             <button
@@ -6616,8 +7148,9 @@ function GscPerformancePanel({ siteId }: { siteId: number }) {
             </button>
           ))}
         </div>
+        )}
 
-        {!rangeIsReady ? null : activeQuery.isLoading ? (
+        {globalActive || !rangeIsReady ? null : activeQuery.isLoading ? (
           <div className="flex h-16 items-center justify-center text-gray-400">
             <Loader2 className="h-5 w-5 animate-spin" />
           </div>
@@ -6684,27 +7217,53 @@ function GscPerformancePanel({ siteId }: { siteId: number }) {
 // unrelated data. metricA/metricB (and their matching colors) come
 // straight from Ga4PerformancePanel's own headlineMetricA/B state, so
 // the chart and the two cards always agree on what's on screen.
-function Ga4TrendChart({ data, metricA, metricB }: { data: Ga4DateRow[]; metricA: Ga4HeadlineMetricKey; metricB: Ga4HeadlineMetricKey }) {
-  const [showA, setShowA] = useState(true);
-  const [showB, setShowB] = useState(true);
-  const chartData = data.map((d) => ({ ...d, label: formatDayLabel(d.date) }));
+type Ga4SeriesKey = "a" | "b" | "bounce" | "conversion";
+
+const GA4_BOUNCE_COLOR = "#f59e0b";
+const GA4_CONVERSION_COLOR = "#059669";
+
+function Ga4TrendChart({
+  data,
+  metricA,
+  metricB,
+  visible,
+  onToggle,
+}: {
+  data: Ga4DateRow[];
+  metricA: Ga4HeadlineMetricKey;
+  metricB: Ga4HeadlineMetricKey;
+  visible: Record<Ga4SeriesKey, boolean>;
+  onToggle: (key: Ga4SeriesKey) => void;
+}) {
+  // Bounce/conversion are rates shown as percentages, each on its own hidden
+  // scale so they aren't flattened against a raw user/session count.
+  const chartData = data.map((d) => ({
+    ...d,
+    bounce: d.bounce_rate * 100,
+    conversion: d.sessions > 0 ? (d.conversions / d.sessions) * 100 : 0,
+    label: formatDayLabel(d.date),
+  }));
   const labelA = GA4_HEADLINE_METRICS.find((m) => m.key === metricA)!.label;
   const labelB = GA4_HEADLINE_METRICS.find((m) => m.key === metricB)!.label;
   const sameMetric = metricA === metricB;
 
+  const legend: { key: Ga4SeriesKey; label: string; color: string }[] = [
+    { key: "a", label: labelA, color: "#465fff" },
+    ...(sameMetric ? [] : [{ key: "b" as const, label: labelB, color: "#a855f7" }]),
+    { key: "bounce", label: "Bounce rate", color: GA4_BOUNCE_COLOR },
+    { key: "conversion", label: "Conversion rate", color: GA4_CONVERSION_COLOR },
+  ];
+
   return (
     <div>
       <div className="mb-2 flex flex-wrap gap-4 text-theme-xs">
-        <label className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
-          <input type="checkbox" checked={showA} onChange={(e) => setShowA(e.target.checked)} />
-          <span className="inline-block h-2 w-2 rounded-full bg-brand-500" /> {labelA}
-        </label>
-        {!sameMetric && (
-          <label className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
-            <input type="checkbox" checked={showB} onChange={(e) => setShowB(e.target.checked)} />
-            <span className="inline-block h-2 w-2 rounded-full bg-purple-500" /> {labelB}
+        {legend.map(({ key, label, color }) => (
+          <label key={key} className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
+            <input type="checkbox" checked={visible[key]} onChange={() => onToggle(key)} />
+            <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color }} />
+            {label}
           </label>
-        )}
+        ))}
       </div>
       <ResponsiveContainer width="100%" height={220}>
         <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
@@ -6712,16 +7271,24 @@ function Ga4TrendChart({ data, metricA, metricB }: { data: Ga4DateRow[]; metricA
           <XAxis dataKey="label" tick={{ fontSize: 11 }} minTickGap={30} />
           <YAxis yAxisId="a" tick={{ fontSize: 11 }} width={40} />
           <YAxis yAxisId="b" orientation="right" tick={{ fontSize: 11 }} width={40} />
+          <YAxis yAxisId="bounce" hide domain={[0, 100]} />
+          <YAxis yAxisId="conversion" hide domain={[0, "auto"]} />
           <Tooltip
-            formatter={(value, name) => [
-              formatHeadlineMetricValue(name === labelA ? metricA : metricB, value as number),
-              name,
-            ]}
+            formatter={(value, name) => {
+              if (name === "Bounce rate" || name === "Conversion rate") return [`${Number(value).toFixed(1)}%`, name];
+              return [formatHeadlineMetricValue(name === labelA ? metricA : metricB, value as number), name];
+            }}
             labelFormatter={(label) => label}
           />
-          {showA && <Line yAxisId="a" type="monotone" dataKey={metricA} stroke="#465fff" strokeWidth={2} dot={false} name={labelA} />}
-          {showB && !sameMetric && (
+          {visible.a && <Line yAxisId="a" type="monotone" dataKey={metricA} stroke="#465fff" strokeWidth={2} dot={false} name={labelA} />}
+          {visible.b && !sameMetric && (
             <Line yAxisId="b" type="monotone" dataKey={metricB} stroke="#a855f7" strokeWidth={2} dot={false} name={labelB} />
+          )}
+          {visible.bounce && (
+            <Line yAxisId="bounce" type="monotone" dataKey="bounce" stroke={GA4_BOUNCE_COLOR} strokeWidth={2} dot={false} name="Bounce rate" />
+          )}
+          {visible.conversion && (
+            <Line yAxisId="conversion" type="monotone" dataKey="conversion" stroke={GA4_CONVERSION_COLOR} strokeWidth={2} dot={false} name="Conversion rate" />
           )}
         </LineChart>
       </ResponsiveContainer>
@@ -7042,6 +7609,21 @@ function Ga4PerformancePanel({ siteId }: { siteId: number }) {
   // Active users / New users per the actual request driving this.
   const [headlineMetricA, setHeadlineMetricA] = useState<Ga4HeadlineMetricKey>("active_users");
   const [headlineMetricB, setHeadlineMetricB] = useState<Ga4HeadlineMetricKey>("new_users");
+  const [visibleSeries, setVisibleSeries] = useState<Record<Ga4SeriesKey, boolean>>({
+    a: true,
+    b: true,
+    bounce: false,
+    conversion: false,
+  });
+  const toggleSeries = (key: Ga4SeriesKey) =>
+    setVisibleSeries((prev) => {
+      // At least one line always stays on. Series B doesn't render when both
+      // cards pick the same metric, so it doesn't count toward that minimum.
+      const sameMetric = headlineMetricA === headlineMetricB;
+      const onCount = (Object.keys(prev) as Ga4SeriesKey[]).filter((k) => prev[k] && !(k === "b" && sameMetric)).length;
+      if (prev[key] && onCount === 1) return prev;
+      return { ...prev, [key]: !prev[key] };
+    });
   const previousFilters = getPreviousPeriodFilters(filters);
   const previousTimeseriesQuery = useQuery({
     queryKey: ["seo", "ga4-timeseries-previous", siteId, previousFilters],
@@ -7267,14 +7849,33 @@ function Ga4PerformancePanel({ siteId }: { siteId: number }) {
                 colorClass="border-purple-200 bg-purple-50 dark:border-purple-500/30 dark:bg-purple-500/10 text-purple-700 dark:text-purple-300"
                 valueColorClass="text-purple-800 dark:text-purple-200"
               />
-              <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
-                <p className="text-theme-xs text-gray-400">Avg. bounce rate</p>
-                <p className="text-xl font-semibold text-gray-900 dark:text-white">{(avgBounceRate * 100).toFixed(1)}%</p>
-              </div>
-              <div className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
-                <p className="text-theme-xs text-gray-400">Conversion rate</p>
-                <p className="text-xl font-semibold text-gray-900 dark:text-white">{(conversionRate * 100).toFixed(1)}%</p>
-              </div>
+              {(
+                [
+                  { key: "bounce", label: "Avg. bounce rate", value: `${(avgBounceRate * 100).toFixed(1)}%`, color: GA4_BOUNCE_COLOR },
+                  { key: "conversion", label: "Conversion rate", value: `${(conversionRate * 100).toFixed(1)}%`, color: GA4_CONVERSION_COLOR },
+                ] as { key: Ga4SeriesKey; label: string; value: string; color: string }[]
+              ).map(({ key, label, value, color }) => {
+                const active = visibleSeries[key];
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => toggleSeries(key)}
+                    title={active ? `Hide ${label} on the chart` : `Show ${label} on the chart`}
+                    className={`rounded-lg border p-3 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-brand-500/30 ${
+                      active ? "" : "border-gray-100 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-white/5"
+                    }`}
+                    style={active ? { borderColor: `${color}55`, backgroundColor: `${color}14` } : undefined}
+                  >
+                    <p className="flex items-center gap-1.5 text-theme-xs" style={{ color: active ? color : undefined }}>
+                      <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: active ? color : "#d1d5db" }} />
+                      <span className={active ? "" : "text-gray-400"}>{label}</span>
+                    </p>
+                    <p className="text-xl font-semibold text-gray-900 dark:text-white">{value}</p>
+                  </button>
+                );
+              })}
             </div>
 
             {timeseriesQuery.isLoading ? (
@@ -7287,7 +7888,7 @@ function Ga4PerformancePanel({ siteId }: { siteId: number }) {
               <p className="mb-4 text-theme-sm text-gray-400">No data for this date range.</p>
             ) : (
               <div className="mb-4">
-                <Ga4TrendChart data={timeseries} metricA={headlineMetricA} metricB={headlineMetricB} />
+                <Ga4TrendChart data={timeseries} metricA={headlineMetricA} metricB={headlineMetricB} visible={visibleSeries} onToggle={toggleSeries} />
               </div>
             )}
           </>
@@ -9095,6 +9696,15 @@ export default function SeoPage() {
     }
   };
   const [tab, setTab] = useState<Tab>("overview");
+  // Every tab, once opened, stays mounted (just hidden) instead of being torn
+  // down when another tab is selected. That is what keeps any task started in
+  // a tab — a traffic check, an audit, a digest, a bulk job — running AND
+  // visible when you come back: the spinner, the progress and the result all
+  // live in that tab's component state, which used to be destroyed on every
+  // switch. Tabs are still only mounted on first visit, so nothing loads
+  // until it's opened.
+  const openedTabs = useRef<Set<Tab>>(new Set(["overview"]));
+  openedTabs.current.add(tab);
   const [showAddSite, setShowAddSite] = useState(false);
   // Set from anywhere (e.g. PageSpeed's fix list) that resolves an edit
   // target to a static file with no CMS post behind it — switches to the
@@ -9247,30 +9857,36 @@ export default function SeoPage() {
 
               <ContentGenerationStatusBar siteId={selectedSite.id} />
 
-              {tab === "overview" && (
-                <OverviewTab
-                  site={selectedSite}
-                  serverJumpPath={serverJumpPath}
-                  onServerJumpHandled={() => setServerJumpPath(null)}
-                  onEditStaticFile={openStaticFileForEdit}
-                />
-              )}
-              {tab === "performance" && (
-                <PerformanceTab
-                  siteId={selectedSite.id}
-                  siteUrl={selectedSite.base_url}
-                  onEditStaticFile={openStaticFileForEdit}
-                />
-              )}
-              {tab === "search-console" && <SearchConsoleTab siteId={selectedSite.id} />}
-              {tab === "analytics" && <Ga4Tab siteId={selectedSite.id} />}
-              {tab === "indexing" && <IndexingTab siteId={selectedSite.id} siteUrl={selectedSite.base_url} />}
-              {tab === "social" && <SocialTab siteId={selectedSite.id} />}
-              {tab === "blog" && <BlogTab siteId={selectedSite.id} />}
-              {tab === "backlinks" && (
-                <BacklinksTab siteId={selectedSite.id} siteName={selectedSite.name} siteUrl={selectedSite.base_url} />
-              )}
-              {tab === "redirection" && <RedirectionTab />}
+              <div className="space-y-6">
+                {TABS.filter(({ id }) => openedTabs.current.has(id)).map(({ id }) => (
+                  <div key={id} hidden={tab !== id} className="space-y-6">
+                    {id === "overview" && (
+                      <OverviewTab
+                        site={selectedSite}
+                        serverJumpPath={serverJumpPath}
+                        onServerJumpHandled={() => setServerJumpPath(null)}
+                        onEditStaticFile={openStaticFileForEdit}
+                      />
+                    )}
+                    {id === "performance" && (
+                      <PerformanceTab
+                        siteId={selectedSite.id}
+                        siteUrl={selectedSite.base_url}
+                        onEditStaticFile={openStaticFileForEdit}
+                      />
+                    )}
+                    {id === "search-console" && <SearchConsoleTab siteId={selectedSite.id} />}
+                    {id === "analytics" && <Ga4Tab siteId={selectedSite.id} />}
+                    {id === "indexing" && <IndexingTab siteId={selectedSite.id} siteUrl={selectedSite.base_url} />}
+                    {id === "social" && <SocialTab siteId={selectedSite.id} />}
+                    {id === "blog" && <BlogTab siteId={selectedSite.id} />}
+                    {id === "backlinks" && (
+                      <BacklinksTab siteId={selectedSite.id} siteName={selectedSite.name} siteUrl={selectedSite.base_url} />
+                    )}
+                    {id === "redirection" && <RedirectionTab />}
+                  </div>
+                ))}
+              </div>
             </>
           )
         )}

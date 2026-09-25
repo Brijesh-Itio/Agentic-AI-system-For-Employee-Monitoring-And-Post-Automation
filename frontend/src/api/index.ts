@@ -1168,6 +1168,12 @@ export const getSeoDigests = (siteId: number) =>
 // Sheets tab only any more. Digest generation calls the LLM factory —
 // generous timeout for local CPU inference, same reasoning as
 // reports.dar.generate.
+// Roll-up generation waits on a local model running on CPU, which
+// can legitimately take minutes. The server allows the model 10 minutes, so
+// the browser must not give up first: at 2 minutes it reported "generation
+// failed" for a report the server then finished writing anyway.
+const REPORT_TIMEOUT_MS = 12 * 60_000;
+
 // The metrics an AI report can be limited to (see ai/seo/report_metrics.py —
 // the backend owns this list, the picker just renders it).
 export interface ReportMetric {
@@ -1257,7 +1263,7 @@ export const generateDigestRollup = (
         email_recipient: opts.emailRecipient || undefined,
         metrics: opts.metrics ?? undefined,
       },
-      { timeout: 120_000 }
+      { timeout: REPORT_TIMEOUT_MS }
     )
     .then((r) => r.data);
 
@@ -1407,8 +1413,20 @@ export const deleteFacebookAccount = (accountId: number) =>
 export const getSocialPosts = (siteId: number, status?: string) =>
   api.get<SocialPost[]>("/api/seo/social", { params: { site_id: siteId, status } }).then((r) => r.data);
 
-export const updateSocialPost = (postId: number, content: string) =>
-  api.patch<SocialPost>(`/api/seo/social/${postId}`, { content }).then((r) => r.data);
+export const updateSocialPost = (
+  postId: number,
+  fields: { content?: string; platform?: SocialPlatform; source_url?: string; image_url?: string },
+) => api.patch<SocialPost>(`/api/seo/social/${postId}`, fields).then((r) => r.data);
+
+// Create a post by hand — no AI. Lands as a draft.
+export const createSocialPost = (payload: {
+  site_id: number;
+  platform: SocialPlatform;
+  content: string;
+  source_url?: string;
+  image_url?: string;
+  facebook_account_id?: number | null;
+}) => api.post<SocialPost>("/api/seo/social", payload).then((r) => r.data);
 
 // Module 60 — manual re-check, e.g. after editing a draft's content. See
 // checkBlogPostQuality's own comment.
@@ -2152,6 +2170,60 @@ export const deleteSitemap = (siteId: number, feedpath: string) =>
     .post<SitemapActionResult>("/api/seo/sitemaps/delete", { site_id: siteId, feedpath }, { timeout: 30_000 })
     .then((r) => r.data);
 
+export interface SitemapFileInfo {
+  name: string;
+  is_index?: boolean;
+  urls: number;
+  bytes: number;
+}
+
+export interface SitemapGeneratorState {
+  auto_update: boolean;
+  status: "idle" | "running" | "error";
+  phase?: string | null;
+  message?: string | null;
+  error?: string | null;
+  has_files: boolean;
+  generated_at?: string | null;
+  total?: number;
+  counts?: { pages: number; posts: number; categories: number; tags: number; images: number; videos: number };
+  files?: SitemapFileInfo[];
+  published_at?: string | null;
+  published_to?: string | null;
+  live_verified?: boolean;
+  publish_error?: string | null;
+  submitted_at?: string | null;
+  submit_note?: string | null;
+  robots_note?: string | null;
+  last_reason?: string | null;
+}
+
+export const getSitemapState = (siteId: number) =>
+  api.get<SitemapGeneratorState>("/api/seo/sitemap/status", { params: { site_id: siteId }, timeout: 30_000 }).then((r) => r.data);
+
+export const generateSitemap = (siteId: number, maxPages?: number) =>
+  api
+    .post<SitemapGeneratorState>("/api/seo/sitemap/generate", { site_id: siteId, max_pages: maxPages }, { timeout: 30_000 })
+    .then((r) => r.data);
+
+export const setSitemapAutoUpdate = (siteId: number, autoUpdate: boolean) =>
+  api
+    .put<SitemapGeneratorState>("/api/seo/sitemap/settings", { site_id: siteId, auto_update: autoUpdate }, { timeout: 30_000 })
+    .then((r) => r.data);
+
+// Uploading thousands of URLs' worth of XML over SFTP can take a while.
+export const publishSitemap = (siteId: number) =>
+  api.post<SitemapGeneratorState>("/api/seo/sitemap/publish", { site_id: siteId }, { timeout: 5 * 60_000 }).then((r) => r.data);
+
+export const downloadSitemapFile = (siteId: number, name?: string) =>
+  api
+    .get<Blob>(name ? "/api/seo/sitemap/file" : "/api/seo/sitemap/download", {
+      params: name ? { site_id: siteId, name } : { site_id: siteId },
+      responseType: "blob",
+      timeout: 60_000,
+    })
+    .then((r) => r.data);
+
 export interface VerifiedSite {
   id: string;
   type: string | null;
@@ -2331,13 +2403,13 @@ export const generateBlogPostMeta = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/meta/generate`, {}, { timeout: 60_000 }).then((r) => r.data);
 
 export const generateBlogPostFaqs = (postId: number) =>
-  api.post<BlogPost>(`/api/seo/blog/${postId}/faqs/generate`, {}, { timeout: 60_000 }).then((r) => r.data);
+  api.post<BlogPost>(`/api/seo/blog/${postId}/faqs/generate`, {}, { timeout: 5 * 60_000 }).then((r) => r.data);
 
 export const generateBlogPostInterlinks = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/interlinks/generate`, {}, { timeout: 30_000 }).then((r) => r.data);
 
 export const checkBlogPostGrammar = (postId: number) =>
-  api.post<BlogPost>(`/api/seo/blog/${postId}/grammar-check`, {}, { timeout: 60_000 }).then((r) => r.data);
+  api.post<BlogPost>(`/api/seo/blog/${postId}/grammar-check`, {}, { timeout: 10 * 60_000 }).then((r) => r.data);
 
 export interface KeywordDensity {
   keyword: string;
@@ -2379,15 +2451,19 @@ export const rejectBlogPost = (postId: number) =>
 
 // Creates the post as a draft in WordPress/Webflow — never goes live on
 // its own, see automation/seo/cms/base.py's create_post docstring.
+// Publish is slow: it can generate an AI image on the local model, upload it,
+// build the interlinks and only then create the CMS draft — well over the old
+// 30 s limit. The browser used to give up while the server was still working,
+// showing "Publishing to the CMS failed." for a post that then published fine.
 export const publishBlogPost = (postId: number) =>
-  api.post<BlogPost>(`/api/seo/blog/${postId}/publish`, {}, { timeout: 30_000 }).then((r) => r.data);
+  api.post<BlogPost>(`/api/seo/blog/${postId}/publish`, {}, { timeout: 10 * 60_000 }).then((r) => r.data);
 
 // The explicit, separate "actually make it public" step — Publish only
 // ever creates a CMS draft (see publishBlogPost's own comment above);
 // this is what a human clicking "Go Live" triggers instead of having to
 // open WordPress/Webflow's own admin to hit Publish there.
 export const goLiveBlogPost = (postId: number) =>
-  api.post<BlogPost>(`/api/seo/blog/${postId}/go-live`, {}, { timeout: 30_000 }).then((r) => r.data);
+  api.post<BlogPost>(`/api/seo/blog/${postId}/go-live`, {}, { timeout: 2 * 60_000 }).then((r) => r.data);
 
 // Module 59 — bulk generation, content-calendar generation, scheduling,
 // and bulk approve/publish for blog posts, mirroring the equivalent
@@ -2536,7 +2612,7 @@ export interface FaqPair {
 // Seeds the FAQ with this site's own real GSC search queries server-side
 // — only site_id/page_title/max_pairs need to be supplied here.
 export const generateFaq = (payload: { site_id: number; page_title: string; max_pairs?: number }) =>
-  api.post<FaqPair[]>("/api/seo/content/faq", payload, { timeout: 60_000 }).then((r) => r.data);
+  api.post<FaqPair[]>("/api/seo/content/faq", payload, { timeout: 5 * 60_000 }).then((r) => r.data);
 
 // Module 39 — bulk CMS image-to-WebP conversion. Scans every published
 // post/page for JPG/PNG <img src>/<img srcset> references, converts
@@ -2668,3 +2744,26 @@ export const applyRedirect = (id: number) =>
 
 export const testRedirect = (id: number) =>
   api.post<RedirectTestResult>(`/api/redirects/${id}/test`, null, { timeout: 20_000 }).then((r) => r.data);
+
+// ---- Notepad (api/routes/notes.py) ----
+export type NoteColor = "gray" | "blue" | "green" | "amber" | "rose" | "purple";
+
+export interface ServerNote {
+  id: string;
+  title: string;
+  html: string;
+  tags: string[];
+  color: NoteColor;
+  pinned: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export const getNotes = () => api.get<ServerNote[]>("/api/notes").then((r) => r.data);
+
+export const saveNote = (note: ServerNote) => {
+  const { id, ...body } = note;
+  return api.put<ServerNote>(`/api/notes/${id}`, body).then((r) => r.data);
+};
+
+export const deleteNoteApi = (id: string) => api.delete(`/api/notes/${id}`);

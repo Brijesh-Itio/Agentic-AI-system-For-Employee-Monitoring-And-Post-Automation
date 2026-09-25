@@ -46,6 +46,13 @@ def _load_service_account() -> Optional[dict]:
         return None
 
 
+def service_account_email() -> Optional[str]:
+    """The Google account this app acts as — the address that has to be
+    added as a user on a Search Console / Analytics property."""
+    account = _load_service_account()
+    return account.get("client_email") if account else None
+
+
 def get_access_token(scopes: List[str]) -> Optional[str]:
     """Returns a cached or freshly minted OAuth2 access token for the
     given scopes. Never raises — returns None on any failure (missing

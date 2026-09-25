@@ -300,6 +300,19 @@ class UrlRedirect(Base):
     synced_at = Column(DateTime)
 
 
+class Note(Base):
+    __tablename__ = "notes"
+    id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False)
+    title = Column(String, nullable=False, default="")
+    html = Column(String, nullable=False, default="")
+    tags_json = Column(String, nullable=False, default="[]")
+    color = Column(String, nullable=False, default="gray")
+    pinned = Column(Integer, nullable=False, default=0)
+    created_at = Column(Integer, nullable=False)
+    updated_at = Column(Integer, nullable=False)
+
+
 class DarTemplate(Base):
     __tablename__ = "dar_templates"
     id = Column(Integer, primary_key=True)

@@ -29,7 +29,7 @@ from typing import List, Optional
 import requests
 
 from ai.llm.retry import call_with_hard_timeout, with_retry
-from automation.seo.google_auth import get_access_token
+from automation.seo.google_auth import get_access_token, service_account_email
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,41 @@ class IndexingSubmitResult:
     error: Optional[str] = None
 
 
+def _explain_inspection_failure(exc: Exception, site_url: str) -> str:
+    """Turns a failed inspection call into something a person can act on.
+    The route used to say only "see server logs", which hid the one thing
+    worth knowing — Google's own reason (e.g. "You do not own this site")."""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            google_message = (response.json().get("error") or {}).get("message") or ""
+        except Exception:
+            google_message = ""
+        status = response.status_code
+        if status in (401, 403):
+            email = service_account_email() or "the service account"
+            return (
+                f"Google refused access to {site_url} — {google_message or 'permission denied'} "
+                f"In Search Console (Settings → Users and permissions) make sure {email} is added "
+                "to this exact property with Full or Owner access, and that the property is still verified."
+            )
+        if status == 404:
+            return f"Google could not find the property {site_url} — check the Search Console property set for this site."
+        return f"Google returned an error ({status}): {google_message or 'no details'}"
+    if isinstance(exc, TimeoutError):
+        return "Google did not answer in time — try again in a moment."
+    return f"URL Inspection request failed: {exc}"
+
+
 def fetch_url_inspection(url: str, site_url: Optional[str] = None) -> Optional[UrlInspectionResult]:
+    """Same as fetch_url_inspection_with_reason, keeping only the result —
+    the form every existing caller (the daily pipeline included) uses."""
+    return fetch_url_inspection_with_reason(url, site_url)[0]
+
+
+def fetch_url_inspection_with_reason(
+    url: str, site_url: Optional[str] = None
+) -> tuple[Optional[UrlInspectionResult], Optional[str]]:
     """Never raises — returns None on failure (unconfigured, auth,
     network, or the service account lacking Search Console access to this
     property), matching this codebase's graceful-degrade convention.
@@ -97,11 +131,11 @@ def fetch_url_inspection(url: str, site_url: Optional[str] = None) -> Optional[U
     exception to the "caller decides" rule."""
     if not site_url:
         logger.error("GSC not configured — set GSC_SITE_URL in .env")
-        return None
+        return None, "No Search Console property is set for this site — add one in the site's Google settings."
 
     token = get_access_token(INSPECT_SCOPE)
     if token is None:
-        return None
+        return None, "Google credentials aren't set up (GOOGLE_SERVICE_ACCOUNT_JSON_PATH) or the login to Google failed."
 
     body = {"inspectionUrl": url, "siteUrl": site_url}
 
@@ -125,14 +159,14 @@ def fetch_url_inspection(url: str, site_url: Optional[str] = None) -> Optional[U
             retry_on=(requests.RequestException, TimeoutError),
         )
         data = response.json()
-    except Exception:
+    except Exception as exc:
         logger.exception("URL Inspection API failed (url=%s)", url)
-        return None
+        return None, _explain_inspection_failure(exc, site_url)
 
     inspection_result = data.get("inspectionResult") or {}
     index_result = inspection_result.get("indexStatusResult") or {}
     mobile_result = inspection_result.get("mobileUsabilityResult") or {}
-    return UrlInspectionResult(
+    result = UrlInspectionResult(
         url=url,
         verdict=index_result.get("verdict"),
         coverage_state=index_result.get("coverageState"),
@@ -147,6 +181,7 @@ def fetch_url_inspection(url: str, site_url: Optional[str] = None) -> Optional[U
         inspection_result_link=inspection_result.get("inspectionResultLink"),
         crawled_as=index_result.get("crawledAs"),
     )
+    return result, None
 
 
 def submit_url_for_indexing(url: str, notification_type: str = "URL_UPDATED") -> IndexingSubmitResult:

@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import type { Node as PMNode } from "@tiptap/pm/model";
@@ -11,6 +11,8 @@ import {
   AlignLeft,
   AlignRight,
   Bold,
+  Check,
+  Copy,
   Heading1,
   Heading2,
   Heading3,
@@ -39,6 +41,10 @@ interface RichTextEditorProps {
   // the Image block, which needs somewhere to upload to and a library to
   // pick from. Blog post editing passes this; comments never do.
   imageBlocks?: EditorImageHandlers;
+  // Adds a Copy button that puts the whole content on the clipboard (as rich
+  // text, so it pastes into WordPress/Docs with its headings and links intact,
+  // and as plain text everywhere else). Off by default.
+  copyButton?: boolean;
 }
 
 // Exposed so a caller that's about to save can read the editor's CURRENT
@@ -89,7 +95,7 @@ function ToolbarButton({
 }
 
 const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(function RichTextEditor(
-  { value, onChange, placeholder, headings = false, imageBlocks },
+  { value, onChange, placeholder, headings = false, imageBlocks, copyButton = false },
   ref
 ) {
   // The last html *we* emitted via onChange — lets the resync effect below
@@ -105,6 +111,7 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(fun
   const imageBlocksRef = useRef(imageBlocks);
   imageBlocksRef.current = imageBlocks;
   const containerRef = useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = useState(false);
   // Set when a paste just had its table(s) flattened into plain blocks, so the "first line is a title" rule below leaves that paste alone.
   const pastedTableRef = useRef(false);
   const serialize = (ed: { isEmpty: boolean; getHTML: () => string }) =>
@@ -349,6 +356,45 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(fun
         >
           <Redo2 className="h-3.5 w-3.5" />
         </ToolbarButton>
+        {copyButton && (
+          <>
+            <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
+            <ToolbarButton
+              label={copied ? "Copied" : "Copy content"}
+              active={copied}
+              disabled={editor.isEmpty}
+              onClick={async () => {
+                const html = stripImagePlaceholders(editor.getHTML());
+                const text = editor.getText({ blockSeparator: "\n\n" });
+                try {
+                  if (typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
+                    await navigator.clipboard.write([
+                      new ClipboardItem({
+                        "text/html": new Blob([html], { type: "text/html" }),
+                        "text/plain": new Blob([text], { type: "text/plain" }),
+                      }),
+                    ]);
+                  } else {
+                    await navigator.clipboard.writeText(text);
+                  }
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1800);
+                } catch {
+                  // Clipboard blocked (permissions / insecure context) — plain-text fallback
+                  try {
+                    await navigator.clipboard.writeText(text);
+                    setCopied(true);
+                    window.setTimeout(() => setCopied(false), 1800);
+                  } catch {
+                    // nothing more we can do
+                  }
+                }
+              }}
+            >
+              {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            </ToolbarButton>
+          </>
+        )}
       </div>
       {headings && <TableToolsBar editor={editor} />}
       <div ref={containerRef} className="relative">

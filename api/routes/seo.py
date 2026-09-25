@@ -118,6 +118,8 @@ from api.schemas import (
     SitemapActionRequest,
     SitemapInfoOut,
     SitemapListRequest,
+    SitemapGenerateRequest,
+    SitemapSettingsRequest,
     VerifiedSiteOut,
     KeywordDifficultyOut,
     KeywordDifficultyRequest,
@@ -173,6 +175,7 @@ from api.schemas import (
     SocialGenerateRequest,
     SocialPostOut,
     SocialPostUpdate,
+    SocialPostCreate,
     SocialScheduleRequest,
     SocialBulkIdsRequest,
     SocialBulkActionResultOut,
@@ -227,7 +230,11 @@ from automation.seo.ga4_client import (
     fetch_traffic_by_source as ga4_fetch_by_source,
 )
 from automation.seo.gsc_client import fetch_search_analytics, fetch_search_analytics_by_page, today_with_lag
-from automation.seo.indexing_client import fetch_url_inspection, submit_url_for_indexing
+from automation.seo.indexing_client import (
+    fetch_url_inspection,
+    fetch_url_inspection_with_reason,
+    submit_url_for_indexing,
+)
 from automation.seo.issue_applier import apply_fix as apply_issue_fix
 from automation.seo.issue_applier import apply_fix_to_static_file
 from automation.seo.issue_applier import find_post_by_url as find_cms_post_by_url
@@ -1252,7 +1259,7 @@ def submit_sitemap_route(payload: SitemapActionRequest, db: Session = Depends(ge
     site_url = _effective_gsc_url(site)
     if not site_url:
         raise HTTPException(status_code=400, detail="No GSC property configured for this site")
-    return submit_sitemap(site_url, payload.feedpath)
+    return submit_sitemap(site_url, _full_sitemap_url(site, payload.feedpath))
 
 
 @router.post("/sitemaps/delete", response_model=SitemapActionOut)
@@ -1264,7 +1271,103 @@ def delete_sitemap_route(payload: SitemapActionRequest, db: Session = Depends(ge
     site_url = _effective_gsc_url(site)
     if not site_url:
         raise HTTPException(status_code=400, detail="No GSC property configured for this site")
-    return delete_sitemap(site_url, payload.feedpath)
+    return delete_sitemap(site_url, _full_sitemap_url(site, payload.feedpath))
+
+
+def _full_sitemap_url(site: SeoSite, feedpath: str) -> str:
+    """Google's Sitemaps API wants the sitemap's full URL. A bare
+    "sitemap.xml" (what the panel used to default to) was sent as-is and
+    rejected, so expand it against the site's own address."""
+    feedpath = feedpath.strip()
+    if feedpath.startswith(("http://", "https://")):
+        return feedpath
+    return site.base_url.rstrip("/") + "/" + feedpath.lstrip("/")
+
+
+# ── Sitemap generator: builds sitemap.xml itself (pages, posts, categories,
+# tags, images, videos), publishes it, and keeps it up to date. See
+# automation/seo/sitemap_service.py. ──
+
+
+@router.get("/sitemap/status")
+def sitemap_status(site_id: int, db: Session = Depends(get_db)):
+    from automation.seo import sitemap_service
+
+    _site_or_404(site_id, db)
+    return sitemap_service.get_state(site_id)
+
+
+@router.post("/sitemap/generate", status_code=202)
+def sitemap_generate(payload: SitemapGenerateRequest, db: Session = Depends(get_db)):
+    """Starts a full generation in the background (a big site takes minutes);
+    the panel polls /sitemap/status for progress."""
+    import threading
+
+    from automation.seo import sitemap_service
+
+    site = _site_or_404(payload.site_id, db)
+    if sitemap_service.get_state(site.id).get("status") == "running":
+        raise HTTPException(status_code=409, detail="A sitemap run is already in progress for this site.")
+    max_pages = max(50, min(payload.max_pages or 5000, 50000))
+    sitemap_service._save_state(site.id, status="running", phase="discovering", message="Starting…", error=None)
+
+    def _run():
+        from api.database import SessionLocal
+
+        session = SessionLocal()
+        try:
+            fresh = session.query(SeoSite).filter(SeoSite.id == site.id).first()
+            sitemap_service.generate(fresh, reason="manual", max_crawl_pages=max_pages)
+        finally:
+            session.close()
+
+    threading.Thread(target=_run, daemon=True, name=f"sitemap-{site.id}").start()
+    return sitemap_service.get_state(site.id)
+
+
+@router.put("/sitemap/settings")
+def sitemap_settings(payload: SitemapSettingsRequest, db: Session = Depends(get_db)):
+    from automation.seo import sitemap_service
+
+    _site_or_404(payload.site_id, db)
+    return sitemap_service.set_auto_update(payload.site_id, payload.auto_update)
+
+
+@router.post("/sitemap/publish")
+def sitemap_publish(payload: SitemapListRequest, db: Session = Depends(get_db)):
+    """Uploads the last generated files to the server again and (re)submits
+    to Google — e.g. after Server Access was added following a generate."""
+    from automation.seo import sitemap_service
+
+    site = _site_or_404(payload.site_id, db)
+    return sitemap_service.republish(site)
+
+
+@router.get("/sitemap/file")
+def sitemap_file(site_id: int, name: str, db: Session = Depends(get_db)):
+    from fastapi.responses import Response
+
+    from automation.seo import sitemap_service
+
+    _site_or_404(site_id, db)
+    xml = sitemap_service.read_file(site_id, name)
+    if xml is None:
+        raise HTTPException(status_code=404, detail="No such generated sitemap file")
+    return Response(content=xml, media_type="application/xml", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.get("/sitemap/download")
+def sitemap_download(site_id: int, db: Session = Depends(get_db)):
+    from fastapi.responses import Response
+
+    from automation.seo import sitemap_service
+
+    _site_or_404(site_id, db)
+    data = sitemap_service.zip_files(site_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Nothing generated yet")
+    return Response(content=data, media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="sitemaps.zip"'})
+
 
 
 @router.get("/site-verification", response_model=list[VerifiedSiteOut])
@@ -1625,9 +1728,9 @@ def inspect_url_route(payload: UrlInspectRequest, db: Session = Depends(get_db))
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
-    result = fetch_url_inspection(payload.url, site_url=_effective_gsc_url(site))
+    result, reason = fetch_url_inspection_with_reason(payload.url, site_url=_effective_gsc_url(site))
     if result is None:
-        raise HTTPException(status_code=502, detail="URL Inspection API call failed — see server logs")
+        raise HTTPException(status_code=502, detail=reason or "URL Inspection API call failed — see server logs")
 
     database.upsert_index_status(payload.site_id, payload.url, result)
 
@@ -2531,6 +2634,29 @@ async def upload_social_post_image_route(post_id: int, file: UploadFile = File(.
     return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
 
 
+@router.post("/social", response_model=SocialPostOut, status_code=201)
+def create_social_post_route(payload: SocialPostCreate, db: Session = Depends(get_db)):
+    """Create a post by hand (the Create part of Social's CRUD) — the
+    AI generator above is the other way in. Lands as a draft, so it still
+    goes through Approve -> Publish like any other."""
+    if db.query(SeoSite).filter(SeoSite.id == payload.site_id).first() is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
+    if not payload.content.strip():
+        raise HTTPException(status_code=422, detail="Post content can't be empty")
+
+    post_id = database.create_social_post(
+        payload.site_id,
+        payload.platform,
+        payload.content,
+        (payload.source_url or "").strip() or None,
+        (payload.image_url or "").strip() or None,
+        facebook_account_id=payload.facebook_account_id if payload.platform == "facebook" else None,
+    )
+    _check_and_store_social_quality(db, post_id, payload.site_id, payload.content)
+    db.expire_all()
+    return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
+
+
 @router.get("/social", response_model=list[SocialPostOut])
 def list_social_posts_route(site_id: int, status: Optional[str] = None, limit: int = 100, db: Session = Depends(get_db)):
     query = db.query(SeoSocialPost).filter(SeoSocialPost.site_id == site_id)
@@ -2551,7 +2677,24 @@ def update_social_post_route(post_id: int, payload: SocialPostUpdate, db: Sessio
     if row.status == "posted":
         raise HTTPException(status_code=409, detail="Can't edit a post that's already been published")
 
-    database.update_social_post_content(post_id, payload.content)
+    changes = {}
+    sent = payload.model_fields_set
+    if "content" in sent and payload.content is not None:
+        if not payload.content.strip():
+            raise HTTPException(status_code=422, detail="Post content can't be empty")
+        changes["content"] = payload.content
+    if "platform" in sent and payload.platform is not None:
+        changes["platform"] = payload.platform
+    if "source_url" in sent:
+        changes["source_url"] = (payload.source_url or "").strip() or None
+    if "image_url" in sent:
+        changes["image_url"] = (payload.image_url or "").strip() or None
+    if not changes:
+        raise HTTPException(status_code=422, detail="Nothing to update")
+
+    database.update_social_post_fields(post_id, changes)
+    if "content" in changes:
+        _check_and_store_social_quality(db, post_id, row.site_id, changes["content"])
     db.expire_all()
     return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
 
@@ -3555,6 +3698,43 @@ def _run_post_publish_automation(site, post_id: int, title: str, excerpt: Option
         logger.exception("GSC indexing submission failed for post %s — publish itself already succeeded", post_id)
 
 
+def _insert_featured_image(content: str, image_url: str, title: str) -> str:
+    """Places the featured image right after the FIRST paragraph, centered —
+    not stuck above the headline. Falls back to after the first heading, then
+    to the very top, when the body has no paragraph to anchor to. Skipped if
+    the body already contains this exact image."""
+    import html as _html
+    import re as _re
+
+    if image_url in content:
+        return content
+    figure = (
+        '<figure class="wp-block-image aligncenter size-large" style="text-align:center;margin:1.5em auto;">'
+        f'<img src="{_html.escape(image_url, quote=True)}" alt="{_html.escape(title, quote=True)}" '
+        'class="aligncenter" style="display:block;margin:0 auto;max-width:100%;height:auto;" />'
+        "</figure>"
+    )
+    # first paragraph that actually has text (skip empty <p></p>)
+    for m in _re.finditer(r"<p\b[^>]*>(.*?)</p>", content, flags=_re.IGNORECASE | _re.DOTALL):
+        if _re.sub(r"<[^>]+>|&nbsp;|\s", "", m.group(1)):
+            return content[: m.end()] + "\n" + figure + "\n" + content[m.end():]
+    heading = _re.search(r"</h[1-6]>", content, flags=_re.IGNORECASE)
+    if heading:
+        return content[: heading.end()] + "\n" + figure + "\n" + content[heading.end():]
+    return figure + "\n" + content
+
+
+def _schedule_sitemap_update(site_id: int, url: Optional[str]) -> None:
+    """A post just went live — fold its URL into the site's sitemap (debounced,
+    on a background thread). Must never affect the go-live result itself."""
+    try:
+        from automation.seo import sitemap_service
+
+        sitemap_service.schedule_touch(site_id, url, "new blog post went live")
+    except Exception:
+        logger.exception("Could not schedule the sitemap update for site %s", site_id)
+
+
 def _do_go_live_blog_post(post_id: int, db: Session) -> tuple[bool, str]:
     """The actual "flip the CMS post to publish/isDraft=false" step —
     shared by the manual /blog/{id}/go-live route and _do_publish_
@@ -3573,6 +3753,7 @@ def _do_go_live_blog_post(post_id: int, db: Session) -> tuple[bool, str]:
     result = client.update_post(row.cms_post_id, status="publish")
     if result.ok:
         database.mark_blog_post_live(post_id)
+        _schedule_sitemap_update(site.id, row.cms_post_link)
         return True, "Live"
     else:
         database.mark_blog_post_go_live_failed(post_id, result.detail)
@@ -3580,6 +3761,22 @@ def _do_go_live_blog_post(post_id: int, db: Session) -> tuple[bool, str]:
 
 
 def _do_publish_blog_post(post_id: int, db: Session, go_live: bool = False) -> tuple[bool, str]:
+    """Publishes a post; an unexpected error is recorded on the post as its
+    failure reason (so the list shows what went wrong and Publish can be
+    retried) instead of surfacing as a bare 500 with the post left looking
+    untouched."""
+    try:
+        return _publish_blog_post_steps(post_id, db, go_live)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Publishing blog post %s failed unexpectedly", post_id)
+        message = f"{type(exc).__name__}: {exc}"[:500]
+        database.mark_blog_post_failed(post_id, message)
+        return False, message
+
+
+def _publish_blog_post_steps(post_id: int, db: Session, go_live: bool = False) -> tuple[bool, str]:
     """The actual "resolve the CMS client, attach an image, inject
     interlinks, create the CMS draft, run post-publish automation"
     orchestration — shared by the manual /blog/{id}/publish route,
@@ -3629,7 +3826,7 @@ def _do_publish_blog_post(post_id: int, db: Session, go_live: bool = False) -> t
 
     content = row.content
     if image_url:
-        content = f'<img src="{image_url}" alt="{row.title}" />\n{content}'
+        content = _insert_featured_image(content, image_url, row.title)
     content = _inject_interlinks(row.site_id, post_id, row.title, content, stored_links_json=row.internal_links_json)
 
     client = _cms_client_for(site)

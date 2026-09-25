@@ -1,4 +1,12 @@
-# WorkPulse AI — Deployment Guide (Module 24)
+# WorkPulse AI — Deployment Guide
+
+Deploying the API (Railway), the dashboard (Vercel) and pointing the desktop agent at the cloud API.
+For local setup see [`../README.md`](../README.md); for how the system works see [`../DEVELOPMENT.md`](../DEVELOPMENT.md).
+
+**Contents:** [Scope](#whats-actually-deployed-here-and-what-isnt) · [1. API on Railway](#1-api-on-railway-module-242) ·
+[2. Dashboard on Vercel](#2-dashboard-on-vercel-module-243) · [3. Desktop agent](#3-desktop-agent-pointed-at-the-cloud-api-module-245-partial) ·
+[4. What must persist](#4-what-must-persist) · [5. Security and go-live checklist](#5-security-and-go-live-checklist) ·
+[6. Ollama in the cloud](#6-local-ai-ollama-in-a-cloud-deployment)
 
 ## What's actually deployed here, and what isn't
 
@@ -45,7 +53,10 @@ ingestion-API work, not before.
    put in `.env`: `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`,
    `REPORT_RECIPIENT_EMAIL`, `LINKEDIN_EMAIL`, `LINKEDIN_PASSWORD`,
    `PEXELS_API_KEY`, `SECRET_KEY`, and `CORS_ORIGINS` (add your Vercel URL
-   once you have it — step 2 below).
+   once you have it — step 2 below). For the SEO suite also set
+   `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` (see §4 — the key file must exist on the server),
+   `PAGESPEED_API_KEY`, `OLLAMA_BASE_URL` (see §6) and any CMS / social keys you use.
+   The full list is in `.env.example`.
 5. Railway's filesystem is ephemeral on redeploy — `workpulse.db` will
    reset when the service restarts unless you attach a Railway **Volume**
    to the project and point `DATABASE_URL` at it.
@@ -72,7 +83,7 @@ ingestion-API work, not before.
 
 ## 3. Desktop agent pointed at the cloud API (module 24.5, partial)
 
-Build the packaged agent (module 23 — see the root `DEVELOPMENT.md` for
+Build the packaged agent (module 23 — see [`../DEVELOPMENT.md`](../DEVELOPMENT.md) for
 `scripts/build_exe.bat`), run it once, and when the first-run setup dialog
 asks for the API server URL, give it your Railway URL instead of
 `http://localhost:8000`. That's the entire "point at cloud" step for a
@@ -86,4 +97,43 @@ top of this document for what that actually requires.
 
 ---   
 
-*Last updated: August 21, 2026*
+## 4. What must persist
+
+Everything the API writes at runtime lives on the server's disk. On Railway (ephemeral filesystem) attach a
+**Volume** and keep these on it, or they reset on every redeploy:
+
+| Path | Contents | If lost |
+|---|---|---|
+| `workpulse.db` (+ `-wal`, `-shm`) | All data, per-site credentials, settings | Everything is lost — back it up |
+| `sitemaps/` | Generated sitemap files and their URL lists | Regenerate from **SEO → Search Console → Sitemap Generator** |
+| `chromadb/` | Vector store (classification cache, interlinking index) | Rebuilt over time; interlink suggestions reset |
+| Google service-account key file | Path in `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` | Search Console / Analytics / Sheets stop working |
+| `linkedin_cookies.json` | Saved LinkedIn session | Sign in again once |
+
+Point `DATABASE_URL` at the volume. Treat the service-account key and `.env` values as secrets: set them as platform
+variables or mounted secret files, never commit them.
+
+## 5. Security and go-live checklist
+
+- [ ] `SECRET_KEY` is a long random value, unique to this deployment.
+- [ ] `CORS_ORIGINS` lists only the real dashboard origin(s) — no wildcard.
+- [ ] Everything is served over HTTPS (Railway and Vercel do this by default).
+- [ ] The first admin account is created immediately after the first deploy (the first account registered becomes
+      the admin, so do not leave a fresh deployment publicly reachable and unclaimed).
+- [ ] `.env`, `workpulse-config.json`, `linkedin_cookies.json` and key files are not in the repository.
+- [ ] The API is started without `--reload` under a supervisor (Railway's restart policy in `railway.json`).
+- [ ] The database volume is backed up on a schedule (copy `-wal` and `-shm` with it, or use SQLite's online backup).
+- [ ] Google service-account access is limited to the properties it needs.
+- [ ] `GET /` returns the API's status message and `/docs` loads — a quick post-deploy health check.
+
+## 6. Local AI (Ollama) in a cloud deployment
+
+The AI features call an Ollama server at `OLLAMA_BASE_URL` (default `http://localhost:11434`). A Railway container
+has no Ollama and usually no GPU, so on a cloud API either point `OLLAMA_BASE_URL` at a machine you run Ollama on
+(reachable and secured), or accept that AI-dependent features (reports, blog and social generation, digests) will
+report the AI as unavailable while everything else works. Inference on CPU is slow (a few words per second); the
+SEO features chunk and time-box long AI tasks for that reason, and the dashboard waits several minutes for them.
+
+---
+
+*Last updated: September 25, 2026*

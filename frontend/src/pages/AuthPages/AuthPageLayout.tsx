@@ -70,13 +70,7 @@ export default function AuthLayout({
                 ))}
               </div>
 
-              <div
-                className="animate-auth-fade-up mt-8 inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3.5 py-1.5 text-theme-xs font-medium text-white/70"
-                style={{ animationDelay: "0.6s" }}
-              >
-                <span className="h-1.5 w-1.5 rounded-full bg-success-400" />
-                100% Local AI — nothing leaves your device
-              </div>
+             
             </div>
           </div>
         </div>

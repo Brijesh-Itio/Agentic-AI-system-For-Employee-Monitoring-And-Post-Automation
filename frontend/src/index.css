@@ -284,6 +284,33 @@ layer(base);
   background-color: #344054;
 }
 
+/* Thin, slightly more visible than custom-scrollbar — for lists that scroll
+   inside a fixed-height card, where the scrollbar is the only cue there's
+   more content below. */
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #98a2b3 transparent;
+}
+.thin-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #98a2b3;
+  border-radius: 9999px;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: #667085;
+}
+.dark .thin-scrollbar {
+  scrollbar-color: #667085 transparent;
+}
+.dark .thin-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #667085;
+}
+
 .tableCheckbox:checked ~ span span {
   @apply opacity-100;
 }
@@ -938,4 +965,18 @@ span.flatpickr-weekday,
 .ProseMirror table[data-borders="leftright"] {
   border-left: 1px solid var(--tbl-line);
   border-right: 1px solid var(--tbl-line);
+}
+
+/* SEO page: the default card padding and type scale read large next to the
+   dense data this page shows — scoped here so no other page changes. */
+.seo-compact .p-6 {
+  padding: 1.125rem;
+}
+.seo-compact h2.text-lg {
+  font-size: 1rem;
+  line-height: 1.5rem;
+}
+.seo-compact .text-theme-sm {
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
 }

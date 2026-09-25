@@ -51,11 +51,28 @@ def _period_range(period: Period, reference_date: date_cls) -> tuple[date_cls, d
     return start, reference_date
 
 
-def _fallback_narrative(site_name: str, period: Period, digest_count: int, start: date_cls, end: date_cls) -> str:
+# The roll-up prompt is the daily notes pasted end to end, so its size grows
+# with the period: a month of ~1.3k-character notes is ~40k characters, far
+# past the model's 4k-token window and minutes of CPU time. Keep it bounded.
+MAX_NOTES_IN_PROMPT = 14
+MAX_CHARS_PER_NOTE = 600
+AI_UNAVAILABLE_MARKER = "AI summary unavailable"
+
+
+def _fallback_narrative(
+    site_name: str, period: Period, digest_count: int, start: date_cls, end: date_cls, notes: Optional[list[str]] = None
+) -> str:
     span = "this week" if period == "weekly" else "this month" if period == "monthly" else f"{start.isoformat()} to {end.isoformat()}"
+    head = f"{period.capitalize()} roll-up for {site_name}: {digest_count} daily digest(s) recorded {span}."
+    if digest_count == 0:
+        return f"{head} There are no daily digests in this period yet, so there is nothing to summarise."
+    # The AI step failed (Ollama busy/slow) — show what the period's own notes
+    # said rather than an empty placeholder, and say plainly that it's a retry
+    # away.
+    highlights = "\n".join(f"- {' '.join(n.split())[:220]}" for n in (notes or [])[-7:])
     return (
-        f"{period.capitalize()} roll-up for {site_name}: {digest_count} daily digest(s) recorded "
-        f"{span}. (LLM unavailable — trend narrative skipped.)"
+        f"{head} ({AI_UNAVAILABLE_MARKER} — the local AI did not answer in time; press Generate now to try again.)"
+        + (f"\n\nHighlights from the daily notes:\n{highlights}" if highlights else "")
     )
 
 
@@ -98,7 +115,11 @@ def generate_rollup_digest(
     if not narratives:
         narrative = _fallback_narrative(site_name, period, 0, start, end)
     else:
-        joined = "\n".join(f"- {n}" for n in narratives)
+        prompt_notes = [" ".join(n.split())[:MAX_CHARS_PER_NOTE] for n in narratives[-MAX_NOTES_IN_PROMPT:]]
+        omitted = len(narratives) - len(prompt_notes)
+        joined = "\n".join(f"- {n}" for n in prompt_notes)
+        if omitted > 0:
+            joined = f"({omitted} earlier note(s) left out to keep this short)\n" + joined
         focus = (
             ""
             if metrics is None
@@ -115,8 +136,16 @@ def generate_rollup_digest(
             f"{focus}\n"
             f"DAILY NOTES:\n{joined}"
         )
-        result = get_provider(task=f"{period}_digest", site_id=site_id).generate(prompt, fast=True)
-        narrative = result.text.strip() if result.ok else _fallback_narrative(site_name, period, len(narratives), start, end)
+        # fast=False: the "fast" model (phi3:mini) could not finish even a
+        # week's notes inside its 120 s limit on this hardware — measured, it
+        # was still running at 500 s — while the main model (qwen3:1.7b)
+        # answered the same prompt in ~50 s and has a 600 s allowance.
+        result = get_provider(task=f"{period}_digest", site_id=site_id).generate(prompt, fast=False)
+        narrative = (
+            result.text.strip()
+            if result.ok and result.text and result.text.strip()
+            else _fallback_narrative(site_name, period, len(narratives), start, end, narratives)
+        )
 
     return RollupReport(
         site_id=site_id, period=period, period_start=start.isoformat(), period_end=end.isoformat(),

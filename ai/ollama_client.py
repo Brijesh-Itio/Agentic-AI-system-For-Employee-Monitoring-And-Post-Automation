@@ -50,14 +50,19 @@ def _fix_mojibake(text: str) -> str:
         return text
 
 
-def generate(prompt: str, model: Optional[str] = None, fast: bool = False) -> Optional[str]:
+def generate(
+    prompt: str, model: Optional[str] = None, fast: bool = False, max_tokens: Optional[int] = None
+) -> Optional[str]:
     """Single-shot text generation. Returns None (never raises) on failure
     so callers can fall back to a safe default rather than crash a
-    background thread."""
+    background thread. max_tokens (optional; None = no cap, exactly as
+    before) limits how much the model may write — on CPU the time is the
+    length of the reply, so a caller that needs a bounded wait sets it."""
     chosen_model = model or (settings.OLLAMA_FAST_MODEL if fast else settings.OLLAMA_MODEL)
     client = _fast_client() if fast else _client()
     try:
-        response = client.generate(model=chosen_model, prompt=prompt, stream=False)
+        extra = {"options": {"num_predict": max_tokens}} if max_tokens else {}
+        response = client.generate(model=chosen_model, prompt=prompt, stream=False, **extra)
         text = (response.get("response") or "").strip()
         return _fix_mojibake(text)
     except Exception:

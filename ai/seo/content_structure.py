@@ -206,41 +206,87 @@ class FaqPair:
     answer: str
 
 
+# Characters that mean nothing once a JSON-ish fragment has been cut out of
+# the model's reply: quotes, commas, braces and brackets left on either end.
+_FAQ_EDGE_JUNK = re.compile(r'^[\s"\',:{}\[\]]+|[\s"\',:{}\[\]]+$')
+
+
+def _parse_faq_pairs(text: str) -> List[FaqPair]:
+    """Reads FAQ pairs out of an LLM reply. Strict JSON first; if that
+    fails, a tolerant read of the "question"/"answer" pairs.
+
+    The tolerant read exists because of a real, recurring failure (seen in
+    the server log, posts silently saved with NO FAQs): the small local
+    model writes the FAQs correctly but slips on the JSON syntax — most
+    often dropping the closing quote of a question, e.g.
+    `"question": "How can AI help?\n "answer": "..."` — and json.loads
+    rejects the whole reply, discarding five good answers over one
+    missing quote."""
+    start, end = text.find("["), text.rfind("]")
+    if start != -1 and end > start:
+        try:
+            parsed = json.loads(text[start : end + 1])
+            pairs = [
+                FaqPair(question=str(p["question"]).strip(), answer=str(p["answer"]).strip())
+                for p in parsed
+                if isinstance(p, dict) and "question" in p and "answer" in p
+            ]
+            if pairs:
+                return pairs
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+
+    pairs: List[FaqPair] = []
+    for chunk in re.split(r'"question"\s*:', text)[1:]:
+        question_part, _, answer_part = chunk.partition('"answer"')
+        if not answer_part:
+            continue
+        # Answer text runs to the next pair's "question" (already split off) or the end of the reply.
+        question = _FAQ_EDGE_JUNK.sub("", question_part).replace('\\"', '"')
+        answer = _FAQ_EDGE_JUNK.sub("", answer_part).replace('\\"', '"')
+        question, answer = " ".join(question.split()), " ".join(answer.split())
+        if question and answer:
+            pairs.append(FaqPair(question=question, answer=answer))
+    return pairs
+
+
 def generate_faq(
     page_title: str, seed_queries: List[str], *, site_id: Optional[int] = None, max_pairs: int = 5
 ) -> Optional[List[FaqPair]]:
     """Generates FAQ question/answer pairs seeded by real search queries
     (module 26's seo_gsc_queries is the intended source). Never raises —
-    returns None on LLM failure or unparseable output, matching this
-    codebase's graceful-degrade convention."""
+    returns None on LLM failure or unusable output, matching this
+    codebase's graceful-degrade convention.
+
+    Asks for exactly max_pairs (the auto-FAQ feature promises 5 per post)
+    and tries once more if the first reply yields fewer, keeping whichever
+    attempt produced more."""
     queries_block = "\n".join(f"- {q}" for q in seed_queries[:15]) or "(no seed queries provided)"
     prompt = (
-        f"Write up to {max_pairs} FAQ question/answer pairs for a page titled "
+        f"Write exactly {max_pairs} FAQ question/answer pairs for a page titled "
         f'"{page_title}". Ground the questions in the real search queries below where '
         "relevant, rephrased as natural questions — don't invent unrelated questions.\n\n"
         f"REAL SEARCH QUERIES THAT LED TO THIS PAGE:\n{queries_block}\n\n"
         'Return ONLY a JSON array: [{"question": "...", "answer": "..."}, ...] — '
-        "answers should be 1-3 sentences, factual, no marketing fluff. No markdown, no "
-        "explanation, the JSON array only."
+        "answers should be 1-3 sentences, factual, no marketing fluff. Every question and "
+        "every answer must be wrapped in double quotes. No markdown, no explanation, the "
+        "JSON array only."
     )
-    result = get_provider(task="faq", site_id=site_id).generate(prompt, fast=True)
-    if not result.ok:
-        logger.warning("FAQ generation failed: %s", result.error)
-        return None
 
-    text = result.text.strip()
-    start = text.find("[")
-    end = text.rfind("]")
-    if start == -1 or end == -1 or end <= start:
-        logger.warning("FAQ generation returned unparseable output: %r", text)
-        return None
-    try:
-        parsed = json.loads(text[start : end + 1])
-        return [
-            FaqPair(question=str(p["question"]), answer=str(p["answer"]))
-            for p in parsed
-            if "question" in p and "answer" in p
-        ]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        logger.warning("FAQ generation JSON parse failed: %r", text)
-        return None
+    best: List[FaqPair] = []
+    for attempt in (1, 2):
+        result = get_provider(task="faq", site_id=site_id).generate(prompt, fast=True)
+        if not result.ok:
+            logger.warning("FAQ generation failed (attempt %d): %s", attempt, result.error)
+            break
+        pairs = _parse_faq_pairs(result.text.strip())
+        if len(pairs) > len(best):
+            best = pairs
+        if len(best) >= max_pairs:
+            break
+        logger.warning(
+            "FAQ generation gave %d of %d pairs (attempt %d)%s",
+            len(pairs), max_pairs, attempt, "" if pairs else f" — unusable reply: {result.text[:200]!r}",
+        )
+
+    return best[:max_pairs] or None

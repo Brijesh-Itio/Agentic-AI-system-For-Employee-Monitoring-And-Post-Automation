@@ -11,6 +11,7 @@ import {
   Mail,
   Users,
   Search,
+  NotebookPen,
   Settings as SettingsIcon,
   Zap,
 } from "lucide-react";
@@ -36,6 +37,7 @@ const navItems: NavItem[] = [
   { icon: <Mail />, name: "Email", path: "/email" },
   { icon: <Users />, name: "Team", path: "/team" },
   { icon: <Search />, name: "SEO", path: "/seo" },
+  { icon: <NotebookPen />, name: "Notepad", path: "/notepad" },
   { icon: <SettingsIcon />, name: "Settings", path: "/settings" },
 ];
 

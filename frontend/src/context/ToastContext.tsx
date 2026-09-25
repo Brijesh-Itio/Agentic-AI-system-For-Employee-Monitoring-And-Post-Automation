@@ -17,7 +17,9 @@ interface ToastApi {
 
 const ToastContext = createContext<ToastApi | null>(null);
 
-const AUTO_DISMISS_MS = 4000;
+// A failure needs longer to read (and to copy the reason out of) than a
+// confirmation does, so errors stay up twice as long.
+const AUTO_DISMISS_MS: Record<ToastVariant, number> = { success: 4000, info: 4000, error: 8000 };
 
 const VARIANT_META: Record<ToastVariant, { icon: typeof CheckCircle2; classes: string }> = {
   success: {
@@ -52,7 +54,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     (message: string, variant: ToastVariant) => {
       const id = nextId.current++;
       setToasts((prev) => [...prev, { id, message, variant }]);
-      setTimeout(() => remove(id), AUTO_DISMISS_MS);
+      setTimeout(() => remove(id), AUTO_DISMISS_MS[variant]);
     },
     [remove]
   );
@@ -66,7 +68,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={api}>
       {children}
-      <div className="pointer-events-none fixed left-1/2 top-4 z-[9999] flex w-full max-w-sm -translate-x-1/2 flex-col items-center gap-2 px-4">
+      {/* z-index sits above the sticky app header and modals (both z-99999) — at
+          9999 the header painted over the toast and only its bottom edge
+          showed. top-20 also keeps it just below the header instead of on it. */}
+      <div
+        role="status"
+        aria-live="polite"
+        className="pointer-events-none fixed left-1/2 top-20 z-[100000] flex w-full max-w-lg -translate-x-1/2 flex-col items-center gap-2 px-4"
+      >
         {/* Newest toast rendered first (closest to the top edge this
             container is anchored to) — feels like it drops in above
             whatever's already showing, not below it. */}
@@ -76,7 +85,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           return (
             <div
               key={t.id}
-              className={`animate-toast-in pointer-events-auto flex w-full max-w-sm items-start gap-2.5 rounded-lg border px-4 py-3 text-theme-sm shadow-lg ${meta.classes}`}
+              className={`animate-toast-in pointer-events-auto flex w-full max-w-lg items-start gap-2.5 rounded-lg border px-4 py-3 text-theme-sm shadow-lg ${meta.classes}`}
             >
               <Icon className="mt-0.5 h-4 w-4 shrink-0" />
               <p className="flex-1">{t.message}</p>

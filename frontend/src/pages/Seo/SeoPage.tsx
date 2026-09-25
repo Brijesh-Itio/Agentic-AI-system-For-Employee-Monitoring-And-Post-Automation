@@ -51,6 +51,7 @@ import {
   WholeWord,
   X,
   XCircle,
+  SearchCheck,
 } from "lucide-react";
 import type { AxiosError } from "axios";
 import DOMPurify from "dompurify";
@@ -167,9 +168,13 @@ import {
   exportAllGa4ToSheet,
   exportOverviewToSheet,
   getSitemaps,
+  getSitemapState,
+  generateSitemap,
+  setSitemapAutoUpdate,
+  publishSitemap,
+  downloadSitemapFile,
   submitSitemap,
   deleteSitemap,
-  getVerifiedSites,
   KeywordDifficulty,
   KeywordResearchRow,
   createServerFileBackup,
@@ -187,6 +192,7 @@ import {
   indexPageForInterlinks,
   getSocialPosts,
   updateSocialPost,
+  createSocialPost,
   scheduleSocialPost,
   bulkApproveSocialPosts,
   bulkPublishSocialPosts,
@@ -265,7 +271,7 @@ import {
 } from "@/api";
 import RedirectionTab from "@/pages/Redirection/RedirectionTab";
 
-type Tab = "overview" | "performance" | "search-console" | "analytics" | "indexing" | "social" | "blog" | "backlinks" | "redirection";
+type Tab = "overview" | "technical-audit" | "performance" | "search-console" | "analytics" | "indexing" | "social" | "blog" | "backlinks" | "redirection";
 type IssueFilter = "pending" | "approved" | "rejected" | "resolved" | "all";
 
 // lucide-react 1.x dropped every brand/logo icon (trademark policy), so
@@ -339,6 +345,7 @@ const PLATFORM_ICONS: Record<SocialPlatform, (props: { className?: string }) => 
 
 const TABS: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "technical-audit", label: "Technical Audit", icon: SearchCheck },
   { id: "performance", label: "Performance", icon: Gauge },
   { id: "search-console", label: "Search Console", icon: Search },
   { id: "analytics", label: "Analytics", icon: BarChart3 },
@@ -606,13 +613,22 @@ function NewSiteForm({ onCreated, onCancel }: { onCreated: (site: SeoSite) => vo
 function GoogleConfigCard({ site }: { site: SeoSite }) {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const [gscSiteUrl, setGscSiteUrl] = useState(site.gsc_site_url ?? "");
-  const [ga4PropertyId, setGa4PropertyId] = useState(site.ga4_property_id ?? "");
+  const savedGsc = site.gsc_site_url ?? "";
+  const savedGa4 = site.ga4_property_id ?? "";
+  const hasSaved = savedGsc !== "" || savedGa4 !== "";
+  const [gscSiteUrl, setGscSiteUrl] = useState(savedGsc);
+  const [ga4PropertyId, setGa4PropertyId] = useState(savedGa4);
+  // Once something is saved the card locks (values read-only, a "Saved" mark
+  // instead of a live Save button) and "Change" reopens it for editing.
+  // Nothing saved yet — or a save that cleared both values — leaves it open.
+  const [editing, setEditing] = useState(!hasSaved);
+  const dirty = gscSiteUrl.trim() !== savedGsc || ga4PropertyId.trim() !== savedGa4;
 
   useEffect(() => {
-    setGscSiteUrl(site.gsc_site_url ?? "");
-    setGa4PropertyId(site.ga4_property_id ?? "");
-  }, [site.id, site.gsc_site_url, site.ga4_property_id]);
+    setGscSiteUrl(savedGsc);
+    setGa4PropertyId(savedGa4);
+    setEditing(savedGsc === "" && savedGa4 === "");
+  }, [site.id, savedGsc, savedGa4]);
 
   const saveMutation = useMutation({
     mutationFn: () =>
@@ -651,6 +667,7 @@ function GoogleConfigCard({ site }: { site: SeoSite }) {
               value={gscSiteUrl}
               onChange={(e) => setGscSiteUrl(e.target.value)}
               placeholder={site.base_url}
+              disabled={!editing}
             />
           </div>
           <div>
@@ -660,13 +677,44 @@ function GoogleConfigCard({ site }: { site: SeoSite }) {
               value={ga4PropertyId}
               onChange={(e) => setGa4PropertyId(e.target.value)}
               placeholder="properties/123456789"
+              disabled={!editing}
             />
           </div>
         </div>
-        <Button className="mt-4" size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-          {saveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          Save
-        </Button>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {editing ? (
+            <>
+              <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || !dirty}>
+                {saveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Save
+              </Button>
+              {hasSaved && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={saveMutation.isPending}
+                  onClick={() => {
+                    setGscSiteUrl(savedGsc);
+                    setGa4PropertyId(savedGa4);
+                    setEditing(false);
+                  }}
+                >
+                  Cancel
+                </Button>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="flex items-center gap-1.5 text-theme-sm font-medium text-success-600 dark:text-success-400">
+                <CheckCircle2 className="h-4 w-4" />
+                Saved
+              </span>
+              <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+                Change
+              </Button>
+            </>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
@@ -681,13 +729,33 @@ function CmsConfigCard({ site }: { site: SeoSite }) {
   const [apiToken, setApiToken] = useState("");
   const [collectionId, setCollectionId] = useState(site.cms_collection_id ?? "");
 
+  // Once anything is saved the card locks (read-only fields, a "Saved" mark and
+  // a Change button instead of a live Save). Nothing saved yet — or a save that
+  // cleared everything — leaves it open. Secrets are never sent back to the
+  // browser, so they only count as saved through the *_set flags.
+  const hasSaved = !!(
+    site.cms_base_url ||
+    site.cms_username ||
+    site.cms_collection_id ||
+    site.cms_app_password_set ||
+    site.cms_api_token_set
+  );
+  const [editing, setEditing] = useState(!hasSaved);
+  const dirty =
+    cmsBaseUrl.trim() !== (site.cms_base_url ?? "") ||
+    username.trim() !== (site.cms_username ?? "") ||
+    collectionId.trim() !== (site.cms_collection_id ?? "") ||
+    appPassword.trim() !== "" ||
+    apiToken.trim() !== "";
+
   useEffect(() => {
     setCmsBaseUrl(site.cms_base_url ?? "");
     setUsername(site.cms_username ?? "");
     setAppPassword("");
     setApiToken("");
     setCollectionId(site.cms_collection_id ?? "");
-  }, [site.id, site.cms_base_url, site.cms_username, site.cms_collection_id]);
+    setEditing(!hasSaved);
+  }, [site.id, site.cms_base_url, site.cms_username, site.cms_collection_id, hasSaved]);
 
   const saveMutation = useMutation({
     mutationFn: () =>
@@ -701,6 +769,11 @@ function CmsConfigCard({ site }: { site: SeoSite }) {
     onSuccess: () => {
       toast.success("CMS publishing config saved for this site.");
       queryClient.invalidateQueries({ queryKey: ["seo", "sites"] });
+      // A save that only replaced a password leaves every other saved value
+      // unchanged, so the effect above wouldn't re-run to lock the card.
+      setAppPassword("");
+      setApiToken("");
+      setEditing(false);
     },
     onError: (err) => {
       const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
@@ -730,11 +803,12 @@ function CmsConfigCard({ site }: { site: SeoSite }) {
                 value={cmsBaseUrl}
                 onChange={(e) => setCmsBaseUrl(e.target.value)}
                 placeholder={site.base_url}
+                disabled={!editing}
               />
             </div>
             <div>
               <Label htmlFor="cms-username">Username</Label>
-              <Input id="cms-username" value={username} onChange={(e) => setUsername(e.target.value)} />
+              <Input id="cms-username" value={username} onChange={(e) => setUsername(e.target.value)} disabled={!editing} />
             </div>
             <div>
               <Label htmlFor="cms-app-password">Application password{site.cms_app_password_set ? " (saved)" : ""}</Label>
@@ -743,7 +817,8 @@ function CmsConfigCard({ site }: { site: SeoSite }) {
                 type="password"
                 value={appPassword}
                 onChange={(e) => setAppPassword(e.target.value)}
-                placeholder={site.cms_app_password_set ? "•••••••• (leave blank to keep)" : ""}
+                placeholder={site.cms_app_password_set ? (editing ? "•••••••• (leave blank to keep)" : "••••••••") : ""}
+                disabled={!editing}
               />
             </div>
           </div>
@@ -756,19 +831,53 @@ function CmsConfigCard({ site }: { site: SeoSite }) {
                 type="password"
                 value={apiToken}
                 onChange={(e) => setApiToken(e.target.value)}
-                placeholder={site.cms_api_token_set ? "•••••••• (leave blank to keep)" : ""}
+                placeholder={site.cms_api_token_set ? (editing ? "•••••••• (leave blank to keep)" : "••••••••") : ""}
+                disabled={!editing}
               />
             </div>
             <div>
               <Label htmlFor="cms-collection-id">Collection ID</Label>
-              <Input id="cms-collection-id" value={collectionId} onChange={(e) => setCollectionId(e.target.value)} />
+              <Input id="cms-collection-id" value={collectionId} onChange={(e) => setCollectionId(e.target.value)} disabled={!editing} />
             </div>
           </div>
         )}
-        <Button className="mt-4" size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-          {saveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          Save
-        </Button>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {editing ? (
+            <>
+              <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || !dirty}>
+                {saveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Save
+              </Button>
+              {hasSaved && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={saveMutation.isPending}
+                  onClick={() => {
+                    setCmsBaseUrl(site.cms_base_url ?? "");
+                    setUsername(site.cms_username ?? "");
+                    setCollectionId(site.cms_collection_id ?? "");
+                    setAppPassword("");
+                    setApiToken("");
+                    setEditing(false);
+                  }}
+                >
+                  Cancel
+                </Button>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="flex items-center gap-1.5 text-theme-sm font-medium text-success-600 dark:text-success-400">
+                <CheckCircle2 className="h-4 w-4" />
+                Saved
+              </span>
+              <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+                Change
+              </Button>
+            </>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
@@ -1923,6 +2032,11 @@ function SheetsConnectCard({ kind, title, description }: { kind: SheetsKind; tit
   const queryClient = useQueryClient();
   const [shareEmail, setShareEmail] = useState("");
   const [sheetUrl, setSheetUrl] = useState("");
+  // A connected sheet locks (shown read-only with a "Connected" mark); Change
+  // reopens the box to paste a different one.
+  const [changing, setChanging] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [showShare, setShowShare] = useState(false);
 
   // A useQuery, not a mutation fired only on button click — the
   // connection is a real, server-persisted setting (app_settings), so it
@@ -1936,6 +2050,8 @@ function SheetsConnectCard({ kind, title, description }: { kind: SheetsKind; tit
     retry: false,
   });
   const sheets = sheetsQuery.data ?? null;
+  const connected = !!sheets?.configured;
+  const locked = connected && !changing;
 
   const refreshSheetsStatus = async () => {
     const result = await queryClient.fetchQuery({ queryKey: ["seo", "sheets-status", kind], queryFn: () => getSheetsStatus(kind) });
@@ -1960,66 +2076,125 @@ function SheetsConnectCard({ kind, title, description }: { kind: SheetsKind; tit
     mutationFn: () => adoptSheets(sheetUrl.trim(), kind),
     onSuccess: (data) => {
       queryClient.setQueryData(["seo", "sheets-status", kind], data);
-      if (data.configured) toast.success("Connected — tabs and headers set up.");
-      else toast.error(data.error || "Could not connect to that sheet.");
+      if (data.configured) {
+        toast.success("Connected — tabs and headers set up.");
+        setSheetUrl("");
+        setChanging(false);
+      } else toast.error(data.error || "Could not connect to that sheet.");
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Could not connect to that sheet.")),
   });
 
+  const inputCls =
+    "h-8 w-full min-w-0 rounded-md border border-gray-300 bg-transparent px-2.5 text-xs text-gray-800 placeholder:text-gray-400 focus:border-brand-300 focus:outline-hidden focus:ring-2 focus:ring-brand-500/20 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:disabled:bg-gray-800";
+  const linkBtnCls =
+    "text-xs font-medium text-brand-600 hover:underline disabled:opacity-50 dark:text-brand-400";
+
   return (
-    <Card>
-      <CardContent className="p-6">
-        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
-          <History className="h-4 w-4 text-brand-500" />
-          {title}
-        </h2>
-        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">{description}</p>
-        <div className="mb-3 flex flex-wrap gap-2">
-          <Input
-            value={sheetUrl}
-            onChange={(e) => setSheetUrl(e.target.value)}
-            placeholder="Paste your Google Sheet URL or ID"
-            className="max-w-sm"
-          />
-          <Button size="sm" onClick={() => adoptMutation.mutate()} disabled={adoptMutation.isPending || !sheetUrl.trim()}>
-            {adoptMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            Connect
-          </Button>
+    <Card className="flex flex-col">
+      <CardContent className="flex flex-1 flex-col gap-2.5 p-4">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-gray-900 dark:text-white">
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-brand-50 text-brand-500 dark:bg-brand-500/15">
+              <History className="h-3.5 w-3.5" />
+            </span>
+            <span className="truncate">{title}</span>
+          </h2>
+          {connected ? (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-success-50 px-2 py-0.5 text-[11px] font-medium text-success-700 dark:bg-success-500/15 dark:text-success-400">
+              <CheckCircle2 className="h-3 w-3" />
+              Connected
+            </span>
+          ) : (
+            <span className="inline-flex shrink-0 items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-500 dark:bg-white/5 dark:text-gray-400">
+              Not connected
+            </span>
+          )}
         </div>
-        <Button size="sm" variant="outline" onClick={() => refreshSheetsStatus()} disabled={sheetsQuery.isFetching}>
-          {sheetsQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-          {sheets?.configured ? "Refresh" : "Check status"}
-        </Button>
-        {sheets?.configured && sheets.url && (
-          <a
-            href={sheets.url}
-            target="_blank"
-            rel="noreferrer"
-            className="ml-2 text-theme-sm text-brand-600 underline dark:text-brand-400"
-          >
-            Open spreadsheet
-          </a>
-        )}
-        {sheets && !sheets.configured && (
-          <p className="mt-2 text-theme-xs text-error-500">{sheets.error}</p>
-        )}
-        <div className="mt-3 flex flex-wrap gap-2">
-          <Input
-            value={shareEmail}
-            onChange={(e) => setShareEmail(e.target.value)}
-            placeholder="Share with a different Google account email"
-            className="max-w-xs"
-          />
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => shareMutation.mutate()}
-            disabled={shareMutation.isPending || !shareEmail.trim()}
-          >
-            {shareMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            Share
-          </Button>
+
+        <div>
+          <p className={`text-xs leading-relaxed text-gray-500 dark:text-gray-400 ${showHelp ? "" : "line-clamp-2"}`}>
+            {description}
+          </p>
+          <button type="button" onClick={() => setShowHelp((v) => !v)} className={`${linkBtnCls} mt-0.5`}>
+            {showHelp ? "Show less" : "Setup instructions"}
+          </button>
         </div>
+
+        {locked ? (
+          <div className="flex items-center gap-2">
+            <input value={sheets?.url ?? "Connected sheet"} disabled readOnly className={inputCls} />
+            <Button size="sm" variant="outline" onClick={() => setChanging(true)}>
+              Change
+            </Button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <input
+              value={sheetUrl}
+              onChange={(e) => setSheetUrl(e.target.value)}
+              placeholder={connected ? "Paste the new Google Sheet URL or ID" : "Paste Google Sheet URL or ID"}
+              className={inputCls}
+            />
+            <Button size="sm" onClick={() => adoptMutation.mutate()} disabled={adoptMutation.isPending || !sheetUrl.trim()}>
+              {adoptMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Connect
+            </Button>
+            {connected && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={adoptMutation.isPending}
+                onClick={() => {
+                  setChanging(false);
+                  setSheetUrl("");
+                }}
+              >
+                Cancel
+              </Button>
+            )}
+          </div>
+        )}
+
+        {sheets && !sheets.configured && sheets.error && (
+          <p className="line-clamp-3 rounded-md bg-error-50 px-2.5 py-1.5 text-[11px] leading-snug text-error-600 dark:bg-error-500/10 dark:text-error-400" title={sheets.error}>
+            {sheets.error}
+          </p>
+        )}
+
+        <div className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-gray-100 pt-2.5 dark:border-gray-800">
+          <button type="button" onClick={() => refreshSheetsStatus()} disabled={sheetsQuery.isFetching} className={linkBtnCls}>
+            {sheetsQuery.isFetching ? "Checking…" : sheets?.configured ? "Refresh" : "Check status"}
+          </button>
+          {sheets?.configured && sheets.url && (
+            <a href={sheets.url} target="_blank" rel="noreferrer" className={linkBtnCls}>
+              Open spreadsheet
+            </a>
+          )}
+          <button type="button" onClick={() => setShowShare((v) => !v)} className={linkBtnCls}>
+            {showShare ? "Hide sharing" : "Share…"}
+          </button>
+        </div>
+
+        {showShare && (
+          <div className="flex items-center gap-2">
+            <input
+              value={shareEmail}
+              onChange={(e) => setShareEmail(e.target.value)}
+              placeholder="Google account email"
+              className={inputCls}
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => shareMutation.mutate()}
+              disabled={shareMutation.isPending || !shareEmail.trim()}
+            >
+              {shareMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Share
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -2216,10 +2391,23 @@ function ReportingPanel({ siteId }: { siteId: number }) {
             </Button>
           </div>
           <ReportMetricPicker pick={metricPick} idPrefix="rollup-metric" />
+          {(rollupMutation.isPending || rollupEmailMutation.isPending) && (
+            <div className="mb-3">
+              <ProgressBar />
+              <p className="mt-1.5 text-theme-xs text-gray-400">
+                Writing the summary locally with Ollama — usually one to two minutes. You can switch tabs; it keeps running.
+              </p>
+            </div>
+          )}
           {rollupsQuery.isLoading ? (
             <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
           ) : shown ? (
             <>
+              {shown.narrative.includes("AI summary unavailable") && (
+                <p className="mb-2 rounded-md bg-warning-50 px-3 py-2 text-theme-xs text-warning-700 dark:bg-warning-500/10 dark:text-warning-400">
+                  The AI didn't finish this summary in time, so only the daily notes are shown. Press "Generate now" to try again.
+                </p>
+              )}
               <p className="whitespace-pre-line text-theme-sm text-gray-700 dark:text-gray-300">{shown.narrative}</p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 {shown.emailed_at && <Badge variant="success">Emailed</Badge>}
@@ -2252,7 +2440,6 @@ function OverviewTab({
   site,
   serverJumpPath,
   onServerJumpHandled,
-  onEditStaticFile,
 }: {
   site: SeoSite;
   // Set by the parent SeoPage when "Edit this page"/"Edit this file"
@@ -2262,29 +2449,15 @@ function OverviewTab({
   // find it.
   serverJumpPath: string | null;
   onServerJumpHandled: () => void;
-  onEditStaticFile: (path: string) => void;
 }) {
   const siteId = site.id;
   const queryClient = useQueryClient();
   const toast = useToast();
-  const [issueFilter, setIssueFilter] = useState<IssueFilter>("pending");
   const [digestRunDate, setDigestRunDate] = useState("");
   const [digestEmailAddr, setDigestEmailAddr] = useState("");
 
   const digestsQuery = useQuery({ queryKey: ["seo", "digests", siteId], queryFn: () => getSeoDigests(siteId) });
   const latestDigest = digestsQuery.data?.[0] ?? null;
-
-  const issuesQuery = useQuery({
-    queryKey: ["seo", "issues", siteId, issueFilter],
-    queryFn: () => getTechnicalIssues(siteId, issueFilter === "all" ? undefined : issueFilter),
-  });
-  const issues = issuesQuery.data ?? [];
-
-  const pendingCountQuery = useQuery({
-    queryKey: ["seo", "issues", siteId, "pending-count"],
-    queryFn: () => getTechnicalIssues(siteId, "pending"),
-  });
-  const pendingCount = pendingCountQuery.data?.length ?? 0;
 
   const pagespeedQuery = useQuery({
     queryKey: ["seo", "pagespeed", siteId, "latest"],
@@ -2315,18 +2488,6 @@ function OverviewTab({
       : todaysFailures > 0
       ? `${todaysFailures} of ${todaysJobs.length} step(s) failed`
       : `${todaysJobs.length} step(s) completed`;
-
-  const auditMutation = useMutation({
-    mutationFn: () => runTechnicalAudit(siteId),
-    onSuccess: (found) => {
-      toast.success(`Audit complete: ${found.length} issue(s) found.`);
-      queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
-    },
-    onError: (err) => {
-      const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
-      toast.error(detail || "Audit failed — see server logs.");
-    },
-  });
 
   const digestMetricPick = useReportMetrics();
   const digestMutation = useMutation({
@@ -2372,6 +2533,179 @@ function OverviewTab({
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
+
+  return (
+    <>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Latest PageSpeed Score"
+          value={latestScore != null ? String(Math.round(latestScore)) : "—"}
+          icon={Gauge}
+          tone={latestScore == null ? "neutral" : latestScore >= 90 ? "success" : latestScore >= 50 ? "warning" : "error"}
+          hint={latestScore == null ? "No check yet" : "Mobile, most recent"}
+          loading={pagespeedQuery.isLoading}
+        />
+        <StatCard
+          label="Last Digest"
+          value={latestDigest ? latestDigest.run_date : "—"}
+          icon={Sparkles}
+          tone="neutral"
+          hint={latestDigest ? (latestDigest.slack_delivered ? "Sent to Slack" : "Not sent to Slack") : "None generated yet"}
+          loading={digestsQuery.isLoading}
+        />
+        <StatCard
+          label="Registered Since"
+          value={site.created_at ? site.created_at.slice(0, 10) : "—"}
+          icon={Globe}
+          tone="neutral"
+          hint={site.cms_type === "wordpress" ? "WordPress" : "Webflow"}
+        />
+      </div>
+
+      <div className="flex flex-col gap-3 sm:flex-row">
+        <StatusChip
+          label="Daily automation"
+          value={automationValue}
+          icon={History}
+          tone={automationTone}
+          hint="Runs once a day for every active site — technical audit, GSC, GA4, PageSpeed, digest"
+          loading={jobsQuery.isLoading}
+        />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Button variant="outline" onClick={() => digestMutation.mutate()} disabled={digestMutation.isPending}>
+          {digestMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+          Generate Digest
+        </Button>
+        <Input
+          type="date"
+          value={digestRunDate}
+          onChange={(e) => setDigestRunDate(e.target.value)}
+          className="max-w-40"
+          title="Backfill a specific past day instead of today"
+        />
+      </div>
+      <ReportMetricPicker pick={digestMetricPick} idPrefix="digest-metric" />
+      {digestMutation.isPending && (
+        <div>
+          <ProgressBar />
+          <p className="mt-1.5 text-theme-xs text-gray-400">Writing today's summary locally with Ollama…</p>
+        </div>
+      )}
+
+      <Card>
+        <CardContent className="p-6">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+              <Sparkles className="h-4 w-4 text-brand-500" />
+              Latest Digest
+            </h2>
+            {latestDigest && (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-theme-xs text-gray-400">{latestDigest.run_date}</span>
+                <Badge variant={latestDigest.slack_delivered ? "success" : "outline"}>
+                  {latestDigest.slack_delivered ? "Sent to Slack" : "Not sent to Slack"}
+                </Badge>
+                {latestDigest.emailed_at && <Badge variant="success">Emailed</Badge>}
+                <Button size="sm" variant="outline" onClick={downloadDigest}>
+                  <Download className="h-3.5 w-3.5" />
+                  Download
+                </Button>
+                <Input
+                  value={digestEmailAddr}
+                  onChange={(e) => setDigestEmailAddr(e.target.value)}
+                  placeholder="Email address (optional)"
+                  className="max-w-52"
+                />
+                <Button size="sm" variant="outline" onClick={() => digestEmailMutation.mutate()} disabled={digestEmailMutation.isPending}>
+                  {digestEmailMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
+                  Email
+                </Button>
+              </div>
+            )}
+          </div>
+          {digestsQuery.isLoading ? (
+            <div className="flex h-20 items-center justify-center text-gray-400">
+              <Loader2 className="h-5 w-5 animate-spin" />
+            </div>
+          ) : latestDigest ? (
+            <p className="whitespace-pre-line text-theme-sm text-gray-700 dark:text-gray-300">
+              {latestDigest.narrative}
+            </p>
+          ) : (
+            <p className="text-theme-sm text-gray-400">
+              No digest generated yet. Click "Generate Digest" to create today's.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <OverviewExportBar siteId={siteId} />
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <SearchConsolePanel siteId={siteId} />
+        <AnalyticsPanel siteId={siteId} />
+        <PageCtrPanel siteId={siteId} />
+        <RankAlertsPanel siteId={siteId} />
+      </div>
+
+      <MetaRewriteQueuePanel siteId={siteId} />
+
+      <ReportingPanel siteId={siteId} />
+
+      <WebpBulkConvertCard siteId={siteId} />
+
+      <JobHistoryPanel jobs={jobs} loading={jobsQuery.isLoading} />
+
+      <GoogleConfigCard site={site} />
+      <CmsConfigCard site={site} />
+      <ServerAccessConfigCard site={site} />
+      <ServerFileBrowser site={site} jumpToPath={serverJumpPath} onJumpHandled={onServerJumpHandled} />
+    </>
+  );
+}
+
+// Everything about the technical audit, in its own tab: run it, see the
+// findings, and work through them (approve / reject / generate an AI fix /
+// apply it / mark it fixed). It used to sit in the middle of Overview.
+function TechnicalAuditTab({
+  site,
+  onEditStaticFile,
+}: {
+  site: SeoSite;
+  // "Edit this page" on an issue that resolves to a static file hands it to
+  // the parent, which switches to Overview where the Server Files browser is.
+  onEditStaticFile: (path: string) => void;
+}) {
+  const siteId = site.id;
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  const [issueFilter, setIssueFilter] = useState<IssueFilter>("pending");
+
+  const issuesQuery = useQuery({
+    queryKey: ["seo", "issues", siteId, issueFilter],
+    queryFn: () => getTechnicalIssues(siteId, issueFilter === "all" ? undefined : issueFilter),
+  });
+  const issues = issuesQuery.data ?? [];
+
+  const pendingCountQuery = useQuery({
+    queryKey: ["seo", "issues", siteId, "pending-count"],
+    queryFn: () => getTechnicalIssues(siteId, "pending"),
+  });
+  const pendingCount = pendingCountQuery.data?.length ?? 0;
+
+  const auditMutation = useMutation({
+    mutationFn: () => runTechnicalAudit(siteId),
+    onSuccess: (found) => {
+      toast.success(`Audit complete: ${found.length} issue(s) found.`);
+      queryClient.invalidateQueries({ queryKey: ["seo", "issues", siteId] });
+    },
+    onError: (err) => {
+      const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
+      toast.error(detail || "Audit failed — see server logs.");
+    },
+  });
 
   const approveMutation = useMutation({
     mutationFn: (issueId: number) => approveTechnicalIssue(issueId),
@@ -2466,136 +2800,29 @@ function OverviewTab({
           hint={pendingCount === 0 ? "All clear" : "Awaiting review"}
           loading={pendingCountQuery.isLoading}
         />
-        <StatCard
-          label="Latest PageSpeed Score"
-          value={latestScore != null ? String(Math.round(latestScore)) : "—"}
-          icon={Gauge}
-          tone={latestScore == null ? "neutral" : latestScore >= 90 ? "success" : latestScore >= 50 ? "warning" : "error"}
-          hint={latestScore == null ? "No check yet" : "Mobile, most recent"}
-          loading={pagespeedQuery.isLoading}
-        />
-        <StatCard
-          label="Last Digest"
-          value={latestDigest ? latestDigest.run_date : "—"}
-          icon={Sparkles}
-          tone="neutral"
-          hint={latestDigest ? (latestDigest.slack_delivered ? "Sent to Slack" : "Not sent to Slack") : "None generated yet"}
-          loading={digestsQuery.isLoading}
-        />
-        <StatCard
-          label="Registered Since"
-          value={site.created_at ? site.created_at.slice(0, 10) : "—"}
-          icon={Globe}
-          tone="neutral"
-          hint={site.cms_type === "wordpress" ? "WordPress" : "Webflow"}
-        />
       </div>
 
-      <div className="flex flex-col gap-3 sm:flex-row">
-        <StatusChip
-          label="Daily automation"
-          value={automationValue}
-          icon={History}
-          tone={automationTone}
-          hint="Runs once a day for every active site — technical audit, GSC, GA4, PageSpeed, digest"
-          loading={jobsQuery.isLoading}
-        />
-      </div>
+      <p className="text-theme-sm text-gray-500 dark:text-gray-400">
+        Crawls the site and lists technical SEO problems — missing titles, broken links, duplicate tags and more — for
+        you to approve, fix or dismiss. It also runs automatically every day.
+      </p>
 
       <div className="flex flex-wrap items-center gap-3">
         <Button onClick={() => auditMutation.mutate()} disabled={auditMutation.isPending}>
           {auditMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
           Run Technical Audit
         </Button>
-        <Button variant="outline" onClick={() => digestMutation.mutate()} disabled={digestMutation.isPending}>
-          {digestMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-          Generate Digest
-        </Button>
-        <Input
-          type="date"
-          value={digestRunDate}
-          onChange={(e) => setDigestRunDate(e.target.value)}
-          className="max-w-40"
-          title="Backfill a specific past day instead of today"
-        />
       </div>
-      <ReportMetricPicker pick={digestMetricPick} idPrefix="digest-metric" />
-      {(auditMutation.isPending || digestMutation.isPending) && (
+      {auditMutation.isPending && (
         <div>
           <ProgressBar />
           <p className="mt-1.5 text-theme-xs text-gray-400">
-            {auditMutation.isPending
-              ? "Crawling the site and checking every page — this can take a couple of minutes for a large site."
-              : "Writing today's summary locally with Ollama…"}
+            Crawling the site and checking every page — this can take a couple of minutes for a large site.
           </p>
         </div>
       )}
 
       <PageTagAuditCard siteId={siteId} />
-
-      <Card>
-        <CardContent className="p-6">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
-              <Sparkles className="h-4 w-4 text-brand-500" />
-              Latest Digest
-            </h2>
-            {latestDigest && (
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-theme-xs text-gray-400">{latestDigest.run_date}</span>
-                <Badge variant={latestDigest.slack_delivered ? "success" : "outline"}>
-                  {latestDigest.slack_delivered ? "Sent to Slack" : "Not sent to Slack"}
-                </Badge>
-                {latestDigest.emailed_at && <Badge variant="success">Emailed</Badge>}
-                <Button size="sm" variant="outline" onClick={downloadDigest}>
-                  <Download className="h-3.5 w-3.5" />
-                  Download
-                </Button>
-                <Input
-                  value={digestEmailAddr}
-                  onChange={(e) => setDigestEmailAddr(e.target.value)}
-                  placeholder="Email address (optional)"
-                  className="max-w-52"
-                />
-                <Button size="sm" variant="outline" onClick={() => digestEmailMutation.mutate()} disabled={digestEmailMutation.isPending}>
-                  {digestEmailMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
-                  Email
-                </Button>
-              </div>
-            )}
-          </div>
-          {digestsQuery.isLoading ? (
-            <div className="flex h-20 items-center justify-center text-gray-400">
-              <Loader2 className="h-5 w-5 animate-spin" />
-            </div>
-          ) : latestDigest ? (
-            <p className="whitespace-pre-line text-theme-sm text-gray-700 dark:text-gray-300">
-              {latestDigest.narrative}
-            </p>
-          ) : (
-            <p className="text-theme-sm text-gray-400">
-              No digest generated yet. Click "Generate Digest" to create today's.
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      <OverviewExportBar siteId={siteId} />
-
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <SearchConsolePanel siteId={siteId} />
-        <AnalyticsPanel siteId={siteId} />
-        <PageCtrPanel siteId={siteId} />
-        <RankAlertsPanel siteId={siteId} />
-      </div>
-
-      <MetaRewriteQueuePanel siteId={siteId} />
-
-      <ReportingPanel siteId={siteId} />
-
-      <WebpBulkConvertCard siteId={siteId} />
-
-      <JobHistoryPanel jobs={jobs} loading={jobsQuery.isLoading} />
 
       <Card>
         <CardContent className="p-6">
@@ -2800,10 +3027,6 @@ function OverviewTab({
         </CardContent>
       </Card>
 
-      <GoogleConfigCard site={site} />
-      <CmsConfigCard site={site} />
-      <ServerAccessConfigCard site={site} />
-      <ServerFileBrowser site={site} jumpToPath={serverJumpPath} onJumpHandled={onServerJumpHandled} />
     </>
   );
 }
@@ -3024,14 +3247,21 @@ function OverviewExportBar({ siteId }: { siteId: number }) {
   );
 }
 
+// The four Overview cards (queries / traffic pages / CTR by page / rank
+// alerts) share one fixed height so the 2x2 grid stays even regardless of
+// how many rows each has; the row list inside scrolls when it overflows.
+const OVERVIEW_CARD_CLASS = "flex h-[21rem] flex-col";
+const OVERVIEW_CARD_CONTENT_CLASS = "flex min-h-0 flex-1 flex-col p-4";
+const OVERVIEW_CARD_LIST_CLASS = "thin-scrollbar min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-2";
+
 function SearchConsolePanel({ siteId }: { siteId: number }) {
   const query = useQuery({ queryKey: ["seo", "gsc", siteId], queryFn: () => getGscQueries(siteId, 8) });
   const rows = query.data ?? [];
 
   return (
-    <Card>
-      <CardContent className="p-6">
-        <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+    <Card className={OVERVIEW_CARD_CLASS}>
+      <CardContent className={OVERVIEW_CARD_CONTENT_CLASS}>
+        <h2 className="mb-4 flex shrink-0 items-center gap-2 text-base font-semibold text-gray-900 dark:text-white">
           <Search className="h-4 w-4 text-brand-500" />
           Top Search Queries
         </h2>
@@ -3040,15 +3270,15 @@ function SearchConsolePanel({ siteId }: { siteId: number }) {
             <Loader2 className="h-5 w-5 animate-spin" />
           </div>
         ) : rows.length === 0 ? (
-          <p className="text-theme-sm text-gray-400">
+          <p className="text-theme-xs text-gray-400">
             No Search Console data yet — the daily pull hasn't found any queries for this property.
           </p>
         ) : (
-          <div className="space-y-2">
+          <div className={OVERVIEW_CARD_LIST_CLASS}>
             {rows.map((row: GscQueryRow) => (
-              <div key={row.id} className="flex items-center justify-between gap-3 text-theme-sm">
+              <div key={row.id} className="flex items-center justify-between gap-3 text-theme-xs">
                 <span className="truncate text-gray-700 dark:text-gray-300">{row.query}</span>
-                <span className="shrink-0 text-theme-xs text-gray-400">
+                <span className="shrink-0 text-[11px] text-gray-400">
                   {row.clicks} clicks · {row.impressions} impr. ·{" "}
                   {row.ctr != null ? `${(row.ctr * 100).toFixed(1)}% CTR` : "—"} · pos{" "}
                   {row.position != null ? row.position.toFixed(1) : "—"}
@@ -3067,9 +3297,9 @@ function AnalyticsPanel({ siteId }: { siteId: number }) {
   const rows = query.data ?? [];
 
   return (
-    <Card>
-      <CardContent className="p-6">
-        <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+    <Card className={OVERVIEW_CARD_CLASS}>
+      <CardContent className={OVERVIEW_CARD_CONTENT_CLASS}>
+        <h2 className="mb-4 flex shrink-0 items-center gap-2 text-base font-semibold text-gray-900 dark:text-white">
           <BarChart3 className="h-4 w-4 text-brand-500" />
           Top Traffic Pages
         </h2>
@@ -3078,15 +3308,15 @@ function AnalyticsPanel({ siteId }: { siteId: number }) {
             <Loader2 className="h-5 w-5 animate-spin" />
           </div>
         ) : rows.length === 0 ? (
-          <p className="text-theme-sm text-gray-400">
+          <p className="text-theme-xs text-gray-400">
             No Analytics data yet — the daily pull hasn't found any sessions for this property.
           </p>
         ) : (
-          <div className="space-y-2">
+          <div className={OVERVIEW_CARD_LIST_CLASS}>
             {rows.map((row: Ga4PageRow) => (
-              <div key={row.id} className="flex items-center justify-between gap-3 text-theme-sm">
+              <div key={row.id} className="flex items-center justify-between gap-3 text-theme-xs">
                 <span className="truncate text-gray-700 dark:text-gray-300">{row.page_path}</span>
-                <span className="shrink-0 text-theme-xs text-gray-400">{row.sessions} sessions</span>
+                <span className="shrink-0 text-[11px] text-gray-400">{row.sessions} sessions</span>
               </div>
             ))}
           </div>
@@ -3112,10 +3342,10 @@ function PageCtrPanel({ siteId }: { siteId: number }) {
   });
 
   return (
-    <Card>
-      <CardContent className="p-6">
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+    <Card className={OVERVIEW_CARD_CLASS}>
+      <CardContent className={OVERVIEW_CARD_CONTENT_CLASS}>
+        <div className="mb-4 flex shrink-0 items-center justify-between gap-3">
+          <h2 className="flex items-center gap-2 text-base font-semibold text-gray-900 dark:text-white">
             <BarChart3 className="h-4 w-4 text-brand-500" />
             CTR by Page
           </h2>
@@ -3129,15 +3359,15 @@ function PageCtrPanel({ siteId }: { siteId: number }) {
             <Loader2 className="h-5 w-5 animate-spin" />
           </div>
         ) : rows.length === 0 ? (
-          <p className="text-theme-sm text-gray-400">
+          <p className="text-theme-xs text-gray-400">
             No page-level Search Console data yet — click "Pull now" or wait for the daily automated cycle.
           </p>
         ) : (
-          <div className="space-y-2">
+          <div className={OVERVIEW_CARD_LIST_CLASS}>
             {rows.map((row: GscPageRow) => (
-              <div key={row.id} className="flex items-center justify-between gap-3 text-theme-sm">
+              <div key={row.id} className="flex items-center justify-between gap-3 text-theme-xs">
                 <span className="truncate text-gray-700 dark:text-gray-300">{row.page}</span>
-                <span className="shrink-0 text-theme-xs text-gray-400">
+                <span className="shrink-0 text-[11px] text-gray-400">
                   {row.clicks} clicks · {row.impressions} impr. ·{" "}
                   {row.ctr != null ? `${(row.ctr * 100).toFixed(1)}% CTR` : "—"} · pos{" "}
                   {row.position != null ? row.position.toFixed(1) : "—"}
@@ -3157,13 +3387,13 @@ function RankAlertsPanel({ siteId }: { siteId: number }) {
   const drops = changes.filter((c) => c.previous_position <= 10 && c.current_position > 10);
 
   return (
-    <Card>
-      <CardContent className="p-6">
-        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+    <Card className={OVERVIEW_CARD_CLASS}>
+      <CardContent className={OVERVIEW_CARD_CONTENT_CLASS}>
+        <h2 className="mb-1 flex shrink-0 items-center gap-2 text-base font-semibold text-gray-900 dark:text-white">
           <TrendingDown className="h-4 w-4 text-brand-500" />
           Rank Alerts
         </h2>
-        <p className="mb-4 text-theme-sm text-gray-500 dark:text-gray-400">
+        <p className="mb-4 shrink-0 text-theme-xs text-gray-500 dark:text-gray-400">
           Position changes vs. the last Search Console pull.
         </p>
         {query.isLoading ? (
@@ -3171,17 +3401,17 @@ function RankAlertsPanel({ siteId }: { siteId: number }) {
             <Loader2 className="h-5 w-5 animate-spin" />
           </div>
         ) : changes.length === 0 ? (
-          <p className="text-theme-sm text-gray-400">
+          <p className="text-theme-xs text-gray-400">
             Not enough data yet — needs at least two days of pulled Search Console data to compare.
           </p>
         ) : (
-          <div className="space-y-2">
+          <div className={OVERVIEW_CARD_LIST_CLASS}>
             {drops.length > 0 && (
               <div className="mb-3 space-y-2">
                 {drops.map((c: RankChange) => (
                   <div
                     key={`drop-${c.query}`}
-                    className="flex items-center justify-between gap-3 rounded-lg border border-error-200 bg-error-50 p-3 text-theme-sm dark:border-error-500/30 dark:bg-error-500/10"
+                    className="flex items-center justify-between gap-3 rounded-lg border border-error-200 bg-error-50 p-3 text-theme-xs dark:border-error-500/30 dark:bg-error-500/10"
                   >
                     <span className="truncate text-gray-800 dark:text-gray-200">{c.query}</span>
                     <Badge variant="destructive">
@@ -3194,9 +3424,9 @@ function RankAlertsPanel({ siteId }: { siteId: number }) {
             {changes
               .filter((c) => !drops.includes(c))
               .map((c: RankChange) => (
-                <div key={c.query} className="flex items-center justify-between gap-3 text-theme-sm">
+                <div key={c.query} className="flex items-center justify-between gap-3 text-theme-xs">
                   <span className="truncate text-gray-700 dark:text-gray-300">{c.query}</span>
-                  <span className="shrink-0 flex items-center gap-1 text-theme-xs text-gray-400">
+                  <span className="shrink-0 flex items-center gap-1 text-[11px] text-gray-400">
                     {c.delta < 0 ? (
                       <TrendingUp className="h-3.5 w-3.5 text-success-500" />
                     ) : c.delta > 0 ? (
@@ -3287,13 +3517,13 @@ function MetaRewriteQueuePanel({ siteId }: { siteId: number }) {
   });
 
   return (
-    <Card>
-      <CardContent className="p-6">
-        <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+    <Card className="flex max-h-[28rem] flex-col">
+      <CardContent className="flex min-h-0 flex-1 flex-col p-4">
+        <h2 className="mb-1 flex shrink-0 items-center gap-2 text-base font-semibold text-gray-900 dark:text-white">
           <Sparkles className="h-4 w-4 text-brand-500" />
           Meta Rewrite Opportunities
         </h2>
-        <p className="mb-4 text-theme-sm text-gray-500 dark:text-gray-400">
+        <p className="mb-3 shrink-0 text-theme-xs text-gray-500 dark:text-gray-400">
           Pages with real search demand (high impressions) but a snippet that isn't earning clicks (low CTR) —
           AI-drafted rewrites, never auto-published. Review and apply the ones you approve manually.
         </p>
@@ -3307,7 +3537,7 @@ function MetaRewriteQueuePanel({ siteId }: { siteId: number }) {
             during the daily cycle.
           </p>
         ) : (
-          <div className="space-y-3">
+          <div className="thin-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto pr-2">
             {items.map((item: MetaRewrite) => (
               <div key={item.id} className="rounded-lg border border-gray-100 p-4 dark:border-gray-800">
                 <div className="flex flex-wrap items-center gap-2">
@@ -3399,6 +3629,14 @@ function MetaRewriteQueuePanel({ siteId }: { siteId: number }) {
     </Card>
   );
 }
+
+// Per-platform maximum post length — over this the platform rejects the post.
+const SOCIAL_CHAR_LIMITS: Record<SocialPlatform, number> = {
+  linkedin: 3000,
+  twitter: 280,
+  instagram: 2200,
+  facebook: 63206,
+};
 
 function SocialTab({ siteId }: { siteId: number }) {
   const queryClient = useQueryClient();
@@ -3499,8 +3737,40 @@ function SocialTab({ siteId }: { siteId: number }) {
 
   const [editingPostId, setEditingPostId] = useState<number | null>(null);
   const [editedContent, setEditedContent] = useState("");
+  const [editedPlatform, setEditedPlatform] = useState<SocialPlatform>("linkedin");
+  const [editedSourceUrl, setEditedSourceUrl] = useState("");
+  const [editedImageUrl, setEditedImageUrl] = useState("");
+
+  // Create (by hand, no AI) — the "C" of the tab's create/read/update/delete.
+  const [adding, setAdding] = useState(false);
+  const [newPlatform, setNewPlatform] = useState<SocialPlatform>("linkedin");
+  const [newContent, setNewContent] = useState("");
+  const [newSourceUrl, setNewSourceUrl] = useState("");
+  const [newImageUrl, setNewImageUrl] = useState("");
+  const createMutation = useMutation({
+    mutationFn: () =>
+      createSocialPost({
+        site_id: siteId,
+        platform: newPlatform,
+        content: newContent,
+        source_url: newSourceUrl.trim() || undefined,
+        image_url: newImageUrl.trim() || undefined,
+        facebook_account_id: newPlatform === "facebook" && facebookAccountId !== "" ? facebookAccountId : null,
+      }),
+    onSuccess: () => {
+      toast.success("Draft post added.");
+      setAdding(false);
+      setNewContent("");
+      setNewSourceUrl("");
+      setNewImageUrl("");
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't add this post.")),
+  });
+
   const updateMutation = useMutation({
-    mutationFn: ({ id, content }: { id: number; content: string }) => updateSocialPost(id, content),
+    mutationFn: ({ id, ...fields }: { id: number; content: string; platform: SocialPlatform; source_url: string; image_url: string }) =>
+      updateSocialPost(id, fields),
     onSuccess: () => {
       toast.success("Post updated.");
       setEditingPostId(null);
@@ -4077,6 +4347,10 @@ function SocialTab({ siteId }: { siteId: number }) {
                 </label>
               )}
             </div>
+            <Button size="sm" variant="outline" onClick={() => setAdding((v) => !v)}>
+              <Plus className="h-3.5 w-3.5" />
+              Add post
+            </Button>
             {selectedPostIds.length > 0 && (
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-theme-xs text-gray-400">{selectedPostIds.length} selected</span>
@@ -4112,12 +4386,59 @@ function SocialTab({ siteId }: { siteId: number }) {
               </div>
             )}
           </div>
+          {adding && (
+            <div className="mb-3 space-y-2 rounded-lg border border-brand-200 bg-brand-50/30 p-4 dark:border-brand-500/30 dark:bg-brand-500/5">
+              <p className="text-theme-sm font-semibold text-gray-900 dark:text-white">New post</p>
+              <textarea
+                value={newContent}
+                onChange={(e) => setNewContent(e.target.value)}
+                rows={5}
+                placeholder="Write the post text…"
+                autoFocus
+                className="w-full rounded-lg border border-gray-300 bg-transparent p-3 text-theme-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+              />
+              <p className={`text-theme-xs ${newContent.length > SOCIAL_CHAR_LIMITS[newPlatform] ? "text-error-500" : "text-gray-400"}`}>
+                {newContent.length} / {SOCIAL_CHAR_LIMITS[newPlatform]} characters
+              </p>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <select
+                  value={newPlatform}
+                  onChange={(e) => setNewPlatform(e.target.value as SocialPlatform)}
+                  className="h-11 w-full rounded-lg border border-gray-300 bg-transparent px-4 text-sm capitalize text-gray-800 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90"
+                >
+                  {ALL_PLATFORMS.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+                <Input value={newSourceUrl} onChange={(e) => setNewSourceUrl(e.target.value)} placeholder="Source page URL (optional)" />
+                <Input value={newImageUrl} onChange={(e) => setNewImageUrl(e.target.value)} placeholder="Image URL (optional)" />
+              </div>
+              <p className="text-theme-xs text-gray-400">
+                After adding, use Generate image (AI) or Upload image on the new post to attach a picture.
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => createMutation.mutate()}
+                  disabled={createMutation.isPending || !newContent.trim() || newContent.length > SOCIAL_CHAR_LIMITS[newPlatform]}
+                >
+                  {createMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                  Add
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAdding(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
           {postsQuery.isLoading ? (
             <div className="flex h-24 items-center justify-center text-gray-400">
               <Loader2 className="h-5 w-5 animate-spin" />
             </div>
           ) : posts.length === 0 ? (
-            <p className="text-theme-sm text-gray-400">No social posts yet — generate some above.</p>
+            !adding && <p className="text-theme-sm text-gray-400">No social posts yet — generate some above, or use Add post.</p>
           ) : (
             <div className="space-y-3">
               {posts.map((post) => (
@@ -4169,11 +4490,45 @@ function SocialTab({ siteId }: { siteId: number }) {
                         rows={6}
                         className="w-full rounded-lg border border-gray-300 bg-transparent p-3 text-theme-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
                       />
+                      <p
+                        className={`text-theme-xs ${
+                          editedContent.length > SOCIAL_CHAR_LIMITS[editedPlatform] ? "text-error-500" : "text-gray-400"
+                        }`}
+                      >
+                        {editedContent.length} / {SOCIAL_CHAR_LIMITS[editedPlatform]} characters
+                      </p>
+                      <div className="grid gap-2 sm:grid-cols-3">
+                        <select
+                          value={editedPlatform}
+                          onChange={(e) => setEditedPlatform(e.target.value as SocialPlatform)}
+                          className="h-11 w-full rounded-lg border border-gray-300 bg-transparent px-4 text-sm capitalize text-gray-800 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90"
+                        >
+                          {ALL_PLATFORMS.map((p) => (
+                            <option key={p} value={p}>
+                              {p}
+                            </option>
+                          ))}
+                        </select>
+                        <Input value={editedSourceUrl} onChange={(e) => setEditedSourceUrl(e.target.value)} placeholder="Source page URL (optional)" />
+                        <Input value={editedImageUrl} onChange={(e) => setEditedImageUrl(e.target.value)} placeholder="Image URL (optional)" />
+                      </div>
                       <div className="flex gap-2">
                         <Button
                           size="sm"
-                          onClick={() => updateMutation.mutate({ id: post.id, content: editedContent })}
-                          disabled={updateMutation.isPending || !editedContent.trim()}
+                          onClick={() =>
+                            updateMutation.mutate({
+                              id: post.id,
+                              content: editedContent,
+                              platform: editedPlatform,
+                              source_url: editedSourceUrl,
+                              image_url: editedImageUrl,
+                            })
+                          }
+                          disabled={
+                            updateMutation.isPending ||
+                            !editedContent.trim() ||
+                            editedContent.length > SOCIAL_CHAR_LIMITS[editedPlatform]
+                          }
                         >
                           {updateMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
                           Save
@@ -4218,6 +4573,9 @@ function SocialTab({ siteId }: { siteId: number }) {
                         onClick={() => {
                           setEditingPostId(post.id);
                           setEditedContent(post.content);
+                          setEditedPlatform(post.platform);
+                          setEditedSourceUrl(post.source_url ?? "");
+                          setEditedImageUrl(post.image_url ?? "");
                         }}
                       >
                         <Pencil className="h-3.5 w-3.5" />
@@ -4277,7 +4635,7 @@ function SocialTab({ siteId }: { siteId: number }) {
                       )}
                     </div>
                   )}
-                  {post.status === "draft" && editingPostId !== post.id && (
+                  {post.status !== "posted" && editingPostId !== post.id && (
                     <div className="mt-2 flex flex-wrap gap-2">
                       <Button
                         size="sm"
@@ -5009,7 +5367,11 @@ function BlogTab({ siteId }: { siteId: number }) {
       }
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
-    onError: (err) => toast.error(serverErrorDetail(err, "Publishing to the CMS failed.")),
+    onError: (err) => {
+      toast.error(serverErrorDetail(err, "Publishing to the CMS failed."));
+      // The server may still have finished (or recorded the real reason) — show the current state.
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
   });
 
   const goLiveMutation = useMutation({
@@ -5639,6 +6001,7 @@ function BlogTab({ siteId }: { siteId: number }) {
                             value={editContent}
                             onChange={setEditContent}
                             headings
+                            copyButton
                             placeholder="Post body…"
                             imageBlocks={{
                               uploadImage: (file) => uploadSiteImage(siteId, file),
@@ -5737,18 +6100,32 @@ function BlogPreviewModal({ post, onClose }: { post: BlogPost; onClose: () => vo
             <XCircle className="h-5 w-5" />
           </button>
         </div>
-        {post.image_url && (
-          <img src={post.image_url} alt="" className="mb-5 h-64 w-full rounded-lg object-cover" />
-        )}
         <h1 className="mb-2 text-2xl font-bold text-gray-900 dark:text-white">{post.title}</h1>
         {post.excerpt && <p className="mb-5 text-base text-gray-500 dark:text-gray-400">{post.excerpt}</p>}
         <div
           className="prose prose-sm max-w-none dark:prose-invert"
-          dangerouslySetInnerHTML={{ __html: sanitizeBlogHtml(post.content) }}
+          dangerouslySetInnerHTML={{ __html: withFeaturedImage(sanitizeBlogHtml(post.content), post.image_url) }}
         />
       </div>
     </div>
   );
+}
+
+// Mirrors what publishing does: the featured image sits centered right after
+// the first paragraph (not above the title). Skipped when the body already has it.
+function withFeaturedImage(html: string, imageUrl: string | null): string {
+  if (!imageUrl || html.includes(imageUrl)) return html;
+  const safe = imageUrl.replace(/"/g, "&quot;");
+  const figure = `<figure style="text-align:center;margin:1.5em auto"><img src="${safe}" alt="" style="display:block;margin:0 auto;max-width:100%;height:auto;border-radius:8px" /></figure>`;
+  const re = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    if (m[1].replace(/<[^>]+>|&nbsp;|\s/g, "")) {
+      const end = m.index + m[0].length;
+      return html.slice(0, end) + figure + html.slice(end);
+    }
+  }
+  return figure + html;
 }
 
 // A score-against-a-limit is a meter, not a badge: the fill carries
@@ -7957,10 +8334,193 @@ function Ga4PerformancePanel({ siteId }: { siteId: number }) {
   );
 }
 
+function SitemapGeneratorCard({ siteId }: { siteId: number }) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const stateQuery = useQuery({
+    queryKey: ["seo", "sitemap-state", siteId],
+    queryFn: () => getSitemapState(siteId),
+    // Poll only while a run is going; otherwise the card is static.
+    refetchInterval: (q) => (q.state.data?.status === "running" ? 2000 : false),
+  });
+  const state = stateQuery.data;
+  const running = state?.status === "running";
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["seo", "sitemap-state", siteId] });
+
+  const generateMutation = useMutation({
+    mutationFn: () => generateSitemap(siteId),
+    onSuccess: () => {
+      toast.success("Sitemap generation started — it keeps running if you switch tabs.");
+      refresh();
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Could not start sitemap generation.")),
+  });
+  const autoMutation = useMutation({
+    mutationFn: (on: boolean) => setSitemapAutoUpdate(siteId, on),
+    onSuccess: refresh,
+    onError: (err) => toast.error(serverErrorDetail(err, "Could not change the auto-update setting.")),
+  });
+  const publishMutation = useMutation({
+    mutationFn: () => publishSitemap(siteId),
+    onSuccess: (s) => {
+      if (s.publish_error) toast.error(s.publish_error);
+      else toast.success("Sitemap uploaded to the server.");
+      refresh();
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Publishing failed.")),
+  });
+
+  const save = async (name?: string) => {
+    try {
+      const blob = await downloadSitemapFile(siteId, name);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name ?? "sitemaps.zip";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast.error(serverErrorDetail(err, "Download failed."));
+    }
+  };
+
+  const c = state?.counts;
+  const stat = (label: string, value: number | undefined) => (
+    <div className="rounded-lg border border-gray-100 px-3 py-2 dark:border-gray-800">
+      <p className="text-theme-xs text-gray-500 dark:text-gray-400">{label}</p>
+      <p className="text-lg font-semibold text-gray-900 dark:text-white">{(value ?? 0).toLocaleString()}</p>
+    </div>
+  );
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+              <Globe className="h-4 w-4 text-brand-500" />
+              Sitemap Generator
+            </h2>
+            <p className="mt-1 max-w-3xl text-theme-sm text-gray-500 dark:text-gray-400">
+              Builds the site&apos;s sitemap.xml automatically — pages, blog posts, categories, tags, images and videos —
+              all in one sitemap.xml, with no 500-URL limit. Only a site beyond Google's 50,000-URL / 50 MB file limit is split into several files under an index.
+            </p>
+          </div>
+          <label className="flex cursor-pointer items-center gap-2 text-theme-sm text-gray-700 dark:text-gray-300">
+            <input
+              type="checkbox"
+              checked={state?.auto_update ?? true}
+              disabled={autoMutation.isPending}
+              onChange={(e) => autoMutation.mutate(e.target.checked)}
+            />
+            Keep it updated automatically
+          </label>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Button size="sm" onClick={() => generateMutation.mutate()} disabled={running || generateMutation.isPending}>
+            {running || generateMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {state?.has_files ? "Regenerate sitemap" : "Generate sitemap"}
+          </Button>
+          {state?.has_files && (
+            <>
+              <Button size="sm" variant="outline" onClick={() => publishMutation.mutate()} disabled={running || publishMutation.isPending}>
+                {publishMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                Upload to server &amp; submit to Google
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => save()}>
+                <Download className="h-3.5 w-3.5" />
+                Download all (.zip)
+              </Button>
+            </>
+          )}
+        </div>
+
+        {running && (
+          <div className="mt-3">
+            <ProgressBar />
+            <p className="mt-1.5 text-theme-xs text-gray-400">
+              {state?.message ?? "Working…"} A large site can take several minutes — you can leave this page.
+            </p>
+          </div>
+        )}
+        {state?.status === "error" && state.error && <p className="mt-3 text-theme-sm text-error-500">{state.error}</p>}
+
+        {state?.has_files && c && (
+          <>
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
+              {stat("Total URLs", state.total)}
+              {stat("Pages", c.pages)}
+              {stat("Blog posts", c.posts)}
+              {stat("Categories", c.categories)}
+              {stat("Tags", c.tags)}
+              {stat("Images", c.images)}
+              {stat("Videos", c.videos)}
+            </div>
+
+            <div className="mt-4 space-y-1.5">
+              {(state.files ?? []).map((f) => (
+                <div key={f.name} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gray-100 px-3 py-2 dark:border-gray-800">
+                  <p className="text-theme-sm font-medium text-gray-900 dark:text-white">
+                    {f.name}
+                    <span className="ml-2 text-theme-xs font-normal text-gray-400">
+                      {f.is_index ? `index of ${f.urls} file(s)` : `${f.urls.toLocaleString()} URL(s)`} · {(f.bytes / 1024).toFixed(1)} KB
+                    </span>
+                  </p>
+                  <Button size="sm" variant="outline" onClick={() => save(f.name)}>
+                    <Download className="h-3.5 w-3.5" />
+                    Download
+                  </Button>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-4 space-y-1 text-theme-sm">
+              <p className="text-gray-500 dark:text-gray-400">
+                Generated {state.generated_at ? new Date(state.generated_at).toLocaleString() : "—"}
+                {state.last_reason ? ` (${state.last_reason})` : ""}.
+              </p>
+              {state.published_at && state.live_verified ? (
+                <p className="flex items-center gap-1.5 text-success-600 dark:text-success-500">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Live on the site ({state.published_to}) — checked at {new Date(state.published_at).toLocaleString()}.
+                </p>
+              ) : null}
+              {state.publish_error && (
+                <p className="flex items-start gap-1.5 text-warning-600 dark:text-warning-500">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  {state.publish_error}
+                </p>
+              )}
+              {state.submitted_at && (
+                <p className="text-gray-500 dark:text-gray-400">Submitted to Google Search Console {new Date(state.submitted_at).toLocaleString()}.</p>
+              )}
+              {state.submit_note && <p className="text-warning-600 dark:text-warning-500">{state.submit_note}</p>}
+              {state.robots_note && <p className="text-gray-500 dark:text-gray-400">{state.robots_note}</p>}
+            </div>
+          </>
+        )}
+
+        <p className="mt-4 text-theme-xs text-gray-400">
+          Auto-update: refreshed about once a day (new and changed pages are picked up), and a blog post is added within
+          seconds of going live. Dates in the sitemap come from the site itself; a page only gets a new date when its
+          content actually changed.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 function SitemapsPanel({ siteId }: { siteId: number }) {
   const toast = useToast();
   const queryClient = useQueryClient();
-  const [feedpath, setFeedpath] = useState("sitemap.xml");
+  const [feedpath, setFeedpath] = useState("");
+  const { data: sitesForFeed } = useQuery({ queryKey: ["seo", "sites"], queryFn: getSeoSites });
+  const siteBase = sitesForFeed?.find((x) => x.id === siteId)?.base_url?.replace(/\/+$/, "");
+  // Google wants the sitemap's full URL — a bare "sitemap.xml" was rejected.
+  useEffect(() => {
+    setFeedpath(siteBase ? `${siteBase}/sitemap.xml` : "");
+  }, [siteBase]);
 
   const sitemapsQuery = useQuery({ queryKey: ["seo", "sitemaps", siteId], queryFn: () => getSitemaps(siteId) });
   const sitemaps = sitemapsQuery.data ?? [];
@@ -8004,7 +8564,7 @@ function SitemapsPanel({ siteId }: { siteId: number }) {
           get a real permission error on those two actions.
         </p>
         <div className="flex flex-wrap gap-2">
-          <Input value={feedpath} onChange={(e) => setFeedpath(e.target.value)} placeholder="sitemap.xml" className="max-w-xs" />
+          <Input value={feedpath} onChange={(e) => setFeedpath(e.target.value)} placeholder="https://yoursite.com/sitemap.xml" className="max-w-md" />
           <Button size="sm" onClick={() => submitMutation.mutate()} disabled={submitMutation.isPending || !feedpath.trim()}>
             {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
             Submit
@@ -8062,61 +8622,9 @@ function SitemapsPanel({ siteId }: { siteId: number }) {
   );
 }
 
-function SiteVerificationPanel() {
-  const verificationQuery = useQuery({ queryKey: ["seo", "site-verification"], queryFn: getVerifiedSites });
-  const sites = verificationQuery.data ?? [];
-
-  return (
-    <Card>
-      <CardContent className="p-6">
-        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
-            <CheckCircle2 className="h-4 w-4 text-brand-500" />
-            Site Verification
-          </h2>
-          <Button size="sm" variant="outline" onClick={() => verificationQuery.refetch()} disabled={verificationQuery.isFetching}>
-            {verificationQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            Refresh
-          </Button>
-        </div>
-        <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
-          Properties this Google service account has itself verified ownership of — a separate Google permission
-          system from being added as a Search Console user (which is how every other GSC feature here works).
-        </p>
-        {verificationQuery.isLoading ? (
-          <div className="flex h-16 items-center justify-center text-gray-400">
-            <Loader2 className="h-5 w-5 animate-spin" />
-          </div>
-        ) : verificationQuery.isError ? (
-          <p className="text-theme-sm text-error-500">
-            {serverErrorDetail(verificationQuery.error, "Site Verification API call failed.")}
-          </p>
-        ) : sites.length === 0 ? (
-          <p className="text-theme-sm text-gray-400">
-            No verified sites for this service account (expected — this app connects sites by adding the service
-            account as a Search Console user, not by having it perform its own verification).
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {sites.map((s) => (
-              <div key={s.id} className="rounded-lg border border-gray-100 p-3 dark:border-gray-800">
-                <p className="break-all text-theme-sm font-medium text-gray-900 dark:text-white">{s.identifier ?? s.id}</p>
-                <div className="mt-1 flex flex-wrap gap-2">
-                  {s.type && <Badge variant="outline">{s.type}</Badge>}
-                  {s.owners.map((o) => (
-                    <Badge key={o} variant="outline">
-                      {o}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
+// The Request re-crawl card is hidden (Google's Indexing API access isn't set up).
+// Nothing is removed — set this to true to bring it back.
+const SHOW_RECRAWL_PANEL = false;
 
 function IndexingTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
   const queryClient = useQueryClient();
@@ -8313,6 +8821,7 @@ function IndexingTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
         </CardContent>
       </Card>
 
+      {SHOW_RECRAWL_PANEL && (
       <Card>
         <CardContent className="p-6">
           <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
@@ -8372,6 +8881,7 @@ function IndexingTab({ siteId, siteUrl }: { siteId: number; siteUrl: string }) {
           )}
         </CardContent>
       </Card>
+      )}
     </>
   );
 }
@@ -8549,8 +9059,8 @@ function SearchConsoleTab({ siteId }: { siteId: number }) {
   return (
     <>
       <GscPerformancePanel siteId={siteId} />
+      <SitemapGeneratorCard siteId={siteId} />
       <SitemapsPanel siteId={siteId} />
-      <SiteVerificationPanel />
     </>
   );
 }
@@ -9578,6 +10088,10 @@ function CompetitorAnalysisCard({ siteId, siteUrl }: { siteId: number; siteUrl: 
   );
 }
 
+// The three Semrush cards are hidden while there is no SEMRUSH_API_KEY.
+// Nothing is removed — set this to true once the key is added in .env.
+const SHOW_SEMRUSH_PANELS = false;
+
 function BacklinksTab({ siteId, siteName, siteUrl }: { siteId: number; siteName: string; siteUrl: string }) {
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -9605,9 +10119,13 @@ function BacklinksTab({ siteId, siteName, siteUrl }: { siteId: number; siteName:
 
   return (
     <div className="space-y-6">
-      <SemrushDomainOverview siteId={siteId} />
-      <SemrushLinkExplorer siteId={siteId} />
-      <SemrushBacklinkGapCard siteId={siteId} />
+      {SHOW_SEMRUSH_PANELS && (
+        <>
+          <SemrushDomainOverview siteId={siteId} />
+          <SemrushLinkExplorer siteId={siteId} />
+          <SemrushBacklinkGapCard siteId={siteId} />
+        </>
+      )}
       <KeywordResearchCard />
       <KeywordDifficultyCard />
       <RapidApiKeywordCard siteId={siteId} />
@@ -9695,7 +10213,23 @@ export default function SeoPage() {
       // storage unavailable — selection just won't survive a reload this time
     }
   };
-  const [tab, setTab] = useState<Tab>("overview");
+  // The tab lives in the URL (?tab=blog) so a tab can be opened in its own
+  // browser tab (Ctrl/Cmd+click, middle-click) and survives a reload.
+  const [tab, setTabState] = useState<Tab>(() => {
+    const wanted = new URLSearchParams(window.location.search).get("tab");
+    return TABS.some((t) => t.id === wanted) ? (wanted as Tab) : "overview";
+  });
+  const setTab = (next: Tab) => {
+    setTabState(next);
+    try {
+      const url = new URL(window.location.href);
+      if (next === "overview") url.searchParams.delete("tab");
+      else url.searchParams.set("tab", next);
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+    } catch {
+      // URL update is a nicety; the tab still switches
+    }
+  };
   // Every tab, once opened, stays mounted (just hidden) instead of being torn
   // down when another tab is selected. That is what keeps any task started in
   // a tab — a traffic check, an audit, a digest, a bulk job — running AND
@@ -9764,18 +10298,18 @@ export default function SeoPage() {
     <>
       <PageMeta title="SEO | WorkPulse AI" description="Agentic SEO: audits, digests, social, and backlinks." />
 
-      <div className="space-y-6">
-        <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-brand-600 via-brand-500 to-indigo-600 p-6 text-white shadow-lg shadow-brand-500/20 sm:p-8">
-          <div className="pointer-events-none absolute -right-16 -top-16 h-64 w-64 rounded-full bg-white/10 blur-3xl" />
-          <div className="relative flex flex-wrap items-center justify-between gap-6">
+      <div className="seo-compact space-y-6">
+        <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-brand-600 via-brand-500 to-indigo-600 px-5 py-4 text-white shadow-md shadow-brand-500/10">
+          <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-white/10 blur-3xl" />
+          <div className="relative flex flex-wrap items-center justify-between gap-4">
             <div>
-              <div className="flex items-center gap-2.5">
-                <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-white/15">
-                  <TrendingUp className="h-5 w-5" />
+              <div className="flex items-center gap-2">
+                <span className="flex h-7 w-7 items-center justify-center rounded-md bg-white/15">
+                  <TrendingUp className="h-4 w-4" />
                 </span>
-                <h1 className="text-2xl font-bold sm:text-3xl">SEO</h1>
+                <h1 className="text-lg font-semibold">SEO</h1>
               </div>
-              <p className="mt-2 max-w-xl text-sm text-white/80">
+              <p className="mt-1 max-w-2xl text-xs leading-relaxed text-white/75">
                 Agentic SEO: technical audits, Search Console/Analytics, PageSpeed, digests, social and blog
                 drafting, and backlink monitoring — the daily pipeline runs itself.
               </p>
@@ -9785,7 +10319,7 @@ export default function SeoPage() {
                 <select
                   value={siteId ?? ""}
                   onChange={(e) => setSiteId(Number(e.target.value))}
-                  className="h-11 rounded-lg border border-white/20 bg-white/10 px-4 text-sm font-medium text-white backdrop-blur-sm focus:outline-hidden focus:ring-2 focus:ring-white/40 [&>option]:text-gray-900"
+                  className="h-8 rounded-md border border-white/20 bg-white/10 px-3 text-xs font-medium text-white backdrop-blur-sm focus:outline-hidden focus:ring-2 focus:ring-white/40 [&>option]:text-gray-900"
                 >
                   {sites.map((s) => (
                     <option key={s.id} value={s.id}>
@@ -9796,25 +10330,27 @@ export default function SeoPage() {
               )}
               {sites.length > 0 && !showAddSite && (
                 <Button
+                  size="sm"
                   variant="outline"
                   onClick={() => setShowAddSite(true)}
                   className="border-white/25 bg-white/10 text-white hover:bg-white/20"
                 >
-                  <Plus className="h-4 w-4" />
+                  <Plus className="h-3.5 w-3.5" />
                   Add site
                 </Button>
               )}
               {selectedSite && !showAddSite && (
                 <Button
+                  size="sm"
                   variant="outline"
                   onClick={handleRemoveSite}
                   disabled={deleteSiteMutation.isPending}
                   className="border-white/25 bg-white/10 text-white hover:bg-red-500/30"
                 >
                   {deleteSiteMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <Trash2 className="h-4 w-4" />
+                    <Trash2 className="h-3.5 w-3.5" />
                   )}
                   Remove site
                 </Button>
@@ -9840,9 +10376,17 @@ export default function SeoPage() {
             <>
               <div className="flex flex-wrap gap-1 rounded-lg bg-gray-100 p-1 dark:bg-white/5 w-fit">
                 {TABS.map(({ id, label, icon: Icon }) => (
-                  <button
+                  // A real link: a plain click switches tab in place, while
+                  // Ctrl/Cmd/Shift+click and middle-click open it in a new
+                  // browser tab like any other link.
+                  <a
                     key={id}
-                    onClick={() => setTab(id)}
+                    href={id === "overview" ? window.location.pathname : `${window.location.pathname}?tab=${id}`}
+                    onClick={(e) => {
+                      if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) return;
+                      e.preventDefault();
+                      setTab(id);
+                    }}
                     className={`flex items-center gap-1.5 rounded-md px-4 py-1.5 text-theme-sm font-medium transition-colors ${
                       tab === id
                         ? "bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-white"
@@ -9851,7 +10395,7 @@ export default function SeoPage() {
                   >
                     <Icon className="h-3.5 w-3.5" />
                     {label}
-                  </button>
+                  </a>
                 ))}
               </div>
 
@@ -9865,8 +10409,10 @@ export default function SeoPage() {
                         site={selectedSite}
                         serverJumpPath={serverJumpPath}
                         onServerJumpHandled={() => setServerJumpPath(null)}
-                        onEditStaticFile={openStaticFileForEdit}
                       />
+                    )}
+                    {id === "technical-audit" && (
+                      <TechnicalAuditTab site={selectedSite} onEditStaticFile={openStaticFileForEdit} />
                     )}
                     {id === "performance" && (
                       <PerformanceTab

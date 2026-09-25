@@ -40,7 +40,7 @@ class OllamaProvider(LLMProvider):
         chosen_model = model or (settings.OLLAMA_FAST_MODEL if fast else settings.OLLAMA_MODEL)
 
         start = time.monotonic()
-        text = ollama_client.generate(full_prompt, model=model, fast=fast)
+        text = ollama_client.generate(full_prompt, model=model, fast=fast, max_tokens=max_tokens)
         latency_ms = (time.monotonic() - start) * 1000
 
         if text is None:

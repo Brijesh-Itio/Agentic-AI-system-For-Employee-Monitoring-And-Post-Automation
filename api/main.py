@@ -34,6 +34,7 @@ from api.routes import (
     linkedin,
     productivity,
     redirects,
+    notes,
     reports,
     seo,
     sso,
@@ -119,6 +120,16 @@ def _run_digest_rollup(period: str) -> None:
             logger.exception("SEO %s digest roll-up failed for site %s — continuing to next site", period, site["id"])
 
 
+def _run_sitemap_auto_update() -> None:
+    """Regenerates (and republishes) the sitemap of every site that has
+    auto-update on and hasn't been refreshed in about a day. Checked every
+    few hours and shortly after startup, since this app is often started by
+    hand and a fixed daily time would keep being missed."""
+    from automation.seo.sitemap_service import run_due_sites
+
+    run_due_sites()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -134,6 +145,19 @@ async def lifespan(app: FastAPI):
         id="server_file_backup_cleanup",
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+
+    from datetime import datetime, timedelta
+
+    seo_scheduler.add_job(
+        _run_sitemap_auto_update,
+        trigger="interval",
+        hours=3,
+        next_run_time=datetime.now() + timedelta(minutes=2),
+        id="sitemap_auto_update",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        max_instances=1,
     )
 
     # Module 41 — checks every 5 minutes for approved social posts whose
@@ -269,6 +293,7 @@ app.include_router(email_templates.router)
 app.include_router(dar_entries.router)
 app.include_router(seo.router)
 app.include_router(redirects.router)
+app.include_router(notes.router)
 
 
 @app.exception_handler(StarletteHTTPException)

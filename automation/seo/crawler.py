@@ -148,20 +148,34 @@ def fetch_sitemap_urls(base_url: str) -> List[str]:
     anything on-site links to them) is what makes that check possible at
     all. Never raises — returns an empty list if there's no sitemap or
     it can't be fetched/parsed."""
-    sitemap_url = base_url.rstrip("/") + "/sitemap.xml"
-    try:
-        response = requests.get(sitemap_url, timeout=TIMEOUT_SECONDS, headers={"User-Agent": USER_AGENT})
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        logger.info("No usable sitemap at %s (%s)", sitemap_url, exc)
-        return []
+    import re
+
+    def _fetch(url: str) -> Optional[str]:
+        try:
+            response = requests.get(url, timeout=TIMEOUT_SECONDS, headers={"User-Agent": USER_AGENT})
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as exc:
+            logger.info("No usable sitemap at %s (%s)", url, exc)
+            return None
 
     # A plain regex over <loc>...</loc> rather than an XML parser: this
     # codebase deliberately avoids adding lxml, and sitemap.xml's format
     # is regular enough that this is reliable without one.
-    import re
-
-    return re.findall(r"<loc>\s*(.*?)\s*</loc>", response.text, re.IGNORECASE)
+    text = _fetch(base_url.rstrip("/") + "/sitemap.xml")
+    if text is None:
+        return []
+    locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", text, re.IGNORECASE)
+    # A sitemap INDEX lists other sitemap files, not pages — follow them,
+    # otherwise the orphan check would treat "sitemap-pages.xml" as a page.
+    if re.search(r"<sitemapindex", text, re.IGNORECASE):
+        pages: List[str] = []
+        for child in locs[:50]:
+            child_text = _fetch(child)
+            if child_text:
+                pages.extend(re.findall(r"<loc>\s*(.*?)\s*</loc>", child_text, re.IGNORECASE))
+        return pages
+    return locs
 
 
 def fetch_page_title(url: str) -> Optional[str]:

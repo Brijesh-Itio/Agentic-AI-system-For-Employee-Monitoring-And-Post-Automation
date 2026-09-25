@@ -2,7 +2,7 @@
 from datetime import date as date_type, datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ActivityLogOut(BaseModel):
@@ -1418,7 +1418,23 @@ SocialPlatform = Literal["linkedin", "twitter", "instagram", "facebook"]
 
 
 class SocialPostUpdate(BaseModel):
+    # Every field is optional so a caller can change just one. An empty
+    # string for source_url/image_url clears it.
+    content: Optional[str] = None
+    platform: Optional[SocialPlatform] = None
+    source_url: Optional[str] = None
+    image_url: Optional[str] = None
+
+
+class SocialPostCreate(BaseModel):
+    """A post written by hand — no AI involved. Always lands as a draft."""
+
+    site_id: int
+    platform: SocialPlatform
     content: str
+    source_url: Optional[str] = None
+    image_url: Optional[str] = None
+    facebook_account_id: Optional[int] = None
 
 
 class SocialGenerateRequest(BaseModel):
@@ -1855,6 +1871,16 @@ class SitemapActionRequest(BaseModel):
     feedpath: str
 
 
+class SitemapGenerateRequest(BaseModel):
+    site_id: int
+    max_pages: Optional[int] = None
+
+
+class SitemapSettingsRequest(BaseModel):
+    site_id: int
+    auto_update: bool
+
+
 class SitemapActionOut(BaseModel):
     ok: bool
     detail: str
@@ -2179,3 +2205,17 @@ class RedirectTestResult(BaseModel):
     status_code: Optional[int] = None
     location: Optional[str] = None
     message: str
+
+
+class NoteIn(BaseModel):
+    title: str = Field("", max_length=500)
+    html: str = Field("", max_length=2_000_000)
+    tags: list[str] = Field(default_factory=list, max_length=50)
+    color: Literal["gray", "blue", "green", "amber", "rose", "purple"] = "gray"
+    pinned: bool = False
+    createdAt: int
+    updatedAt: int
+
+
+class NoteOut(NoteIn):
+    id: str

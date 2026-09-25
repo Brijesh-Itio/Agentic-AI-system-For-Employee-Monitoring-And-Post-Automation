@@ -21,6 +21,7 @@ const KEEP_ALIVE_PATHS = new Set([
   "/linkedin",
   "/email",
   "/seo",
+  "/notepad",
   "/team",
   "/settings",
 ]);

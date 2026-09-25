@@ -38,6 +38,10 @@ trace.log
 # ChromaDB
 chromadb/
 
+# SEO sitemap generator output (per-site, environment-specific runtime data
+# — regenerated on demand, not source)
+sitemaps/
+
 # OS
 .DS_Store
 Thumbs.db

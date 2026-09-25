@@ -5217,6 +5217,32 @@ function ContentStructureChecker() {
   );
 }
 
+// Shown under a blog post while Publish / Go Live is running, so it is obvious the click
+// registered and the app is working (a publish can take a minute or more: it may generate
+// and upload an image before creating the CMS draft).
+function PostActionProgress({ startedAt, title, detail }: { startedAt: number; title: string; detail: string }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  const elapsed = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+  return (
+    <div className="mt-3 rounded-lg border border-brand-200 bg-brand-50/40 p-3 dark:border-brand-500/30 dark:bg-brand-500/5" role="status" aria-live="polite">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <p className="flex items-center gap-2 text-theme-sm font-medium text-gray-900 dark:text-white">
+          <Loader2 className="h-4 w-4 animate-spin text-brand-500" />
+          {title}
+        </p>
+        <span className="text-theme-xs tabular-nums text-gray-500 dark:text-gray-400">{elapsed}</span>
+      </div>
+      <ProgressBar />
+      <p className="mt-2 text-theme-xs text-gray-500 dark:text-gray-400">{detail}</p>
+    </div>
+  );
+}
+
 function BlogTab({ siteId }: { siteId: number }) {
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -5357,8 +5383,19 @@ function BlogTab({ siteId }: { siteId: number }) {
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Couldn't reject this post.")),
   });
+  // Which posts are being published / made live right now (id -> start time). Per post, so
+  // clicking Publish on one post never greys out or spins the buttons of the others.
+  const [publishing, setPublishing] = useState<Record<number, number>>({});
+  const [goingLive, setGoingLive] = useState<Record<number, number>>({});
+  const without = (map: Record<number, number>, id: number) => {
+    const next = { ...map };
+    delete next[id];
+    return next;
+  };
   const publishMutation = useMutation({
     mutationFn: (id: number) => publishBlogPost(id),
+    onMutate: (id) => setPublishing((prev) => ({ ...prev, [id]: Date.now() })),
+    onSettled: (_data, _err, id) => setPublishing((prev) => without(prev, id)),
     onSuccess: (result) => {
       if (result.status === "published") {
         toast.success('Created as a draft in your CMS — click "Go Live" when you\'re ready to publish it for real.');
@@ -5376,6 +5413,8 @@ function BlogTab({ siteId }: { siteId: number }) {
 
   const goLiveMutation = useMutation({
     mutationFn: (id: number) => goLiveBlogPost(id),
+    onMutate: (id) => setGoingLive((prev) => ({ ...prev, [id]: Date.now() })),
+    onSettled: (_data, _err, id) => setGoingLive((prev) => without(prev, id)),
     onSuccess: (result) => {
       if (result.status === "live") {
         toast.success("It's live on the website.");
@@ -5917,7 +5956,7 @@ function BlogTab({ siteId }: { siteId: number }) {
                         SEO Tools
                       </Button>
                       {(post.status === "draft" || post.status === "approved" || post.status === "failed") && (
-                        <Button size="sm" variant="outline" onClick={() => startEditing(post)}>
+                        <Button size="sm" variant="outline" onClick={() => startEditing(post)} disabled={post.id in publishing}>
                           <Pencil className="h-3.5 w-3.5" />
                           Edit
                         </Button>
@@ -5935,18 +5974,36 @@ function BlogTab({ siteId }: { siteId: number }) {
                         </>
                       )}
                       {(post.status === "approved" || post.status === "failed") && (
-                        <Button size="sm" onClick={() => publishMutation.mutate(post.id)} disabled={publishMutation.isPending}>
-                          <Send className="h-3.5 w-3.5" />
-                          {post.status === "failed" ? "Retry publish" : "Publish"}
+                        <Button
+                          size="sm"
+                          onClick={() => publishMutation.mutate(post.id)}
+                          disabled={post.id in publishing}
+                        >
+                          {post.id in publishing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                          {post.id in publishing ? "Publishing…" : post.status === "failed" ? "Retry publish" : "Publish"}
                         </Button>
                       )}
                       {post.status === "published" && (
-                        <Button size="sm" onClick={() => goLiveMutation.mutate(post.id)} disabled={goLiveMutation.isPending}>
-                          {goLiveMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Globe className="h-3.5 w-3.5" />}
-                          {post.error ? "Retry Go Live" : "Go Live"}
+                        <Button size="sm" onClick={() => goLiveMutation.mutate(post.id)} disabled={post.id in goingLive}>
+                          {post.id in goingLive ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Globe className="h-3.5 w-3.5" />}
+                          {post.id in goingLive ? "Going live…" : post.error ? "Retry Go Live" : "Go Live"}
                         </Button>
                       )}
                     </div>
+                    {post.id in publishing && (
+                      <PostActionProgress
+                        startedAt={publishing[post.id]}
+                        title="Publishing to your CMS…"
+                        detail="Generating the featured image if there isn't one, uploading it, adding related links and creating the draft. This usually takes 1–3 minutes — keep the page open or switch tabs, it keeps running. Please don't click again."
+                      />
+                    )}
+                    {post.id in goingLive && (
+                      <PostActionProgress
+                        startedAt={goingLive[post.id]}
+                        title="Making it live…"
+                        detail="Switching the post from draft to public on your website. This should only take a few seconds."
+                      />
+                    )}
                     {post.status !== "live" && (
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         {post.scheduled_at ? (

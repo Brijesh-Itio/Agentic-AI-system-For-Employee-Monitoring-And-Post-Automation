@@ -546,8 +546,13 @@ access, or open the target file in **Overview → Server Files**.
 
 `draft → approved → published (CMS draft) → live`, plus `failed` (retryable) and `rejected`.
 
-1. **Generate** (`ai/seo/blog_content.py`) with title, meta, keyword density, secondary keywords, and — by default —
-   five FAQs (`content_structure.generate_faq`, tolerant parser + one retry).
+1. **Generate** (`ai/seo/blog_content.py`): the article only, targeting **700–800 words** with at most one retry (and
+   only if the draft is under 85 % of the minimum). The draft is saved and returned immediately. The extras — originality
+   check, meta title/description and keyword density, five FAQs (`content_structure.generate_faq`, tolerant parser +
+   one retry), internal links and the grammar check, plus the image for bulk runs — are then prepared by one background
+   worker (`_start_blog_followups` in `api/routes/seo.py`). `GET /api/seo/blog/followups` reports the current step per
+   post, and the Blog tab polls it and shows "preparing the extras" on each card. Bulk and calendar generation create
+   all drafts first, then queue their extras. Measured on the local CPU: article ≈ 3 min, extras ≈ 5 min more.
 2. **Checks:** structure/word count, plagiarism + AI-detection score (`content_quality.py`), and grammar
    (`grammar_checker.py`: ≈150-word chunks, ≤8 chunks, capped replies, 7-minute budget, partial results).
 3. **Approve** (human) → **Publish** creates a **draft in the CMS** — it never makes a page public on its own.

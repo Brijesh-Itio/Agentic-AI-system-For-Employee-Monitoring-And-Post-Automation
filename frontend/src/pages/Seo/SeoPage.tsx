@@ -88,6 +88,7 @@ import {
   approveTechnicalIssue,
   BacklinkMention,
   checkBlogPostGrammar,
+  applyBlogGrammarFixes,
   checkBlogPostQuality,
   checkPageSpeed,
   checkSocialPostQuality,
@@ -124,6 +125,7 @@ import {
   PageTagFinding,
   getBacklinks,
   getBlogPosts,
+  getBlogFollowups,
   getGa4Pages,
   getGscPages,
   getGscQueries,
@@ -4792,7 +4794,7 @@ function SocialTab({ siteId }: { siteId: number }) {
 // all had a working backend but no frontend UI at all — this panel is
 // the fix, attached inline to each blog post card rather than a
 // separate tab, since every one of these acts on one specific post.
-function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost }) {
+function BlogSeoToolsPanel({ siteId, post, editing = false }: { siteId: number; post: BlogPost; editing?: boolean }) {
   const queryClient = useQueryClient();
   const toast = useToast();
   const [imagePrompt, setImagePrompt] = useState("");
@@ -4806,14 +4808,21 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
 
+  const [imageStartedAt, setImageStartedAt] = useState<number | null>(null);
   const imageMutation = useMutation({
     mutationFn: () => generateBlogPostImage(post.id, imagePrompt.trim() || undefined),
+    onMutate: () => setImageStartedAt(Date.now()),
+    onSettled: () => setImageStartedAt(null),
     onSuccess: () => {
       toast.success("Image generated and uploaded to the site.");
       setShowImagePreview(true);
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
-    onError: (err) => toast.error(serverErrorDetail(err, "Image generation failed.")),
+    onError: (err) => {
+      toast.error(serverErrorDetail(err, "Image generation failed."));
+      // The server may still have finished, or recorded why it didn't — show the current state.
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    },
   });
 
   const uploadImageMutation = useMutation({
@@ -4896,6 +4905,29 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Grammar check failed.")),
   });
+
+  // One-click grammar fixing: apply a suggestion to the post text (or dismiss it).
+  const [fixingKey, setFixingKey] = useState<string | null>(null);
+  const grammarFixMutation = useMutation({
+    mutationFn: ({ fixes, action }: { fixes: { original: string; suggestion: string }[]; action: "apply" | "dismiss"; key: string }) =>
+      applyBlogGrammarFixes(post.id, fixes, action),
+    onMutate: ({ key }) => setFixingKey(key),
+    onSettled: () => setFixingKey(null),
+    onSuccess: (result, vars) => {
+      if (vars.action === "dismiss") {
+        toast.info("Suggestion dismissed.");
+      } else if (result.applied > 0 && result.skipped.length === 0) {
+        toast.success(result.applied === 1 ? "Fixed in your post." : `Fixed ${result.applied} suggestions in your post.`);
+      } else if (result.applied > 0) {
+        toast.info(`Fixed ${result.applied}; ${result.skipped.length} could not be applied automatically.`);
+      } else {
+        toast.error(result.skipped[0]?.reason ?? "Couldn't apply this suggestion.");
+      }
+      invalidate();
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't apply this fix.")),
+  });
+  const canFixPost = ["draft", "approved", "failed"].includes(post.status) && !editing;
 
   // Publishing already does this automatically — this is for a post
   // that was edited directly in the CMS afterward, so future posts'
@@ -4984,6 +5016,13 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
             Upload image
           </Button>
         </div>
+        {imageStartedAt !== null && (
+          <PostActionProgress
+            startedAt={imageStartedAt}
+            title="Generating the image…"
+            detail="The AI image is made on the image worker, then uploaded to your site. This usually takes 1–3 minutes — you can switch tabs, it keeps running. Please don't click again."
+          />
+        )}
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -5129,19 +5168,80 @@ function BlogSeoToolsPanel({ siteId, post }: { siteId: number; post: BlogPost })
 
       {grammarReport && (
         <div className="rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
-          <p className="mb-1 font-medium text-gray-700 dark:text-gray-300">
-            Grammar check — {grammarReport.issues.length === 0 ? "no issues found" : `${grammarReport.issues.length} suggestion(s)`}
-          </p>
-          {grammarReport.issues.map((issue, idx) => (
-            <div key={idx} className="mt-1.5 border-t border-gray-100 pt-1.5 dark:border-gray-800">
-              <p>
-                <span className="text-error-600 line-through dark:text-error-400">{issue.original}</span>
-                {" → "}
-                <span className="text-success-600 dark:text-success-400">{issue.suggestion}</span>
-              </p>
-              <p className="text-gray-400">{issue.explanation}</p>
-            </div>
-          ))}
+          <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+            <p className="font-medium text-gray-700 dark:text-gray-300">
+              Grammar check — {grammarReport.issues.length === 0 ? "no issues found" : `${grammarReport.issues.length} suggestion(s)`}
+            </p>
+            {canFixPost && grammarReport.issues.length > 1 && (
+              <Button
+                size="sm"
+                onClick={() =>
+                  grammarFixMutation.mutate({
+                    fixes: grammarReport.issues.map((i) => ({ original: i.original, suggestion: i.suggestion })),
+                    action: "apply",
+                    key: "all",
+                  })
+                }
+                disabled={grammarFixMutation.isPending}
+              >
+                {fixingKey === "all" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                {fixingKey === "all" ? "Fixing…" : `Fix all ${grammarReport.issues.length}`}
+              </Button>
+            )}
+          </div>
+          {!canFixPost && grammarReport.issues.length > 0 && (
+            <p className="mb-1 text-gray-400">
+              {editing
+                ? "Save or cancel your edit to use the fix buttons."
+                : "This post is already in your CMS, so suggestions can't be applied here."}
+            </p>
+          )}
+          {grammarReport.issues.map((issue, idx) => {
+            const key = `${idx}:${issue.original}`;
+            const busy = fixingKey === key;
+            return (
+              <div key={key} className="mt-1.5 border-t border-gray-100 pt-1.5 dark:border-gray-800">
+                <p>
+                  <span className="text-error-600 line-through dark:text-error-400">{issue.original}</span>
+                  {" → "}
+                  <span className="text-success-600 dark:text-success-400">{issue.suggestion}</span>
+                </p>
+                <p className="text-gray-400">{issue.explanation}</p>
+                {canFixPost && (
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        grammarFixMutation.mutate({
+                          fixes: [{ original: issue.original, suggestion: issue.suggestion }],
+                          action: "apply",
+                          key,
+                        })
+                      }
+                      disabled={grammarFixMutation.isPending}
+                    >
+                      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                      {busy ? "Fixing…" : "Fix"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        grammarFixMutation.mutate({
+                          fixes: [{ original: issue.original, suggestion: issue.suggestion }],
+                          action: "dismiss",
+                          key: `d${key}`,
+                        })
+                      }
+                      disabled={grammarFixMutation.isPending}
+                    >
+                      Dismiss
+                    </Button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -5265,6 +5365,24 @@ function BlogTab({ siteId }: { siteId: number }) {
   const [previewPost, setPreviewPost] = useState<BlogPost | null>(null);
 
   const postsQuery = useQuery({ queryKey: ["seo", "blog", siteId], queryFn: () => getBlogPosts(siteId) });
+  // After the article is created, its extras (originality check, meta, FAQs, links, grammar, image) are
+  // prepared in the background. Poll while any are running and refresh the posts as each piece lands.
+  const followupsQuery = useQuery({
+    queryKey: ["seo", "blog-followups", siteId],
+    queryFn: () => getBlogFollowups(siteId),
+    refetchInterval: (q) => ((q.state.data?.length ?? 0) > 0 ? 3000 : 12000),
+  });
+  const followups = followupsQuery.data ?? [];
+  const followupStages = Object.fromEntries(followups.map((f) => [f.post_id, f.stage]));
+  const followupSignature = followups.map((f) => `${f.post_id}:${f.stage}`).join("|");
+  const prevFollowupCount = useRef(0);
+  useEffect(() => {
+    // refresh the list whenever a step finishes (the stage changes) and when the last one completes
+    if (followups.length > 0 || prevFollowupCount.current > 0) {
+      queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
+    }
+    prevFollowupCount.current = followups.length;
+  }, [followupSignature]); // eslint-disable-line react-hooks/exhaustive-deps
   const posts = postsQuery.data ?? [];
 
   const startEditing = (post: BlogPost) => {
@@ -5614,8 +5732,8 @@ function BlogTab({ siteId }: { siteId: number }) {
             <>
               <ProgressBar className="mt-3 max-w-sm" />
               <p className="mt-2 text-theme-xs text-gray-400">
-                Can take several minutes — the higher-quality model may retry internally to hit the 1,200-1,500 word
-                target, then meta tags, FAQs, internal links, and a grammar check all run automatically afterward.
+                Writing the article (about 700-800 words) usually takes a few minutes. The draft appears as soon as it is
+                written; meta tags, FAQs, internal links and the grammar check are then prepared in the background.
               </p>
             </>
           )}
@@ -5990,6 +6108,18 @@ function BlogTab({ siteId }: { siteId: number }) {
                         </Button>
                       )}
                     </div>
+                    {post.id in followupStages && (
+                      <div className="mt-3 rounded-lg border border-brand-200 bg-brand-50/40 p-3 dark:border-brand-500/30 dark:bg-brand-500/5" role="status" aria-live="polite">
+                        <p className="mb-2 flex items-center gap-2 text-theme-sm font-medium text-gray-900 dark:text-white">
+                          <Loader2 className="h-4 w-4 animate-spin text-brand-500" />
+                          Article ready. Preparing the extras: {followupStages[post.id].toLowerCase()}…
+                        </p>
+                        <ProgressBar />
+                        <p className="mt-2 text-theme-xs text-gray-500 dark:text-gray-400">
+                          You can read and edit the draft now. Originality check, meta tags, FAQs, internal links and the grammar check fill in automatically.
+                        </p>
+                      </div>
+                    )}
                     {post.id in publishing && (
                       <PostActionProgress
                         startedAt={publishing[post.id]}
@@ -6117,7 +6247,7 @@ function BlogTab({ siteId }: { siteId: number }) {
                         />
                       )
                     )}
-                    {seoToolsId === post.id && <BlogSeoToolsPanel siteId={siteId} post={post} />}
+                    {seoToolsId === post.id && <BlogSeoToolsPanel siteId={siteId} post={post} editing={editingId === post.id} />}
                   </div>
                 );
               })}

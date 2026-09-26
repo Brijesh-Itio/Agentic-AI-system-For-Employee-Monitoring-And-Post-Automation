@@ -6,6 +6,7 @@ logging) end-to-end. No real SEO pipeline exists yet — that's module 26
 onward; this is the foundation those pipelines will be built on.
 """
 import json
+import threading
 import logging
 from datetime import date as date_cls, datetime, time, timedelta
 from typing import Optional
@@ -175,6 +176,9 @@ from api.schemas import (
     SocialGenerateRequest,
     SocialPostOut,
     SocialPostUpdate,
+    GrammarApplyOut,
+    GrammarApplyRequest,
+    GrammarSkipped,
     SocialPostCreate,
     SocialScheduleRequest,
     SocialBulkIdsRequest,
@@ -202,7 +206,7 @@ from ai.seo.blog_meta_generator import generate_blog_meta_tags
 from ai.seo.content_quality import assess_humanization, check_plagiarism
 from ai.seo.content_structure import analyze_structure, generate_faq
 from ai.seo.daily_digest import generate_daily_digest
-from ai.seo.grammar_checker import check_grammar
+from ai.seo.grammar_checker import apply_suggestion as apply_grammar_suggestion, check_grammar
 from ai.seo.image_pipeline import generate_and_publish_image, upload_image_bytes
 from ai.seo.image_prompt import derive_image_prompt
 from ai.seo.interlink_engine import find_related_pages, index_page
@@ -3284,6 +3288,84 @@ def _generate_and_store_blog_grammar(post_id: int, site_id: int, content_html: s
         logger.exception("Grammar check failed for blog post %s — post saved without one", post_id)
 
 
+# ── Follow-up work after a draft is created ──
+# Article first, everything else afterwards. One worker thread processes the queue in order (a second
+# local-model job at the same time would only slow both down), and /blog/followups lets the Blog tab
+# show what is still being prepared for each post and refresh as the pieces land.
+_followup_state: dict[int, dict] = {}
+_followup_state_lock = threading.Lock()
+_followup_worker_lock = threading.Lock()
+
+
+def _set_followup_stage(post_id: int, stage: Optional[str]) -> None:
+    with _followup_state_lock:
+        if stage is None:
+            _followup_state.pop(post_id, None)
+        elif post_id in _followup_state:
+            _followup_state[post_id]["stage"] = stage
+
+
+def _run_blog_followup_job(job: dict) -> None:
+    from api.database import SessionLocal
+
+    post_id, site_id = job["post_id"], job["site_id"]
+    db = SessionLocal()
+    try:
+        _set_followup_stage(post_id, "Checking originality")
+        _check_and_store_blog_quality(db, post_id, site_id, job["content_html"])
+        _set_followup_stage(post_id, "Writing meta tags")
+        _generate_and_store_blog_meta(
+            post_id, site_id=site_id, title=job["title"], excerpt=job["excerpt"],
+            primary_keyword=job["primary_keyword"], secondary_keywords_json=job["secondary_keywords_json"],
+            keyword_density_json=job["keyword_density_json"],
+        )
+        _set_followup_stage(post_id, "Writing FAQs")
+        _generate_and_store_blog_faqs(post_id, site_id, job["title"])
+        _set_followup_stage(post_id, "Suggesting internal links")
+        _generate_and_store_internal_links(post_id, site_id, job["title"], job["content_html"])
+        _set_followup_stage(post_id, "Checking grammar")
+        _generate_and_store_blog_grammar(post_id, site_id, job["content_html"])
+        if job.get("generate_image"):
+            _set_followup_stage(post_id, "Generating the image")
+            try:
+                site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+                image_prompt = derive_image_prompt(job["content_html"], title=job["title"], site_id=site_id) or job["title"]
+                image_result = generate_and_publish_image(site, image_prompt, task="blog_post")
+                if image_result.ok:
+                    database.set_blog_post_image(post_id, image_result.url, image_source=image_result.provider)
+            except Exception:
+                logger.exception("Image generation failed for post %s — the draft is saved without one", post_id)
+    except Exception:
+        logger.exception("Follow-up steps failed for blog post %s — the draft itself is saved", post_id)
+    finally:
+        db.close()
+        _set_followup_stage(post_id, None)
+
+
+def _start_blog_followups(jobs: list) -> None:
+    """Queues the follow-up work for freshly created drafts and returns at once."""
+    if not jobs:
+        return
+    with _followup_state_lock:
+        for job in jobs:
+            _followup_state[job["post_id"]] = {"site_id": job["site_id"], "stage": "Waiting to start"}
+
+    def _worker() -> None:
+        with _followup_worker_lock:
+            for job in jobs:
+                _run_blog_followup_job(job)
+
+    threading.Thread(target=_worker, daemon=True, name="blog-followups").start()
+
+
+@router.get("/blog/followups")
+def blog_followups(site_id: int):
+    """Posts of this site whose extras (originality check, meta, FAQs, links, grammar, image) are still
+    being prepared, with the current step. Empty when nothing is running."""
+    with _followup_state_lock:
+        return [{"post_id": pid, "stage": st["stage"]} for pid, st in _followup_state.items() if st["site_id"] == site_id]
+
+
 @router.post("/blog/generate", response_model=BlogPostOut, status_code=201)
 def generate_blog_post_route(payload: BlogGenerateRequest, db: Session = Depends(get_db)):
     """Generates a full blog post draft, immediately runs it through
@@ -3333,16 +3415,16 @@ def generate_blog_post_route(payload: BlogGenerateRequest, db: Session = Depends
         structure.passed,
         structure_issues_json,
     )
-    _check_and_store_blog_quality(db, post_id, payload.site_id, draft.content_html)
-    _generate_and_store_blog_meta(
-        post_id, site_id=payload.site_id, title=draft.title, excerpt=draft.excerpt,
-        primary_keyword=payload.primary_keyword,
-        secondary_keywords_json=json.dumps(payload.secondary_keywords) if payload.secondary_keywords else None,
-        keyword_density_json=_keyword_density_json(structure),
-    )
-    _generate_and_store_blog_faqs(post_id, payload.site_id, draft.title)
-    _generate_and_store_internal_links(post_id, payload.site_id, draft.title, draft.content_html)
-    _generate_and_store_blog_grammar(post_id, payload.site_id, draft.content_html)
+    # The article is saved and returned now. Originality check, meta tags, FAQs, internal links and the
+    # grammar check are generated afterwards in the background (see _start_blog_followups), so the
+    # reviewer can open the draft straight away instead of waiting for all of them.
+    _start_blog_followups([{
+        "post_id": post_id, "site_id": payload.site_id, "title": draft.title, "excerpt": draft.excerpt,
+        "primary_keyword": payload.primary_keyword,
+        "secondary_keywords_json": json.dumps(payload.secondary_keywords) if payload.secondary_keywords else None,
+        "content_html": draft.content_html, "keyword_density_json": _keyword_density_json(structure),
+        "generate_image": False,
+    }])
     _log_to_sheet_safe(
         "Content Pipeline",
         [date_cls.today().isoformat(), site.name, payload.topic, draft.title, "draft", structure.passed],
@@ -3611,6 +3693,65 @@ def check_blog_post_grammar_route(post_id: int, db: Session = Depends(get_db)):
     database.set_blog_post_grammar(post_id, report_json)
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/{post_id}/grammar/apply", response_model=GrammarApplyOut)
+def apply_blog_grammar_fixes_route(post_id: int, payload: GrammarApplyRequest, db: Session = Depends(get_db)):
+    """One-click fixing for grammar suggestions. 'apply' rewrites the post's
+    text with each suggestion (only where it can be located and changed
+    safely — anything else is reported back with its reason and left alone),
+    then re-runs the structure check like a manual edit does. 'dismiss' just
+    removes suggestions from the report. Handled suggestions are removed from
+    the stored grammar report so the list shrinks as you work through it."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+    if payload.action == "apply" and row.status not in ("draft", "approved", "failed"):
+        raise HTTPException(
+            status_code=409, detail=f"Can't edit a post that's already in the CMS (current status: {row.status})"
+        )
+
+    content = row.content
+    applied = 0
+    skipped: list[GrammarSkipped] = []
+    done_keys: set[tuple[str, str]] = set()
+
+    for fix in payload.fixes:
+        key = (fix.original, fix.suggestion)
+        if payload.action == "dismiss":
+            done_keys.add(key)
+            continue
+        new_content, reason = apply_grammar_suggestion(content, fix.original, fix.suggestion)
+        if new_content is None:
+            skipped.append(GrammarSkipped(original=fix.original, reason=reason or "Couldn't apply this suggestion."))
+            # Already applied / identical text: nothing left to suggest, so drop it from the list.
+            if reason and (reason.startswith("Already applied") or reason.startswith("The suggestion is identical")):
+                done_keys.add(key)
+            continue
+        content = new_content
+        applied += 1
+        done_keys.add(key)
+
+    if applied:
+        secondary_keywords = json.loads(row.secondary_keywords_json) if row.secondary_keywords_json else None
+        structure = analyze_structure(content, primary_keyword=row.primary_keyword, secondary_keywords=secondary_keywords)
+        structure_issues_json = json.dumps(
+            [{"rule": i.rule, "severity": i.severity, "message": i.message} for i in structure.issues]
+        )
+        database.update_blog_post(post_id, row.title, row.excerpt, content, structure.passed, structure_issues_json)
+        database.set_blog_post_seo_meta(post_id, keyword_density_json=_keyword_density_json(structure))
+
+    if done_keys and row.grammar_report_json:
+        try:
+            report = json.loads(row.grammar_report_json)
+            report["issues"] = [i for i in report.get("issues", []) if (i.get("original"), i.get("suggestion")) not in done_keys]
+            database.set_blog_post_grammar(post_id, json.dumps(report))
+        except ValueError:
+            logger.exception("Could not update the stored grammar report for post %s", post_id)
+
+    db.expire_all()
+    fresh = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    return GrammarApplyOut(post=BlogPostOut.model_validate(fresh), applied=applied, skipped=skipped)
 
 
 @router.post("/blog/{post_id}/approve", response_model=BlogPostOut)
@@ -3926,7 +4067,7 @@ def bulk_publish_blog_posts_route(payload: BlogBulkIdsRequest, db: Session = Dep
 
 def _generate_and_save_blog_post(
     db: Session, site: SeoSite, topic: str, min_words: int, generate_image: bool, candidates=None,
-    max_words: int = 1500,
+    max_words: int = 800, jobs: Optional[list] = None,
 ) -> Optional[int]:
     """Shared by bulk-generate and generate-calendar below: one full
     draft (text via generate_blog_post + structure check, matching
@@ -3955,26 +4096,20 @@ def _generate_and_save_blog_post(
     post_id = database.create_blog_post(
         site.id, topic, None, draft.title, draft.excerpt, draft.content_html, structure.passed, structure_issues_json
     )
-    _check_and_store_blog_quality(db, post_id, site.id, draft.content_html, candidates=candidates)
-    _generate_and_store_blog_meta(
-        post_id, site_id=site.id, title=draft.title, excerpt=draft.excerpt, primary_keyword=None,
-        secondary_keywords_json=None, keyword_density_json=_keyword_density_json(structure),
-    )
-    _generate_and_store_blog_faqs(post_id, site.id, draft.title)
-    _generate_and_store_internal_links(post_id, site.id, draft.title, draft.content_html)
-    _generate_and_store_blog_grammar(post_id, site.id, draft.content_html)
     if candidates is not None:
         candidates.append(("blog", post_id, draft.title, draft.content_html))
 
-    if generate_image:
-        try:
-            image_prompt = derive_image_prompt(draft.content_html, title=draft.title, site_id=site.id) or draft.title
-            image_result = generate_and_publish_image(site, image_prompt, task="blog_post")
-            if image_result.ok:
-                database.set_blog_post_image(post_id, image_result.url, image_source=image_result.provider)
-        except Exception:
-            logger.exception("Bulk-generate: image generation failed for post %s — draft still saved without one", post_id)
-
+    # Everything beyond the article itself (originality check, meta, FAQs, links, grammar and, if asked,
+    # the image) runs in the background once ALL the drafts exist — see _start_blog_followups.
+    job = {
+        "post_id": post_id, "site_id": site.id, "title": draft.title, "excerpt": draft.excerpt,
+        "primary_keyword": None, "secondary_keywords_json": None, "content_html": draft.content_html,
+        "keyword_density_json": _keyword_density_json(structure), "generate_image": generate_image,
+    }
+    if jobs is not None:
+        jobs.append(job)
+    else:
+        _start_blog_followups([job])
     return post_id
 
 
@@ -3995,18 +4130,21 @@ def bulk_generate_blog_posts_route(payload: BlogBulkGenerateRequest, db: Session
 
     candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
+    jobs: list = []
     for topic in payload.topics:
         topic = topic.strip()
         if not topic:
             continue
         post_id = _generate_and_save_blog_post(
-            db, site, topic, payload.min_words, payload.generate_image, candidates=candidates, max_words=payload.max_words
+            db, site, topic, payload.min_words, payload.generate_image, candidates=candidates,
+            max_words=payload.max_words, jobs=jobs,
         )
         if post_id is not None:
             created_ids.append(post_id)
 
     if not created_ids:
         raise HTTPException(status_code=502, detail="Blog post generation failed for every topic given")
+    _start_blog_followups(jobs)
 
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id.in_(created_ids)).all()
@@ -4036,13 +4174,15 @@ def generate_blog_calendar_route(payload: BlogCalendarGenerateRequest, db: Sessi
 
     candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
+    jobs: list = []
     for day_offset in range(payload.days):
         day = payload.start_date + timedelta(days=day_offset)
         topic = topics[day_offset % len(topics)]
         scheduled_at = datetime.combine(day, time(post_hour, post_minute)).strftime("%Y-%m-%d %H:%M:%S")
 
         post_id = _generate_and_save_blog_post(
-            db, site, topic, payload.min_words, payload.generate_image, candidates=candidates, max_words=payload.max_words
+            db, site, topic, payload.min_words, payload.generate_image, candidates=candidates,
+            max_words=payload.max_words, jobs=jobs,
         )
         if post_id is not None:
             database.set_blog_post_schedule(post_id, scheduled_at)
@@ -4050,6 +4190,7 @@ def generate_blog_calendar_route(payload: BlogCalendarGenerateRequest, db: Sessi
 
     if not created_ids:
         raise HTTPException(status_code=502, detail="Blog post generation failed for every day given")
+    _start_blog_followups(jobs)
 
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id.in_(created_ids)).all()

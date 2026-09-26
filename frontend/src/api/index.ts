@@ -2377,6 +2377,11 @@ export const generateBlogPost = (payload: {
   max_words?: number;
 }) => api.post<BlogPost>("/api/seo/blog/generate", payload, { timeout: 0 }).then((r) => r.data);
 
+// Posts whose extras (originality check, meta tags, FAQs, internal links, grammar, image) are still being
+// prepared in the background after the article was created.
+export const getBlogFollowups = (siteId: number) =>
+  api.get<{ post_id: number; stage: string }[]>("/api/seo/blog/followups", { params: { site_id: siteId } }).then((r) => r.data);
+
 export const getBlogPosts = (siteId: number, status?: string) =>
   api.get<BlogPost[]>("/api/seo/blog", { params: { site_id: siteId, status } }).then((r) => r.data);
 
@@ -2400,16 +2405,29 @@ export const updateBlogPostMeta = (postId: number, payload: { meta_title: string
 // afterward (e.g. following a content edit), and persist on the post
 // same as the automatic pass rather than only existing in memory.
 export const generateBlogPostMeta = (postId: number) =>
-  api.post<BlogPost>(`/api/seo/blog/${postId}/meta/generate`, {}, { timeout: 60_000 }).then((r) => r.data);
+  api.post<BlogPost>(`/api/seo/blog/${postId}/meta/generate`, {}, { timeout: 5 * 60_000 }).then((r) => r.data);
 
 export const generateBlogPostFaqs = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/faqs/generate`, {}, { timeout: 5 * 60_000 }).then((r) => r.data);
 
 export const generateBlogPostInterlinks = (postId: number) =>
-  api.post<BlogPost>(`/api/seo/blog/${postId}/interlinks/generate`, {}, { timeout: 30_000 }).then((r) => r.data);
+  api.post<BlogPost>(`/api/seo/blog/${postId}/interlinks/generate`, {}, { timeout: 3 * 60_000 }).then((r) => r.data);
 
 export const checkBlogPostGrammar = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/grammar-check`, {}, { timeout: 10 * 60_000 }).then((r) => r.data);
+
+export interface GrammarApplyResult {
+  post: BlogPost;
+  applied: number;
+  skipped: { original: string; reason: string }[];
+}
+
+// action "apply" rewrites the post text with each suggestion; "dismiss" just removes it from the list.
+export const applyBlogGrammarFixes = (
+  postId: number,
+  fixes: { original: string; suggestion: string }[],
+  action: "apply" | "dismiss" = "apply",
+) => api.post<GrammarApplyResult>(`/api/seo/blog/${postId}/grammar/apply`, { action, fixes }).then((r) => r.data);
 
 export interface KeywordDensity {
   keyword: string;
@@ -2518,11 +2536,14 @@ export const exportBlogPostsToSheet = (siteId: number) =>
 // Access must be configured), and attaches the resulting URL to the
 // post. A 502 means no image provider or no server access is
 // configured yet — see api/routes/seo.py's generate_blog_post_image_route.
+// AI image generation runs on the local image worker and takes a few minutes (measured ~2.5 min).
+// A 60 s client limit made the browser report "Image generation failed" while the image was still
+// being made and then saved.
 export const generateBlogPostImage = (postId: number, prompt?: string) =>
-  api.post<BlogPost>(`/api/seo/blog/${postId}/image/generate`, { prompt }, { timeout: 60_000 }).then((r) => r.data);
+  api.post<BlogPost>(`/api/seo/blog/${postId}/image/generate`, { prompt }, { timeout: 10 * 60_000 }).then((r) => r.data);
 
 export const generateSocialPostImage = (postId: number, prompt?: string) =>
-  api.post<SocialPost>(`/api/seo/social/${postId}/image/generate`, { prompt }, { timeout: 60_000 }).then((r) => r.data);
+  api.post<SocialPost>(`/api/seo/social/${postId}/image/generate`, { prompt }, { timeout: 10 * 60_000 }).then((r) => r.data);
 
 // Manual image upload — same WebP-conversion-then-upload-to-the-site
 // pipeline as the generate endpoints above, for a file picked from the
@@ -2567,7 +2588,7 @@ export interface OgTags {
 }
 
 export const generateOgTags = (payload: { site_id: number; page_url: string; page_title: string; content_excerpt: string }) =>
-  api.post<OgTags>("/api/seo/og-tags/generate", payload).then((r) => r.data);
+  api.post<OgTags>("/api/seo/og-tags/generate", payload, { timeout: 3 * 60_000 }).then((r) => r.data);
 
 export interface RelatedPage {
   url: string;

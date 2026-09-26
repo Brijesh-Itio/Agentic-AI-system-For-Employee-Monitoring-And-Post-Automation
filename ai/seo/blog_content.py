@@ -31,14 +31,18 @@ class BlogPostDraft:
     content_html: str
 
 
+# A draft at or above this share of the minimum is accepted without another attempt.
+RETRY_FLOOR_RATIO = 0.85
+
+
 def generate_blog_post(
     topic: str,
     primary_keyword: Optional[str] = None,
     *,
     site_id: Optional[int] = None,
-    min_words: int = 1200,
-    max_words: int = 1500,
-    max_attempts: int = 3,
+    min_words: int = 700,
+    max_words: int = 800,
+    max_attempts: int = 2,
 ) -> Optional[BlogPostDraft]:
     """Never raises — returns None on LLM failure or unparseable output,
     matching this codebase's graceful-degrade convention.
@@ -104,7 +108,9 @@ def generate_blog_post(
         check = analyze_structure(draft.content_html, min_words=min_words, max_words=max_words)
         if best_draft is None:
             best_draft = draft
-        if check.h1_count == 1 and check.word_count >= min_words:
+        # A post a little under the target is fine (the reviewer still sees the word-count note): only a
+        # clearly short draft is worth another full generation, which costs minutes on local hardware.
+        if check.h1_count == 1 and check.word_count >= int(min_words * RETRY_FLOOR_RATIO):
             return draft
 
         logger.info(

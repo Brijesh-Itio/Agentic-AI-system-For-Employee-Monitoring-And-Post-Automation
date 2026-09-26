@@ -324,8 +324,10 @@ Approval is a deliberate step: nothing is published until you approve it (schedu
 
 ### 15.9 Blog
 
-**Generate a blog post** — enter a topic and keyword. WorkPulse writes the article, meta title and description,
-keyword density and (by default) five FAQs, then checks it.
+**Generate a blog post** — enter a topic and keyword. WorkPulse writes the article first (about 700–800 words, usually
+a few minutes) and shows the draft as soon as it is ready. The meta title and description, keyword density, five FAQs,
+internal links and the plagiarism and grammar checks are then prepared in the background — a banner on the post shows
+what it is working on, and you can read and edit meanwhile.
 
 Each draft shows badges for **structure issues** (missing H1, too short), **plagiarism**, **AI-content score** and
 **grammar**. Use **Re-check** after editing.

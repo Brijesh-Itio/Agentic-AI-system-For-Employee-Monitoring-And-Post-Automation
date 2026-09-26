@@ -195,3 +195,77 @@ def check_grammar(
     if checked_words == 0:
         return None
     return GrammarReport(issues=issues[:max_issues], checked_word_count=checked_words)
+
+
+# ── Applying a suggestion to the post ──
+#
+# A suggestion's `original` is plain text as the model saw it (tags stripped),
+# while the post body is HTML — so the phrase has to be located in the HTML
+# tolerant of tags and entities in between. The replacement is made only when
+# it is unambiguous and safe; otherwise the reason is returned so the user can
+# edit by hand instead of the text being silently damaged.
+
+import html as _html
+import re as _re
+
+_BLOCK_TAG = _re.compile(r"<\s*/?\s*(p|div|h[1-6]|li|ul|ol|blockquote|br|table|tr|td|th|figure|section)\b", _re.IGNORECASE)
+_ANY_TAG = _re.compile(r"<[^>]+>")
+_TAGS = r"(?:<[^>]+>)*"
+_GAP = r"(?:\s|&nbsp;|&#160;|<[^>]+>)+"
+
+_CHAR_FORMS = {
+    "&": r"(?:&amp;|&#038;|&#38;|&)",
+    "<": r"(?:&lt;|<)",
+    ">": r"(?:&gt;|>)",
+    '"': r"(?:&quot;|&#34;|&#8220;|&#8221;|\")",
+    "'": r"(?:&#39;|&#039;|&apos;|&#8217;|&#8216;|\u2019|\u2018|')",
+    "\u2019": r"(?:&#8217;|&rsquo;|\u2019|'|&#39;)",
+    "\u2018": r"(?:&#8216;|&lsquo;|\u2018|'|&#39;)",
+    "\u201c": r"(?:&#8220;|&ldquo;|\u201c|\"|&quot;)",
+    "\u201d": r"(?:&#8221;|&rdquo;|\u201d|\"|&quot;)",
+    "\u2014": r"(?:&#8212;|&mdash;|\u2014)",
+    "\u2013": r"(?:&#8211;|&ndash;|\u2013)",
+}
+
+
+def _phrase_pattern(text: str):
+    tokens = _html.unescape(text).split()
+    if not tokens:
+        return None
+    parts = []
+    last = len(tokens) - 1
+    for i, tok in enumerate(tokens):
+        body = "".join(_CHAR_FORMS.get(c) or _re.escape(c) for c in tok)
+        # inline tags may sit next to a word (e.g. "the</b>,") but never before the
+        # phrase's first word or after its last — those tags belong to the surroundings
+        parts.append((_TAGS if i > 0 else "") + body + (_TAGS if i < last else ""))
+    return _re.compile(_GAP.join(parts), 0)
+
+
+def apply_suggestion(content_html: str, original: str, suggestion: str):
+    """Replaces the first occurrence of `original` with `suggestion` in the
+    post's HTML. Returns (new_html, None) on success, or (None, reason) when
+    it can't be done safely."""
+    original = (original or "").strip()
+    suggestion = (suggestion or "").strip()
+    if not original:
+        return None, "This suggestion has no text to replace."
+    if _html.unescape(original).split() == _html.unescape(suggestion).split():
+        return None, "The suggestion is identical to the current text."
+
+    pattern = _phrase_pattern(original)
+    if pattern is None:
+        return None, "This suggestion has no text to replace."
+    match = pattern.search(content_html)
+    if match is None:
+        already = _phrase_pattern(suggestion)
+        if already is not None and already.search(content_html):
+            return None, "Already applied — the text now reads as suggested."
+        return None, "That exact text wasn't found in the post — it may have been edited since the check. Re-check the grammar."
+
+    span = match.group(0)
+    if _BLOCK_TAG.search(span):
+        return None, "This suggestion runs across separate paragraphs or headings, so it can't be applied automatically. Edit it by hand."
+
+    replacement = _html.escape(suggestion, quote=False)
+    return content_html[: match.start()] + replacement + content_html[match.end():], None

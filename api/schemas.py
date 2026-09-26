@@ -1937,8 +1937,8 @@ class BlogGenerateRequest(BaseModel):
     # structure.py's SECONDARY_KEYWORD_DENSITY_TARGET). Purely a density-
     # tracking input, not worked into the generation prompt itself.
     secondary_keywords: Optional[list[str]] = None
-    min_words: int = 1200
-    max_words: int = 1500
+    min_words: int = 700
+    max_words: int = 800
 
 
 class ImageGenerateRequest(BaseModel):
@@ -2055,6 +2055,30 @@ class BlogPostOut(BaseModel):
 # and bulk approve/publish for blog posts, the same shapes as the
 # equivalent seo_social_posts request/response models (module 41)
 # directly above their own routes in api/routes/seo.py.
+class GrammarFix(BaseModel):
+    original: str
+    suggestion: str
+
+
+class GrammarApplyRequest(BaseModel):
+    """action='apply' changes the post text; action='dismiss' just removes the
+    suggestion from the report without touching the post."""
+
+    action: Literal["apply", "dismiss"] = "apply"
+    fixes: list[GrammarFix]
+
+
+class GrammarSkipped(BaseModel):
+    original: str
+    reason: str
+
+
+class GrammarApplyOut(BaseModel):
+    post: BlogPostOut
+    applied: int
+    skipped: list[GrammarSkipped]
+
+
 class BlogScheduleRequest(BaseModel):
     # None clears an existing schedule, going back to manual-publish-only.
     scheduled_at: Optional[datetime] = None
@@ -2076,8 +2100,8 @@ class BlogBulkGenerateRequest(BaseModel):
     # own full draft post (title/excerpt/content + structure check),
     # same as calling /blog/generate once per topic but in one request.
     topics: list[str]
-    min_words: int = 1200
-    max_words: int = 1500
+    min_words: int = 700
+    max_words: int = 800
     # A real AI-generated featured image for every post, not just text —
     # slower per post but matches /blog/{id}/publish's own auto-image
     # behavior instead of leaving every bulk post imageless until
@@ -2093,8 +2117,8 @@ class BlogCalendarGenerateRequest(BaseModel):
     days: int = 30
     # "HH:MM", the local time of day each day's post gets scheduled for.
     post_time: str = "10:00"
-    min_words: int = 1200
-    max_words: int = 1500
+    min_words: int = 700
+    max_words: int = 800
     generate_image: bool = True
 
 

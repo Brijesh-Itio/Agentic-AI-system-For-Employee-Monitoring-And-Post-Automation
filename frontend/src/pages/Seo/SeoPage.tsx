@@ -93,6 +93,7 @@ import {
   checkPageSpeed,
   checkSocialPostQuality,
   ContentQualityReport,
+  getQuetextStatus,
   createSeoSite,
   deleteSeoSite,
   getSiteImageLibrary,
@@ -315,6 +316,14 @@ function FacebookIcon({ className }: { className?: string }) {
   );
 }
 
+function PinterestIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
+      <path d="M12 2C6.48 2 2 6.48 2 12c0 4.24 2.64 7.86 6.36 9.32-.09-.79-.17-2.01.03-2.88.18-.78 1.18-4.98 1.18-4.98s-.3-.6-.3-1.49c0-1.39.81-2.44 1.81-2.44.86 0 1.27.64 1.27 1.41 0 .86-.55 2.14-.83 3.33-.24 1 .5 1.81 1.48 1.81 1.78 0 3.15-1.88 3.15-4.58 0-2.39-1.72-4.07-4.18-4.07-2.85 0-4.52 2.14-4.52 4.34 0 .86.33 1.78.75 2.28a.3.3 0 0 1 .07.29c-.08.32-.25 1-.29 1.15-.05.19-.15.24-.35.14-1.32-.61-2.14-2.53-2.14-4.08 0-3.32 2.41-6.37 6.96-6.37 3.65 0 6.49 2.6 6.49 6.08 0 3.63-2.29 6.54-5.46 6.54-1.07 0-2.07-.55-2.41-1.21l-.66 2.5c-.24.92-.88 2.08-1.31 2.78.99.3 2.03.47 3.11.47 5.52 0 10-4.48 10-10S17.52 2 12 2Z" />
+    </svg>
+  );
+}
+
 const severityVariant: Record<TechnicalIssue["severity"], "destructive" | "warning" | "outline"> = {
   critical: "destructive",
   warning: "warning",
@@ -336,13 +345,17 @@ const socialStatusVariant: Record<string, "warning" | "success" | "outline" | "d
   failed: "destructive",
 };
 
-const ALL_PLATFORMS: SocialPlatform[] = ["linkedin", "twitter", "instagram", "facebook"];
+const ALL_PLATFORMS: SocialPlatform[] = ["linkedin", "twitter", "instagram", "facebook", "pinterest"];
+// Instagram and Pinterest both have no text-only post type — every post
+// on either needs a real image URL before it can publish.
+const IMAGE_REQUIRED_PLATFORMS: SocialPlatform[] = ["instagram", "pinterest"];
 
 const PLATFORM_ICONS: Record<SocialPlatform, (props: { className?: string }) => ReactElement> = {
   linkedin: LinkedinIcon,
   twitter: TwitterIcon,
   instagram: InstagramIcon,
   facebook: FacebookIcon,
+  pinterest: PinterestIcon,
 };
 
 const TABS: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
@@ -374,45 +387,63 @@ function formatJobType(jobType: string) {
 // numbers are estimates, not certified results — see the disclaimer at
 // the bottom of the expanded panel and ai/seo/content_quality.py's module
 // docstring for exactly what each does and doesn't cover.
+// Real plagiarism + AI-content detection via Quetext DeepSearch — replaced the free local heuristic at the
+// user's explicit request ("we have a real API for this, stop using the free one"). Runs automatically at
+// generation time on the backend (see api/routes/seo.py's _check_and_store_blog_quality /
+// _check_and_store_social_quality); this panel just shows the result and offers "Re-check". Renders nothing
+// at all when Quetext isn't configured (QUETEXT_API_KEY unset) — matches how every other optional
+// integration in this app disappears rather than showing a broken/greyed-out control.
 function ContentQualityPanel({
   reportJson,
-  checkedAt,
   onCheck,
   checking,
+  quetextConfigured,
 }: {
   reportJson: string | null;
-  checkedAt: string | null;
   onCheck: () => void;
   checking: boolean;
+  quetextConfigured?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const report: ContentQualityReport | null = parseQualityReport(reportJson);
+  const q = report?.quetext;
 
-  if (!report) {
+  if (!quetextConfigured) return null;
+
+  if (!q) {
     return (
       <Button size="sm" variant="outline" onClick={onCheck} disabled={checking}>
         {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-        Check plagiarism & AI content detection
+        {checking ? "Checking with Quetext (can take a couple of minutes)…" : "Check plagiarism & AI content detection"}
       </Button>
     );
   }
 
-  const { humanization: h, plagiarism: p } = report;
-  const humanVariant = h.score >= 70 ? "success" : h.score >= 40 ? "warning" : "destructive";
-  const originality = 100 - p.overall_similarity;
-  const plagVariant = p.overall_similarity < 10 ? "success" : p.overall_similarity < 30 ? "warning" : "destructive";
+  const qPlagOriginality = q.plagiarism.ok && q.plagiarism.score != null ? Math.round(100 - q.plagiarism.score) : null;
+  const qPlagVariant = qPlagOriginality != null ? (qPlagOriginality >= 90 ? "success" : qPlagOriginality >= 70 ? "warning" : "destructive") : "destructive";
+  const qAiScore = q.ai_detection.ok && q.ai_detection.ai_score != null ? Math.round(q.ai_detection.ai_score) : null;
+  const qAiVariant = qAiScore != null ? (qAiScore < 30 ? "success" : qAiScore < 70 ? "warning" : "destructive") : "destructive";
 
   return (
     <div className="mt-2">
       <div className="flex flex-wrap items-center gap-2">
-        <Badge variant={plagVariant} title={p.verdict}>
-          <ShieldCheck className="h-3 w-3" />
-          Plagiarism check — {originality}% original
-        </Badge>
-        <Badge variant={humanVariant} title={h.band}>
-          <Sparkles className="h-3 w-3" />
-          AI content detection — {h.score}/100 human-like
-        </Badge>
+        {q.plagiarism.ok && (
+          <Badge variant={qPlagVariant} title="Real web-wide check via Quetext DeepSearch">
+            <ShieldCheck className="h-3 w-3" />
+            Plagiarism check — {qPlagOriginality}% original
+          </Badge>
+        )}
+        {q.ai_detection.ok && (
+          <Badge variant={qAiVariant} title="Real AI-content check via Quetext">
+            <Sparkles className="h-3 w-3" />
+            AI content detection — {qAiScore}%
+          </Badge>
+        )}
+        {(!q.plagiarism.ok || !q.ai_detection.ok) && (
+          <Badge variant="destructive" title={q.plagiarism.error || q.ai_detection.error || undefined}>
+            Quetext check failed
+          </Badge>
+        )}
         <button
           onClick={() => setExpanded((v) => !v)}
           className="text-theme-xs text-brand-600 hover:underline dark:text-brand-400"
@@ -431,45 +462,43 @@ function ContentQualityPanel({
       {expanded && (
         <div className="mt-2 space-y-2.5 rounded-lg border border-gray-100 bg-gray-50 p-3 text-theme-xs dark:border-gray-800 dark:bg-white/5">
           <div>
-            <p className="font-medium text-gray-700 dark:text-gray-200">AI Content Detection — {h.band}</p>
-            <p className="mt-0.5 text-gray-400">
-              {h.word_count} words · avg {h.avg_sentence_length} words/sentence · sentence variety {h.sentence_length_variety}/100
-              {" "}
-              · vocabulary variety {h.lexical_diversity}/100
-            </p>
-            {h.notes.map((n, i) => (
-              <p key={i} className="mt-0.5 text-gray-400">• {n}</p>
-            ))}
-            {h.flagged_phrases.length > 0 && (
-              <div className="mt-1.5 flex flex-wrap gap-1">
-                {h.flagged_phrases.map((f, i) => (
-                  <span
-                    key={i}
-                    title={f.reason}
-                    className="rounded bg-warning-50 px-1.5 py-0.5 text-warning-700 dark:bg-warning-500/10 dark:text-warning-400"
-                  >
-                    "{f.phrase}"
-                  </span>
-                ))}
-              </div>
+            <p className="font-medium text-gray-700 dark:text-gray-200">Plagiarism check</p>
+            {q.plagiarism.ok ? (
+              q.plagiarism.matches.length > 0 ? (
+                q.plagiarism.matches.slice(0, 5).map((m, i) => (
+                  <p key={i} className="mt-0.5 text-gray-400">
+                    {Math.round(m.percent_similar)}% similar
+                    {m.source_url && (
+                      <>
+                        {" to "}
+                        <a href={m.source_url} target="_blank" rel="noreferrer" className="text-brand-600 underline dark:text-brand-400">
+                          {m.source_url}
+                        </a>
+                      </>
+                    )}
+                    {m.snippet && ` — matched: "…${m.snippet}…"`}
+                  </p>
+                ))
+              ) : (
+                <p className="mt-0.5 text-gray-400">No matching sources found on the web.</p>
+              )
+            ) : (
+              <p className="mt-0.5 text-error-500">{q.plagiarism.error}</p>
             )}
           </div>
 
           <div className="border-t border-gray-200 pt-2 dark:border-gray-700">
-            <p className="font-medium text-gray-700 dark:text-gray-200">Plagiarism Check — {p.verdict}</p>
-            {p.matches.map((m, i) => (
-              <p key={i} className="mt-0.5 text-gray-400">
-                {m.similarity}% similar to your {m.source_type} post "{m.source_title}" — matched: "…{m.matched_snippet}…"
-              </p>
-            ))}
+            <p className="font-medium text-gray-700 dark:text-gray-200">AI content detection</p>
+            {q.ai_detection.ok ? (
+              <p className="mt-0.5 text-gray-400">{q.ai_detection.summary || "No summary returned."}</p>
+            ) : (
+              <p className="mt-0.5 text-error-500">{q.ai_detection.error}</p>
+            )}
           </div>
 
           <p className="border-t border-gray-200 pt-2 text-gray-400 dark:border-gray-700 dark:text-gray-500">
-            {checkedAt && `Checked ${new Date(checkedAt).toLocaleString()}. `}
-            The plagiarism check compares against this site's own saved content, not the public internet. AI content
-            detection is a heuristic estimate of how AI-sounding the writing reads (sentence variety, wording, stock
-            phrases) — not
-            a certified AI-content detector. Both are a starting point for review, not a pass/fail gate.
+            Checked with Quetext {new Date(q.checked_at).toLocaleString()}. A real, web-wide check from a paid
+            third-party service — a starting point for review, not a pass/fail gate.
           </p>
         </div>
       )}
@@ -3638,6 +3667,7 @@ const SOCIAL_CHAR_LIMITS: Record<SocialPlatform, number> = {
   twitter: 280,
   instagram: 2200,
   facebook: 63206,
+  pinterest: 500,
 };
 
 function SocialTab({ siteId }: { siteId: number }) {
@@ -3714,12 +3744,13 @@ function SocialTab({ siteId }: { siteId: number }) {
   const qualityCheckMutation = useMutation({
     mutationFn: (id: number) => checkSocialPostQuality(id),
     onSuccess: () => {
-      toast.success("Originality & humanization checked.");
+      toast.success("Checked with Quetext.");
       queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Quality check failed.")),
   });
-
+  // Quetext: real, paid check — only runs on this explicit button (see ContentQualityPanel).
+  const quetextStatusQuery = useQuery({ queryKey: ["seo", "quetext-status"], queryFn: getQuetextStatus, staleTime: 60_000 });
   const approveMutation = useMutation({
     mutationFn: (id: number) => approveSocialPost(id),
     onSuccess: () => {
@@ -4106,7 +4137,10 @@ function SocialTab({ siteId }: { siteId: number }) {
             </div>
             <div className="sm:col-span-2">
               <Label htmlFor="social-image-url">
-                Image URL{selectedPlatforms.includes("instagram") ? " (required for Instagram)" : " (optional)"}
+                Image URL
+                {selectedPlatforms.some((p) => IMAGE_REQUIRED_PLATFORMS.includes(p))
+                  ? ` (required for ${selectedPlatforms.filter((p) => IMAGE_REQUIRED_PLATFORMS.includes(p)).join(", ")})`
+                  : " (optional)"}
               </Label>
               <Input
                 id="social-image-url"
@@ -4114,9 +4148,10 @@ function SocialTab({ siteId }: { siteId: number }) {
                 onChange={(e) => setImageUrl(e.target.value)}
                 placeholder="https://example.com/page-image.jpg"
               />
-              {selectedPlatforms.includes("instagram") && !imageUrl.trim() && (
+              {selectedPlatforms.some((p) => IMAGE_REQUIRED_PLATFORMS.includes(p)) && !imageUrl.trim() && (
                 <p className="mt-1 text-theme-xs text-warning-500">
-                  Instagram has no text-only post type — this post won't be publishable there without an image URL.
+                  {selectedPlatforms.filter((p) => IMAGE_REQUIRED_PLATFORMS.includes(p)).join(" and ")} have no
+                  text-only post type — this post won't be publishable there without an image URL.
                 </p>
               )}
             </div>
@@ -4545,13 +4580,13 @@ function SocialTab({ siteId }: { siteId: number }) {
                   )}
                   <ContentQualityPanel
                     reportJson={post.quality_report_json}
-                    checkedAt={post.quality_checked_at}
                     onCheck={() => qualityCheckMutation.mutate(post.id)}
                     checking={qualityCheckMutation.isPending && qualityCheckMutation.variables === post.id}
+                    quetextConfigured={quetextStatusQuery.data?.configured}
                   />
-                  {post.platform === "instagram" && !post.image_url && (
+                  {IMAGE_REQUIRED_PLATFORMS.includes(post.platform) && !post.image_url && (
                     <p className="mt-1 text-theme-xs text-warning-500">
-                      No image URL — this post can't be published to Instagram until one is added.
+                      No image URL — this post can't be published to {post.platform} until one is added.
                     </p>
                   )}
                   {post.error && <p className="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">{post.error}</p>}
@@ -5479,11 +5514,13 @@ function BlogTab({ siteId }: { siteId: number }) {
   const qualityCheckMutation = useMutation({
     mutationFn: (id: number) => checkBlogPostQuality(id),
     onSuccess: () => {
-      toast.success("Originality & humanization checked.");
+      toast.success("Checked with Quetext.");
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
     onError: (err) => toast.error(serverErrorDetail(err, "Quality check failed.")),
   });
+  // Quetext: real, paid check — only runs on this explicit button (see ContentQualityPanel).
+  const quetextStatusQuery = useQuery({ queryKey: ["seo", "quetext-status"], queryFn: getQuetextStatus, staleTime: 60_000 });
 
   const approveMutation = useMutation({
     mutationFn: (id: number) => approveBlogPost(id),
@@ -6038,9 +6075,9 @@ function BlogTab({ siteId }: { siteId: number }) {
                     )}
                     <ContentQualityPanel
                       reportJson={post.quality_report_json}
-                      checkedAt={post.quality_checked_at}
                       onCheck={() => qualityCheckMutation.mutate(post.id)}
                       checking={qualityCheckMutation.isPending && qualityCheckMutation.variables === post.id}
+                      quetextConfigured={quetextStatusQuery.data?.configured}
                     />
                     {post.error && <p className="mt-1 text-theme-xs text-red-500">{post.error}</p>}
                     {(post.slug || post.tags || post.categories) && (

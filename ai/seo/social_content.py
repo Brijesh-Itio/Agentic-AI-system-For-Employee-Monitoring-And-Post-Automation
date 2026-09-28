@@ -19,7 +19,7 @@ from ai.llm.sanitize import strip_leaked_prompt_markers
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_PLATFORMS = ("linkedin", "twitter", "instagram", "facebook")
+SUPPORTED_PLATFORMS = ("linkedin", "twitter", "instagram", "facebook", "pinterest")
 
 _PLATFORM_PROMPTS = {
     "linkedin": (
@@ -39,6 +39,13 @@ _PLATFORM_PROMPTS = {
     "facebook": (
         "Write a Facebook post about this page: casual but informative tone, "
         "shorter than LinkedIn, inviting comments/discussion. No preamble, no quotes."
+    ),
+    "pinterest": (
+        "Write a Pinterest Pin description about this page: benefit-led and "
+        "keyword-rich — specific about what the reader will learn or get, since "
+        "Pinterest's own search relies on descriptive keywords in the text itself, "
+        "not hashtags. 100-200 characters. End with at most 1-2 relevant hashtags. "
+        "No preamble, no quotes."
     ),
 }
 
@@ -71,6 +78,22 @@ class SocialPostDraft:
 # them would trade this false negative for real false positives.
 _INSTRUCTION_OPENERS = ("write a ", "write an ")
 
+# Standing content brief (user instruction) — the same SEO/E-E-A-T/AEO/GEO/industry-specific brief given to
+# ai/seo/blog_content.py's long-form article generator, adapted for short social copy: AEO's "open with a
+# quotable standalone answer" and GEO's "lift-out-able paragraph" don't map onto a 150-word post or a tweet
+# (a platform never indexes or cites an individual social post the way a search/answer engine indexes a
+# page), so this keeps only the parts that genuinely apply — real industry terminology, credible specific
+# detail, and never fabricating a statistic or source — plus the one practical AEO-equivalent for a short
+# format: lead with the real point, not a vague hook.
+_CONTENT_BRIEF = (
+    "Write with real, industry-correct terminology for whatever this page is actually about, not generic "
+    "wording that could describe any page. Be specific and credible — a real detail or concrete point beats "
+    "a vague claim — but never invent a statistic, study, date, or named source that isn't genuinely "
+    "well-established; if a number would help but isn't something you actually know to be true, make the "
+    "same point without a fabricated figure. Lead with the real point or takeaway in the first line — never "
+    "a throat-clearing hook that doesn't say anything yet.\n\n"
+)
+
 
 def _looks_like_leaked_instructions(text: str) -> bool:
     return text.strip()[:40].lower().startswith(_INSTRUCTION_OPENERS)
@@ -86,6 +109,7 @@ def generate_social_post(
         return None
 
     prompt = (
+        f"{_CONTENT_BRIEF}"
         f"{_PLATFORM_PROMPTS[platform]}\n\n"
         f"PAGE TITLE: {page_title}\n\n"
         f"PAGE CONTENT:\n{content_excerpt[:1500]}"

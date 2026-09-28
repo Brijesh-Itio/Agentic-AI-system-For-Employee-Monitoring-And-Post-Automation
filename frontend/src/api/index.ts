@@ -1304,7 +1304,7 @@ export const adoptSheets = (spreadsheetIdOrUrl: string, kind: SheetsKind = "main
     .post<SheetsStatus>("/api/seo/sheets/adopt", { spreadsheet_id_or_url: spreadsheetIdOrUrl, kind })
     .then((r) => r.data);
 
-export type SocialPlatform = "linkedin" | "twitter" | "instagram" | "facebook";
+export type SocialPlatform = "linkedin" | "twitter" | "instagram" | "facebook" | "pinterest";
 export type SocialPostStatus = "draft" | "approved" | "rejected" | "posted" | "failed";
 
 export interface SocialPost {
@@ -1430,8 +1430,9 @@ export const createSocialPost = (payload: {
 
 // Module 60 — manual re-check, e.g. after editing a draft's content. See
 // checkBlogPostQuality's own comment.
+// Now runs the real Quetext check server-side (submit-then-poll), so this can take a couple of minutes.
 export const checkSocialPostQuality = (postId: number) =>
-  api.post<SocialPost>(`/api/seo/social/${postId}/quality-check`, {}, { timeout: 30_000 }).then((r) => r.data);
+  api.post<SocialPost>(`/api/seo/social/${postId}/quality-check`, {}, { timeout: 4 * 60_000 }).then((r) => r.data);
 
 export const approveSocialPost = (postId: number) =>
   api.post<SocialPost>(`/api/seo/social/${postId}/approve`, {}).then((r) => r.data);
@@ -2281,11 +2282,51 @@ export interface PlagiarismReport {
   matches: PlagiarismMatch[];
 }
 
-export interface ContentQualityReport {
-  humanization: HumanizationReport;
-  plagiarism: PlagiarismReport;
+export interface QuetextMatch {
+  percent_similar: number;
+  source_url: string | null;
+  snippet: string | null;
+}
+
+export interface QuetextPlagiarism {
+  ok: boolean;
+  score: number | null;
+  word_count: number | null;
+  matches: QuetextMatch[];
+  error: string | null;
+}
+
+export interface QuetextAiMatch {
+  sentence: string;
+  generated_prob: number;
+}
+
+export interface QuetextAiDetect {
+  ok: boolean;
+  ai_score: number | null;
+  summary: string | null;
+  matches: QuetextAiMatch[];
+  error: string | null;
+}
+
+// The real, paid Quetext DeepSearch check — now the only plagiarism/AI-detection check the app runs (the
+// free local heuristic was retired at the user's request). Present once the post has been checked, which
+// happens automatically at generation time and again on "Re-check".
+export interface QuetextQuality {
+  plagiarism: QuetextPlagiarism;
+  ai_detection: QuetextAiDetect;
   checked_at: string;
 }
+
+export interface ContentQualityReport {
+  // Both unused now (kept optional only so an old, pre-switch stored report still parses without crashing).
+  humanization?: HumanizationReport | null;
+  plagiarism?: PlagiarismReport | null;
+  checked_at: string;
+  quetext?: QuetextQuality | null;
+}
+
+export const getQuetextStatus = () => api.get<{ configured: boolean }>("/api/seo/quetext/status").then((r) => r.data);
 
 /** Parses a post's quality_report_json, or null if never checked / unparseable. */
 export function parseQualityReport(json: string | null): ContentQualityReport | null {
@@ -2458,8 +2499,9 @@ export interface GrammarReport {
 // Module 60 — the automatic check runs once, at generation time; this is
 // the manual re-check, e.g. after editing a draft's content (updateBlogPost
 // above re-runs the structure checker but not this one).
+// Now runs the real Quetext check server-side (submit-then-poll), so this can take a couple of minutes.
 export const checkBlogPostQuality = (postId: number) =>
-  api.post<BlogPost>(`/api/seo/blog/${postId}/quality-check`, {}, { timeout: 30_000 }).then((r) => r.data);
+  api.post<BlogPost>(`/api/seo/blog/${postId}/quality-check`, {}, { timeout: 4 * 60_000 }).then((r) => r.data);
 
 export const approveBlogPost = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/approve`, {}).then((r) => r.data);

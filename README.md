@@ -52,7 +52,7 @@ per-token cost, and activity data never leaves the machine it is tracked on.
 | **Analytics** | GA4 realtime, performance and events |
 | **Indexing** | Index coverage and URL inspection |
 | **Social** | AI-generated or hand-written posts for LinkedIn, X / Twitter, Instagram and Facebook — edit, delete, attach or generate images, schedule, publish |
-| **Blog** | AI blog generation with structure, grammar, plagiarism and FAQ checks; draft → approve → publish to WordPress / Webflow; content calendar |
+| **Blog** | AI blog generation with structure, grammar, plagiarism and FAQ checks — plus an opt-in real plagiarism/AI-detection check via Quetext; draft → approve → publish to WordPress / Webflow; content calendar |
 | **Backlinks** | Brand-mention monitoring, keyword and domain research |
 | **Redirection** | Manage URL redirects and sync them to the site's `.htaccess` |
 
@@ -188,6 +188,7 @@ everything else is optional and enables a specific integration.
 | Social | `LINKEDIN_*`, `FACEBOOK_*`, `INSTAGRAM_*` | Social publishing |
 | Notifications | `SLACK_WEBHOOK_URL` | Digest delivery to Slack |
 | Research | `SEMRUSH_API_KEY`, `RAPIDAPI_*` keys, `GOOGLE_ALERTS_RSS_URL` | Keyword, backlink and brand-mention data |
+| Content originality | `QUETEXT_API_KEY` | The "Check with Quetext" real plagiarism/AI-detection button on Blog and Social posts (paid, opt-in) |
 
 Per-site SEO credentials (Google property, CMS login, server access, Google Sheets) are entered in the
 dashboard's SEO → Overview tab and stored in the database, not in `.env`.

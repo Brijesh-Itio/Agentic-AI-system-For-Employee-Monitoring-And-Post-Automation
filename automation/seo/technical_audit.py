@@ -730,6 +730,70 @@ def detect_heading_hierarchy(pages: List[CrawledPage]) -> List[TechnicalIssue]:
     return issues
 
 
+# Below this many words of real body text, a page is unlikely to say enough about its topic to be worth
+# ranking on its own — a widely used practitioner rule of thumb (Screaming Frog, SEMrush and other audit
+# tools default to a similar figure), not a number Google has ever published as an official cutoff, which
+# is why this is a "warning"/"critical" audit flag for a human to judge, not an automatic rejection. Below
+# the lower figure, a page reads as close to empty (a stub, a placeholder, a page mid-migration).
+THIN_CONTENT_WARNING_WORDS = 300
+THIN_CONTENT_CRITICAL_WORDS = 100
+# Tags stripped before counting: real navigation/boilerplate text (menus, footers) isn't the page's own
+# content and would let a genuinely thin page hide behind a site-wide menu and footer's word count.
+_BOILERPLATE_TAGS = ("script", "style", "noscript", "nav", "header", "footer", "form", "aside")
+
+
+def detect_thin_content(pages: List[CrawledPage]) -> List[TechnicalIssue]:
+    """Flags pages with too little real body text to plausibly satisfy a
+    searcher's intent or say anything specific about their topic — "thin
+    content" in the sense Google's own Panda/Helpful Content guidance
+    describes (pages providing little or no unique value), approximated
+    here the only way a static crawl safely can: real body word count
+    after stripping navigation/boilerplate. This is a starting signal for
+    a human to review, not a judgement that the page is worthless — a
+    short page can be exactly right for its purpose (a contact page, a
+    thank-you page); that's exactly why this stays an audit finding you
+    approve or reject, never an auto-applied rewrite (see this module's
+    own docstring on why applying content changes automatically is out
+    of scope). A specific, page-aware improvement plan is available via
+    the existing "Get AI suggestion" action every issue already has
+    (ai/seo/issue_remediation.py's generate_ai_suggestion, which works
+    for any rule name, not just this one)."""
+    issues = []
+    for page in pages:
+        if not page.html or page.status_code != 200:
+            continue
+        soup = BeautifulSoup(page.html, "html.parser")
+        for tag in soup.find_all(_BOILERPLATE_TAGS):
+            tag.decompose()
+        main = soup.find("main") or soup.find("article") or soup.body or soup
+        text = main.get_text(" ", strip=True) if main else ""
+        word_count = len(text.split())
+        if word_count >= THIN_CONTENT_WARNING_WORDS:
+            continue
+
+        severity = "critical" if word_count < THIN_CONTENT_CRITICAL_WORDS else "warning"
+        issues.append(
+            TechnicalIssue(
+                rule="thin_content",
+                severity=severity,
+                url=page.url,
+                message=(
+                    f"Only about {word_count} words of real body content (menus/footers excluded) — "
+                    f"below the {THIN_CONTENT_WARNING_WORDS}-word range typically needed to cover a topic "
+                    "in enough depth to be worth ranking on its own."
+                ),
+                suggested_fix=(
+                    "Expand this page with real, specific detail — answer the questions a reader searching "
+                    "this topic would actually have, add concrete examples, and cover sub-topics a single "
+                    "paragraph can't. If the page is intentionally short for its purpose (a contact page, a "
+                    "thank-you page), reject this finding rather than padding it with filler. Use \"Get AI "
+                    "suggestion\" for a page-specific improvement plan."
+                ),
+            )
+        )
+    return issues
+
+
 def detect_mixed_content(pages: List[CrawledPage]) -> List[TechnicalIssue]:
     """Module 41 — an https:// page that still loads a resource over
     plain http:// gets it blocked outright by modern browsers (for
@@ -1001,6 +1065,7 @@ _ALL_DETECTORS = (
     detect_invalid_schema,
     detect_url_structure,
     detect_temporary_redirect_overuse,
+    detect_thin_content,
 )
 
 

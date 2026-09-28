@@ -23,7 +23,13 @@ import requests
 from bs4 import BeautifulSoup
 
 from automation.seo.crawler import USER_AGENT
-from automation.seo.technical_audit import HREFLANG_RE, json_ld_nodes
+from automation.seo.technical_audit import (
+    HREFLANG_RE,
+    THIN_CONTENT_CRITICAL_WORDS,
+    THIN_CONTENT_WARNING_WORDS,
+    _BOILERPLATE_TAGS,
+    json_ld_nodes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +273,35 @@ def _audit_structured_data(soup: BeautifulSoup) -> "tuple[str, TagFinding]":
     )
 
 
+def _audit_content_length(soup: BeautifulSoup) -> "tuple[str, TagFinding]":
+    """Thin-content check — same threshold and same boilerplate-stripped
+    word count as technical_audit.py's detect_thin_content (module 28.2),
+    just reported here as one more row in this page's own tag report
+    instead of a site-wide crawl finding. "existing"/"missing" is a loose
+    fit for "content length" (there's no tag to be missing), but reusing
+    this report's own two-bucket shape — rather than adding a third
+    top-level section for one check — is what actually answers "where do
+    I see this for one page," which is the whole point of this module."""
+    soup_copy = BeautifulSoup(str(soup), "html.parser")
+    for tag in soup_copy.find_all(_BOILERPLATE_TAGS):
+        tag.decompose()
+    main = soup_copy.find("main") or soup_copy.find("article") or soup_copy.body or soup_copy
+    word_count = len((main.get_text(" ", strip=True) if main else "").split())
+
+    if word_count >= THIN_CONTENT_WARNING_WORDS:
+        return "existing", TagFinding(
+            tag="Content length", detail=f"{word_count} words of real body content — looks sufficient.",
+        )
+    severity = "very thin" if word_count < THIN_CONTENT_CRITICAL_WORDS else "thin"
+    return "missing", TagFinding(
+        tag="Content length",
+        detail=(
+            f"Only {word_count} words of real body content (menus/footers not counted) — {severity}, below "
+            f"the {THIN_CONTENT_WARNING_WORDS}-word range typically needed to cover a topic in enough depth."
+        ),
+    )
+
+
 def _audit_html_lang(soup: BeautifulSoup) -> "tuple[str, TagFinding]":
     """A single attribute, not a repeatable element — handled directly
     rather than through _classify since "absent" and "present but
@@ -377,6 +412,9 @@ def run_page_tag_audit(url: str) -> PageTagAuditReport:
 
     schema_kind, schema_finding = _audit_structured_data(soup)
     buckets[schema_kind].append(schema_finding)
+
+    content_kind, content_finding = _audit_content_length(soup)
+    buckets[content_kind].append(content_finding)
 
     return PageTagAuditReport(
         url=url,

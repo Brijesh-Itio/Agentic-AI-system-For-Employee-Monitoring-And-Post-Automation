@@ -186,6 +186,19 @@ class Settings(BaseSettings):
     # key = off, same convention as every other optional integration.
     RAPIDAPI_SEMRUSH_KEY: str = ""
 
+    # Quetext DeepSearch — real, paid plagiarism and AI-content detection
+    # (Blog/Social "Check with Quetext" button), billed against the
+    # account's Quetext word balance. Separate from, and never replacing,
+    # the free local originality/AI-pattern heuristic that already runs
+    # automatically on every generated post (ai/seo/content_quality.py) —
+    # this only ever runs when a human presses the button. Get a key at
+    # quetext.com -> account -> Developer API. Blank = the button is
+    # hidden. Only Plagiarism and AI Detection are wired up — Quetext's
+    # published API has no documented endpoint for the Humanizer,
+    # Summarizer or Grammar Checker tools that are also part of the plan;
+    # see automation/seo/quetext_client.py's module docstring.
+    QUETEXT_API_KEY: str = ""
+
     # Module 37 follow-up — "Semrush Magic Tool" on RapidAPI (host
     # semrush-magic-tool.p.rapidapi.com), a DIFFERENT third-party
     # product from RAPIDAPI_SEMRUSH_KEY's provider above (also not
@@ -214,6 +227,19 @@ class Settings(BaseSettings):
     TWITTER_API_SECRET: str = ""
     TWITTER_ACCESS_TOKEN: str = ""
     TWITTER_ACCESS_TOKEN_SECRET: str = ""
+
+    # Pinterest API v5 (POST /v5/pins) — see automation/pinterest/poster.py.
+    # Endpoint/body shape verified against developers.pinterest.com's
+    # current API v5 docs this session. A single OAuth access token
+    # (Bearer auth) with the pins:write scope, not a 4-key handshake like
+    # Twitter's OAuth 1.0a — generate one for your own account via
+    # Pinterest's developer app (Sandbox or a Trial/Standard app both
+    # work for posting to your own boards). Like Instagram, Pinterest has
+    # no text-only post type — every Pin needs an image AND a destination
+    # board, so PINTEREST_BOARD_ID is required too, not optional. Blank =
+    # stays off, same convention as every other optional integration here.
+    PINTEREST_ACCESS_TOKEN: str = ""
+    PINTEREST_BOARD_ID: str = ""
 
     # Facebook Graph API (POST /{page-id}/feed, or /{page-id}/photos with
     # an image) — see automation/facebook/poster.py. Needs a genuinely

@@ -251,7 +251,9 @@ Site health and the daily routine in one place:
 
 ### 15.3 Technical Audit
 
-Finds technical SEO problems on the site.
+Finds technical SEO problems on the site — broken links, missing tags, duplicate titles, and more, including
+**thin content**: pages with too little real text (under about 300 words, menus and footers not counted) to be
+worth ranking on their own, such as a near-empty form page or a short category page.
 
 1. Press **Run Technical Audit**. A large site takes a few minutes; a progress bar shows it working.
 2. Review **Technical Issues**. Filter by **Pending, Approved, Rejected, Resolved** or **All**.
@@ -330,7 +332,10 @@ internal links and the plagiarism and grammar checks are then prepared in the ba
 what it is working on, and you can read and edit meanwhile.
 
 Each draft shows badges for **structure issues** (missing H1, too short), **plagiarism**, **AI-content score** and
-**grammar**. Use **Re-check** after editing.
+**grammar**. The plagiarism and AI-content badges are a real, paid check against the whole web via Quetext — it
+runs automatically when the post is generated and again whenever you press **Re-check** after editing (it spends
+your Quetext word balance each time). Where no Quetext subscription is set up, those two badges and the check
+simply don't appear. The same applies to Social posts.
 
 A draft moves through: **Draft → Approved → Published (as a CMS draft) → Live.**
 

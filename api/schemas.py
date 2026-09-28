@@ -1265,10 +1265,50 @@ class PlagiarismReportOut(BaseModel):
     matches: list[PlagiarismMatchOut]
 
 
-class ContentQualityReportOut(BaseModel):
-    humanization: HumanizationReportOut
-    plagiarism: PlagiarismReportOut
+class QuetextMatchOut(BaseModel):
+    percent_similar: float
+    source_url: Optional[str] = None
+    snippet: Optional[str] = None
+
+
+class QuetextPlagiarismOut(BaseModel):
+    ok: bool
+    score: Optional[float] = None
+    word_count: Optional[int] = None
+    matches: list[QuetextMatchOut] = []
+    error: Optional[str] = None
+
+
+class QuetextAiMatchOut(BaseModel):
+    sentence: str
+    generated_prob: float
+
+
+class QuetextAiDetectOut(BaseModel):
+    ok: bool
+    ai_score: Optional[float] = None
+    summary: Optional[str] = None
+    matches: list[QuetextAiMatchOut] = []
+    error: Optional[str] = None
+
+
+class QuetextQualityOut(BaseModel):
+    """The real, paid Quetext check — only ever present once a human has
+    pressed "Check with Quetext"; absent otherwise."""
+
+    plagiarism: QuetextPlagiarismOut
+    ai_detection: QuetextAiDetectOut
     checked_at: datetime
+
+
+class ContentQualityReportOut(BaseModel):
+    # Both None now that the free local heuristic has been replaced by the real Quetext check (kept
+    # Optional, not removed, so older stored reports from before that switch still parse).
+    humanization: Optional[HumanizationReportOut] = None
+    plagiarism: Optional[PlagiarismReportOut] = None
+    checked_at: datetime
+    # None only if QUETEXT_API_KEY isn't configured, or the post hasn't been checked yet.
+    quetext: Optional[QuetextQualityOut] = None
 
 
 class FaqRequest(BaseModel):
@@ -1414,7 +1454,7 @@ class DigestRollupOut(BaseModel):
     emailed_at: Optional[datetime] = None
 
 
-SocialPlatform = Literal["linkedin", "twitter", "instagram", "facebook"]
+SocialPlatform = Literal["linkedin", "twitter", "instagram", "facebook", "pinterest"]
 
 
 class SocialPostUpdate(BaseModel):

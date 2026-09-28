@@ -19,7 +19,7 @@ from api.config import settings
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "gpt-5"
+_DEFAULT_MODEL = "gpt-6-sol"
 _DEFAULT_EMBED_MODEL = "text-embedding-3-small"
 
 
@@ -69,19 +69,39 @@ class OpenAIProvider(LLMProvider):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        # Verified live: newer models (gpt-5 and other reasoning-capable models) reject the classic
+        # `max_tokens` param outright ("Unsupported parameter... Use 'max_completion_tokens' instead").
+        budget = max_tokens or 4096
+
+        def _call(token_budget: int):
+            return client.chat.completions.create(
+                model=chosen_model, max_completion_tokens=token_budget, messages=messages,
+            )
+
         start = time.monotonic()
         try:
             client = self._get_client()
-            response = with_retry(
-                lambda: client.chat.completions.create(
-                    model=chosen_model,
-                    max_tokens=max_tokens or 4096,
-                    messages=messages,
-                ),
-                max_attempts=3,
-            )
-            latency_ms = (time.monotonic() - start) * 1000
+            response = with_retry(lambda: _call(budget), max_attempts=3)
             text = (response.choices[0].message.content or "").strip()
+
+            # Verified live: on a reasoning-capable model, invisible "reasoning tokens" are drawn from
+            # the SAME completion budget as the visible answer — a caller-supplied `max_tokens` sized
+            # for a non-reasoning model (Ollama, gpt-4-class) can be entirely consumed by reasoning,
+            # leaving finish_reason="length" and an EMPTY message with no error raised. Detected here
+            # (rather than masked by silently padding every call's budget) and retried once with a much
+            # larger budget so a caller never gets a false-empty result without at least one real attempt
+            # at a visible answer; a caller wanting to avoid the extra cost/latency this retry can add
+            # should pass a generous max_tokens for reasoning models in the first place.
+            if not text and response.choices[0].finish_reason == "length":
+                bigger = max(budget * 6, 2048)
+                logger.warning(
+                    "OpenAI %s returned an empty message after using its whole %d-token budget on internal "
+                    "reasoning — retrying once with max_completion_tokens=%d", chosen_model, budget, bigger,
+                )
+                response = with_retry(lambda: _call(bigger), max_attempts=2)
+                text = (response.choices[0].message.content or "").strip()
+
+            latency_ms = (time.monotonic() - start) * 1000
             return LLMResult(
                 text=text,
                 provider=self.name,

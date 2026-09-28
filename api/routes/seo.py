@@ -196,6 +196,11 @@ from api.schemas import (
     PageTagFindingOut,
     PlagiarismMatchOut,
     PlagiarismReportOut,
+    QuetextAiDetectOut,
+    QuetextAiMatchOut,
+    QuetextMatchOut,
+    QuetextPlagiarismOut,
+    QuetextQualityOut,
     TechnicalIssueEditTargetOut,
     TechnicalIssueOut,
     TechnicalIssueReview,
@@ -217,6 +222,7 @@ from ai.seo.report_metrics import REPORT_METRICS, validate_metrics
 from ai.seo.rollup_digest import generate_rollup_digest
 from ai.seo.social_content import generate_social_post
 from ai.seo.social_scheduler import publish_one as publish_one_social_post
+from automation.seo import quetext_client
 from automation.seo.backlinks.factory import get_provider as get_backlink_provider
 from automation.seo.cms.factory import get_cms_client
 from automation.seo.crawler import crawl_site, fetch_sitemap_urls
@@ -1928,35 +1934,73 @@ def _run_quality_check(content_html: str, candidates) -> ContentQualityReportOut
     )
 
 
+# ── Quetext DeepSearch — real, paid plagiarism + AI-content detection.
+# Replaced the free local heuristic (ai/seo/content_quality.py) at the user's explicit request: "we have a
+# real API for this, stop using the free one". Runs automatically at generation time (blog: from the
+# background followups job, so it never delays the draft appearing; social: inline, since a social post is
+# short enough that Quetext finishes in a few seconds — see automation/seo/quetext_client.py) and again
+# whenever "Re-check" is pressed. Skipped entirely (post left unchecked, no error shown) when
+# QUETEXT_API_KEY isn't set, so an install without a key just doesn't see this panel — same as every other
+# optional integration in this codebase.
+
+@router.get("/quetext/status")
+def quetext_status():
+    return {"configured": quetext_client.is_configured()}
+
+
+def _run_quetext_check(content_html: str, title: Optional[str]) -> QuetextQualityOut:
+    plagiarism = quetext_client.check_plagiarism(content_html, title=title)
+    ai_detection = quetext_client.check_ai_detection(content_html, title=title)
+    return QuetextQualityOut(
+        plagiarism=QuetextPlagiarismOut(
+            ok=plagiarism.ok, score=plagiarism.score, word_count=plagiarism.word_count,
+            matches=[
+                QuetextMatchOut(percent_similar=m.percent_similar, source_url=m.source_url, snippet=m.snippet)
+                for m in plagiarism.matches
+            ],
+            error=plagiarism.error,
+        ),
+        ai_detection=QuetextAiDetectOut(
+            ok=ai_detection.ok, ai_score=ai_detection.ai_score, summary=ai_detection.summary,
+            matches=[QuetextAiMatchOut(sentence=m.sentence, generated_prob=m.generated_prob) for m in ai_detection.matches],
+            error=ai_detection.error,
+        ),
+        checked_at=datetime.utcnow(),
+    )
+
+
+def _run_quetext_only(content_html: str, title: Optional[str] = None) -> ContentQualityReportOut:
+    return ContentQualityReportOut(humanization=None, plagiarism=None, checked_at=datetime.utcnow(), quetext=_run_quetext_check(content_html, title))
+
+
 def _check_and_store_blog_quality(db: Session, post_id: int, site_id: int, content_html: str, candidates=None) -> None:
-    """Runs right after a blog draft is created (every generation path —
-    single/bulk/calendar) so a reviewer sees originality/humanization
-    alongside the draft, same "not a separate manual step" treatment
-    module 27.5's structure checker gets. Never raises — a quality-check
-    failure (a bug in the heuristics, an unexpected content shape) must
-    never take down content generation itself; the post is simply left
-    unchecked (quality_report_json stays NULL) and can be re-checked
-    manually. `candidates` lets a bulk/calendar loop pass in one
-    site-wide pool loaded ONCE rather than re-querying per post."""
+    """Runs right after a blog draft is created (from the background followups job — every generation path,
+    single/bulk/calendar — see _run_blog_followup_job) so a reviewer sees Quetext's originality/AI-detection
+    result alongside the draft, and again whenever "Re-check" is pressed. Never raises — a check failure
+    must never take down content generation itself; the post is simply left unchecked and can be re-checked
+    manually. `site_id`/`candidates` are accepted for call-site compatibility but unused now — Quetext
+    checks against the whole web, not this site's own other posts, so there's no comparison pool to load."""
+    if not quetext_client.is_configured():
+        return
     try:
-        if candidates is None:
-            candidates = _load_quality_check_candidates(db, site_id, exclude_blog_post_id=post_id)
-        report = _run_quality_check(content_html, candidates)
+        row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+        report = _run_quetext_only(content_html, title=row.title if row else None)
         database.set_blog_post_quality(post_id, report.model_dump_json())
     except Exception:
-        logger.exception("Quality check failed for blog post %s — post saved without one", post_id)
+        logger.exception("Quetext quality check failed for blog post %s — post saved without one", post_id)
 
 
 def _check_and_store_social_quality(db: Session, post_id: int, site_id: int, content_html: str, candidates=None) -> None:
-    """Social-post counterpart to _check_and_store_blog_quality — see its
-    own comment."""
+    """Social-post counterpart to _check_and_store_blog_quality — see its own comment. Runs inline
+    (synchronously) rather than in a background job: a social post is short enough that Quetext finishes in
+    a few seconds in practice, so there's no need for the async pattern the (much longer) blog article uses."""
+    if not quetext_client.is_configured():
+        return
     try:
-        if candidates is None:
-            candidates = _load_quality_check_candidates(db, site_id, exclude_social_post_id=post_id)
-        report = _run_quality_check(content_html, candidates)
+        report = _run_quetext_only(content_html)
         database.set_social_post_quality(post_id, report.model_dump_json())
     except Exception:
-        logger.exception("Quality check failed for social post %s — post saved without one", post_id)
+        logger.exception("Quetext quality check failed for social post %s — post saved without one", post_id)
 
 
 @router.post("/content/quality-check", response_model=ContentQualityReportOut)
@@ -2581,8 +2625,6 @@ def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = De
             payload.image_url,
             facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
         )
-        _check_and_store_social_quality(db, post_id, payload.site_id, draft.content, candidates=candidates)
-        candidates.append(("social", post_id, f"{platform} post #{post_id}", draft.content))
         created_ids.append(post_id)
 
     if not created_ids:
@@ -2656,7 +2698,6 @@ def create_social_post_route(payload: SocialPostCreate, db: Session = Depends(ge
         (payload.image_url or "").strip() or None,
         facebook_account_id=payload.facebook_account_id if payload.platform == "facebook" else None,
     )
-    _check_and_store_social_quality(db, post_id, payload.site_id, payload.content)
     db.expire_all()
     return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
 
@@ -2697,8 +2738,6 @@ def update_social_post_route(post_id: int, payload: SocialPostUpdate, db: Sessio
         raise HTTPException(status_code=422, detail="Nothing to update")
 
     database.update_social_post_fields(post_id, changes)
-    if "content" in changes:
-        _check_and_store_social_quality(db, post_id, row.site_id, changes["content"])
     db.expire_all()
     return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
 
@@ -2838,7 +2877,6 @@ def bulk_generate_social_posts_route(payload: SocialBulkGenerateRequest, db: Ses
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
-    candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
     for topic in payload.topics:
         topic = topic.strip()
@@ -2856,14 +2894,6 @@ def bulk_generate_social_posts_route(payload: SocialBulkGenerateRequest, db: Ses
                 payload.image_url,
                 facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
             )
-            # Bulk-generation's actual duplicate-content risk is here, not
-            # the single-post route's: a topic list with near-duplicate
-            # entries (or an AI drifting toward the same phrasing across a
-            # long list) is exactly what this catches, checked against the
-            # whole batch generated so far plus everything already on the
-            # site.
-            _check_and_store_social_quality(db, post_id, payload.site_id, draft.content, candidates=candidates)
-            candidates.append(("social", post_id, f"{platform} post #{post_id}", draft.content))
             created_ids.append(post_id)
 
     if not created_ids:
@@ -2896,7 +2926,6 @@ def generate_social_calendar_route(payload: SocialCalendarGenerateRequest, db: S
     except ValueError:
         raise HTTPException(status_code=400, detail="post_time must be in HH:MM format")
 
-    candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
     for day_offset in range(payload.days):
         day = payload.start_date + timedelta(days=day_offset)
@@ -2916,11 +2945,6 @@ def generate_social_calendar_route(payload: SocialCalendarGenerateRequest, db: S
                 facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
             )
             database.set_social_post_schedule(post_id, scheduled_for)
-            # A calendar cycles through few topics over many days — the
-            # exact scenario most likely to produce near-duplicate posts,
-            # so this matters here even more than in bulk-generate above.
-            _check_and_store_social_quality(db, post_id, payload.site_id, draft.content, candidates=candidates)
-            candidates.append(("social", post_id, f"{platform} post #{post_id}", draft.content))
             created_ids.append(post_id)
 
     if not created_ids:
@@ -3311,8 +3335,6 @@ def _run_blog_followup_job(job: dict) -> None:
     post_id, site_id = job["post_id"], job["site_id"]
     db = SessionLocal()
     try:
-        _set_followup_stage(post_id, "Checking originality")
-        _check_and_store_blog_quality(db, post_id, site_id, job["content_html"])
         _set_followup_stage(post_id, "Writing meta tags")
         _generate_and_store_blog_meta(
             post_id, site_id=site_id, title=job["title"], excerpt=job["excerpt"],

@@ -65,11 +65,40 @@ def generate_blog_post(
     # (enforced deterministically below — a small model rewords titles no
     # matter how it's asked, so the prompt alone can't be trusted with this).
     topic = " ".join(topic.split())
-    keyword_line = f'Primary SEO keyword to work naturally into the first paragraph: "{primary_keyword}".\n' if primary_keyword else ""
+    keyword_line = f'Primary SEO keyword to work naturally into the first paragraph and headings: "{primary_keyword}".\n' if primary_keyword else ""
+    # Standing content brief (user instruction): every generated post is written for SEO, E-E-A-T
+    # (Google's Experience/Expertise/Authoritativeness/Trustworthiness quality signals), AEO (Answer
+    # Engine Optimization — voice assistants and search "answer boxes" quoting a direct answer) and GEO
+    # (Generative Engine Optimization — ChatGPT/Perplexity/AI Overviews citing or summarising the page),
+    # and the industry the topic belongs to. Each is translated into concrete writing behaviour below —
+    # naming the acronyms to the model wouldn't do anything; what actually earns each one is real,
+    # specific, well-organised writing. The "never invent a statistic" line matters most on a subject
+    # where a fabricated-but-confident-sounding number or source would be the actual result otherwise —
+    # a known failure mode of language models asked to "sound authoritative."
+    content_brief = (
+        "Follow this content brief throughout — it is a real requirement for every section, not a preamble:\n"
+        "- Identify the specific industry or subject area this topic belongs to from the title itself, and "
+        "write using that industry's own correct terminology, norms and level of technical detail — not "
+        "generic wording that could apply to any topic.\n"
+        "- E-E-A-T: write like someone with real, hands-on familiarity with the subject — concrete specifics, "
+        "practical detail, and accurate technical language, not vague generalities or marketing fluff. State "
+        "well-established facts plainly and confidently; where a genuine caveat, exception or limitation "
+        "applies, say so honestly instead of overselling. Never invent a statistic, study, date, or named "
+        "source that isn't genuinely well-established — if a specific number would strengthen a point but "
+        "isn't something you actually know to be true, describe it qualitatively instead of making one up.\n"
+        "- AEO (Answer Engine Optimization): open the article with a direct, self-contained 2-3 sentence "
+        "answer to the main question the topic implies — the kind that could be read aloud as a complete "
+        "answer on its own, before any of the supporting detail. Phrase at least two subheadings as the "
+        "actual questions a reader searching this topic would type or ask aloud.\n"
+        "- GEO (Generative Engine Optimization): write each section so a single paragraph could be lifted "
+        "out on its own and still make sense — a clear claim followed by the specific reasoning or detail "
+        "behind it — rather than prose that only makes sense read start to finish.\n\n"
+    )
     prompt = (
         f'Write a complete, in-depth blog post about: "{topic}".\n'
         f'The post title, and the single <h1>, must be exactly: "{topic}" — do not reword it.\n'
         f"{keyword_line}"
+        f"{content_brief}"
         f"Target length: {min_words}-{max_words} words — this is a real constraint, not a suggestion. Reach it "
         "with genuinely useful detail, examples, and explanation; never pad with repetition or filler.\n\n"
         "Output ONLY these three sections, each on its own line, in this exact format "

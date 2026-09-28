@@ -37,12 +37,18 @@ facebook_page_id/facebook_access_token here posts through that specific
 connected Page instead of the .env default — api/routes/seo.py's publish
 route resolves a post's chosen account before calling this.
 
-Both Twitter and Facebook are listed in AUTOMATED_PLATFORMS because the
-real API integration code exists and is correct against current docs —
-"automated" here means "this codebase can post for you once you supply
-credentials," not "credentials are already configured." Missing
-credentials surface as a clear PublishResult(ok=False, detail=...)
-identical in shape to any other failure, not a crash.
+Pinterest: automation/pinterest/poster.py, the official API v5 (POST
+/v5/pins) — same pattern as Instagram: a single Bearer access token
+(PINTEREST_ACCESS_TOKEN), no text-only post type (needs an image URL),
+and additionally a destination board (PINTEREST_BOARD_ID) since every
+Pin has to belong to one.
+
+Twitter, Facebook, and Pinterest are all listed in AUTOMATED_PLATFORMS
+because the real API integration code exists and is correct against
+current docs — "automated" here means "this codebase can post for you
+once you supply credentials," not "credentials are already configured."
+Missing credentials surface as a clear PublishResult(ok=False,
+detail=...) identical in shape to any other failure, not a crash.
 """
 import logging
 import tempfile
@@ -85,7 +91,7 @@ def _download_image_to_temp(image_url: str) -> Optional[Path]:
 
 # Platforms this module can actually publish to automatically once
 # credentials are configured (see module docstring above).
-AUTOMATED_PLATFORMS = ("linkedin", "instagram", "twitter", "facebook")
+AUTOMATED_PLATFORMS = ("linkedin", "instagram", "twitter", "facebook", "pinterest")
 
 
 @dataclass
@@ -130,6 +136,12 @@ def publish_social_post(
         result = post_to_facebook(
             content, image_url=image_url, page_id=facebook_page_id, access_token=facebook_access_token
         )
+        return PublishResult(ok=result.ok, detail=result.detail, external_post_id=result.external_post_id)
+
+    if platform == "pinterest":
+        from automation.pinterest.poster import post_to_pinterest
+
+        result = post_to_pinterest(content, image_url=image_url)
         return PublishResult(ok=result.ok, detail=result.detail, external_post_id=result.external_post_id)
 
     return PublishResult(

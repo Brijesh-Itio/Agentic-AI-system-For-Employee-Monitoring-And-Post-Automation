@@ -359,6 +359,22 @@ Housekeeping jobs (backups, scheduled posts, roll-ups, sitemaps) are **not** gat
 - Small models emit imperfect JSON. Parse tolerantly (salvage complete objects, repair missing quotes) and retry
   once before giving up (`ai/seo/content_structure.py::_parse_faq_pairs`).
 - The frontend timeout for an endpoint must exceed its server-side worst case (see §8.4).
+- **Switching a task to `openai`/`claude`:** no code change — set `SEO_LLM_PROVIDER_<TASK>=openai` (per task) or
+  `SEO_LLM_PROVIDER_DEFAULT=openai` (every SEO task) in `.env`, install the `openai` package
+  (`pip install openai` — deliberately not in `requirements.txt`, same optional-dependency stance as
+  `anthropic`), and restart. Work-intelligence AI (DAR, scoring, team analysis) is **not** on this switch —
+  it always calls Ollama directly (`ai/ollama_client.py`), matching the README's local-first policy for that
+  half of the app. `OPENAI_API_KEY`/`OPENAI_MODEL` go in `.env`, never `.env.example` (the tracked template —
+  a real key has landed there by mistake more than once; blank it back out and move the value to `.env` if
+  it happens).
+- **`gpt-5` (and other reasoning-capable OpenAI models) via Chat Completions — verified live:**
+  (1) they reject `max_tokens` outright ("Unsupported parameter… Use 'max_completion_tokens' instead"), fixed
+  in `ai/llm/providers/openai_provider.py` by sending `max_completion_tokens`; (2) invisible **reasoning
+  tokens** are drawn from that same budget and can consume it entirely, silently returning an **empty**
+  message with `finish_reason="length"` and no error — reproduced live with a 20-30 token budget. The
+  provider now detects exactly that empty+`length` signature and retries once with a much larger budget
+  before giving up, rather than a caller-sized budget (tuned for Ollama/gpt-4-class replies) silently
+  producing nothing on a reasoning model.
 
 ### 7.5 Logging
 
@@ -469,6 +485,7 @@ shows in **Overview → Automation Job History**.
 | Index coverage | `indexing_client.py` | — | Indexing |
 | Sitemaps | `sitemap_generator.py`, `sitemap_service.py`, `sitemap_client.py` | — | Search Console |
 | Blog | `cms/wordpress_client.py`, `cms/webflow_client.py` | `ai/seo/blog_content.py`, `content_structure.py`, `grammar_checker.py`, `content_quality.py`, `interlink_engine.py`, `blog_scheduler.py` | Blog |
+| Quetext plagiarism / AI detection (real, paid, opt-in) | `quetext_client.py` | — | Blog, Social |
 | Social | `social_poster.py`, `automation/linkedin/…` | `ai/seo/social_content.py`, `social_scheduler.py` | Social |
 | Images | `ai/images/*`, `ai/seo/image_pipeline.py`, `webp_converter.py`, `webp_bulk_converter.py` | `image_prompt.py` | Blog, Social, Overview |
 | Digests / roll-ups | `slack_notifier.py` | `daily_digest.py`, `rollup_digest.py`, `report_metrics.py` | Overview |
@@ -535,17 +552,45 @@ layout.
 
 ### 9.5 Technical audit
 
-`crawl_site` (BFS, polite delay) feeds `run_all_detectors` (broken links, missing/duplicate titles and meta,
-missing canonical, schema, orphan pages, redirect chains, crawl depth, hreflang, robots conflicts). Findings are
-upserted into `seo_technical_issues`; the upsert never changes the status of an issue a human already reviewed.
-The **Technical Audit** tab lists them (pending / approved / rejected / resolved), and for approved issues can
-generate a ready-to-use fix (for example replacement title or meta text), apply it to the CMS or via server
-access, or open the target file in **Overview → Server Files**.
+`crawl_site` (BFS, polite delay) feeds `run_all_detectors` — now 27 detectors covering broken links,
+missing/duplicate titles and meta, missing canonical, schema, orphan pages, redirect chains, crawl depth,
+hreflang, robots conflicts, heading hierarchy, mixed content, SSL, URL structure, **thin content** and more (see
+`_ALL_DETECTORS` in `automation/seo/technical_audit.py` for the full, current list — this doc names the
+categories, not every rule). Findings are upserted into `seo_technical_issues`; the upsert never changes the
+status of an issue a human already reviewed. The **Technical Audit** tab lists them (pending / approved /
+rejected / resolved).
+
+Most rules get a ready-to-use fix a human can approve and apply (`REMEDIABLE_RULES` — CMS write via
+`issue_applier.py`) or a deterministic exact value to paste in (`DETERMINISTIC_FIX_RULES` — no CMS field
+exists to write it to automatically). Everything else — anything structural or cross-page, and content-quality
+findings like **`thin_content`** (`detect_thin_content`: flags a page under ~300 real body words, after
+stripping nav/header/footer/script — a widely used practitioner threshold, not an official Google number,
+which is why it's a finding to approve/reject, never an auto-rewrite) — gets **"Get AI suggestion"** instead:
+`ai/seo/issue_remediation.py`'s `generate_ai_suggestion` works for any rule name, producing a concrete,
+page-aware explanation of what to do (verified live: a real 57-word page got a specific plan naming real
+section ideas), but nothing in this codebase writes a suggestion to the live site automatically — expanding a
+page's actual content is a human drafting job, the same "wrong automatic edit is worse than no edit" stance
+this module's own docstring states for every other structural finding.
 
 ### 9.6 Blog pipeline
 
 `draft → approved → published (CMS draft) → live`, plus `failed` (retryable) and `rejected`.
 
+0. **Standing content brief** (user instruction, in the prompt itself): every article is written for SEO, E-E-A-T,
+   AEO and GEO, plus the industry the topic belongs to — each translated into concrete writing behaviour, not just
+   named to the model: identify the industry from the topic and use its real terminology; write with genuine,
+   specific detail rather than generic filler, state well-established facts confidently, and **never invent a
+   statistic, study or source** (describe it qualitatively instead) — a known failure mode of models asked to
+   "sound authoritative"; open with a direct, self-contained answer and phrase some subheadings as real search
+   questions (AEO); write each section so a single paragraph stands on its own if quoted out of context (GEO).
+   Verified live: a real generation produced question-phrased H2s, a lift-out-ready opening answer, and correctly
+   hedged claims with no fabricated numbers. Also applied, adapted, to `ai/seo/social_content.py`'s post
+   generator: AEO's "quotable standalone opening" and GEO's "lift-out-able paragraph" don't map onto a 150-word
+   post or a tweet (a platform doesn't index or cite one post the way a search/answer engine indexes a page), so
+   only the parts that genuinely apply carry over — real industry terminology, credible specific detail, never
+   fabricating a statistic or source, and leading with the real point instead of a vague hook. Verified live on
+   LinkedIn and X: real terminology, no fabricated numbers, opens with the actual point. Meta descriptions don't
+   carry this brief — hasn't been asked for there.
 1. **Generate** (`ai/seo/blog_content.py`): the article only, targeting **700–800 words** with at most one retry (and
    only if the draft is under 85 % of the minimum). The draft is saved and returned immediately. The extras — originality
    check, meta title/description and keyword density, five FAQs (`content_structure.generate_faq`, tolerant parser +
@@ -553,7 +598,7 @@ access, or open the target file in **Overview → Server Files**.
    worker (`_start_blog_followups` in `api/routes/seo.py`). `GET /api/seo/blog/followups` reports the current step per
    post, and the Blog tab polls it and shows "preparing the extras" on each card. Bulk and calendar generation create
    all drafts first, then queue their extras. Measured on the local CPU: article ≈ 3 min, extras ≈ 5 min more.
-2. **Checks:** structure/word count, plagiarism + AI-detection score (`content_quality.py`), and grammar
+2. **Checks:** structure/word count, plagiarism + AI-detection score (real, via Quetext — §9.10), and grammar
    (`grammar_checker.py`: ≈150-word chunks, ≤8 chunks, capped replies, 7-minute budget, partial results).
 3. **Approve** (human) → **Publish** creates a **draft in the CMS** — it never makes a page public on its own.
    Publish attaches a featured image (generated if missing), injects interlinks, and creates the draft, then runs
@@ -590,7 +635,53 @@ metric picker (`report_metrics.py`).
 sync to `.htaccess`, WebP conversion, and sitemap publishing. Web-root detection is by marker files, since the FTP
 root is often not the document root.
 
-### 9.10 Adding a new SEO feature — checklist
+### 9.10 Quetext (real, paid plagiarism / AI detection)
+
+`automation/seo/quetext_client.py` — a real integration against Quetext's own published REST API
+(`https://www.quetext.com/api/v2`, `X-API-Key` header; verified live against the real endpoints with an
+invalid key, which correctly returned their documented `401 {"status":false,"code":401,"message":"Invalid
+API key"}` shape — confirms the base URL, paths and auth header are right without spending real word
+balance). It is billed per 1,000 words from the account's Quetext wallet.
+
+**This replaced the free local heuristic** (`ai/seo/content_quality.py`'s `assess_humanization`/
+`check_plagiarism`) at the user's explicit request, once a real API was available — "we have a real API for
+this, stop using the free one." `_check_and_store_blog_quality`/`_check_and_store_social_quality` in
+`api/routes/seo.py` now call Quetext instead of the local heuristic; the free module and its standalone
+`/content/quality-check` route are untouched and still importable (nothing deleted), just no longer wired
+into the blog/social generation or Re-check paths. It runs **automatically**: for blog, from the background
+followups job (`_run_blog_followup_job`'s "Checking originality" stage), so it never delays the draft
+appearing; for social, inline at generation time, since a social post is short enough that Quetext finishes
+in a few seconds in practice (confirmed live). It also re-runs whenever **Re-check** is pressed (same
+`/blog/{id}/quality-check` and `/social/{id}/quality-check` routes as before — no new endpoint was needed).
+Skipped entirely, with the post left unchecked and `ContentQualityPanel` rendering nothing, when
+`QUETEXT_API_KEY` isn't set — same as any other optional integration in this codebase, so an install without
+a key sees no partial/broken UI for this.
+
+- **Wired up:** Plagiarism (`POST /report`, polled via `GET /report-progress/{id}`) and AI Detection
+  (`POST /ai-detect-report`, polled via its own `GET /ai-detect-report/{id}` `status` field — Quetext's docs
+  show no separate progress endpoint for this one). Both are submit-then-poll: the client waits up to 3
+  minutes before giving up with a real "still processing" message.
+- **Not wired up:** the Essential plan's Humanizer, Summarizer and Grammar Checker tools. Quetext's public
+  developer documentation does not expose a REST endpoint for any of the three — only Plagiarism and AI
+  Detection are documented. Building against a guessed endpoint shape was deliberately avoided, same stance
+  as the Ahrefs extension point.
+- **Config:** `QUETEXT_API_KEY` in `.env` (blank = skipped entirely; `GET /api/seo/quetext/status` reports
+  whether it's set, used by the frontend only to decide whether to render `ContentQualityPanel` at all).
+- **Storage:** `quality_report_json`'s `humanization`/`plagiarism` fields (the old free-check shape) are now
+  `Optional` and always `null` for anything checked after the switch — kept on the schema only so a report
+  stored before the switch still parses; the real result lives under the `quetext` key
+  (`ContentQualityReportOut.quetext`).
+- **Verified live** against a real funded account: both endpoints return real scores end to end (a mixed
+  public-domain/original test paragraph correctly matched two real source URLs at 88%/100% similar and
+  scored 94.66% AI-likely). That live run also caught three ways the published docs summary this was first
+  written from didn't match the real API, all now fixed and code-commented at the point they're handled:
+  `/report-progress`'s `data` is a single object, not the list the docs example showed; its progress field
+  is lowercase `progress`, not `Progress`; and each plagiarism match's source URL is nested under
+  `match.source.url`, with the best match text in `match.input_text_match`, not the top-level fields
+  originally assumed. AI Detection's minimum length is 50 **words** (confirmed via the API's own rejection
+  message), not 50 characters.
+
+### 9.11 Adding a new SEO feature — checklist
 
 1. Client in `automation/seo/` that never raises: return `None` or `Result(ok, detail)`; log with context.
 2. Route in `api/routes/seo.py` using `_site_or_404`; load credentials from the site row; validate URLs.

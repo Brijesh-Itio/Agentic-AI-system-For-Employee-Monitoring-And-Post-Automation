@@ -137,7 +137,7 @@ workpulse-ai/
 ├── ai/                           AI layer
 │   ├── ollama_client.py          Thin Ollama wrapper (timeouts, token caps)
 │   ├── llm/                      Provider interface: ollama (default), claude, openai; retry; usage logging
-│   ├── images/                   Image provider interface: image_worker, fastsd, pexels, puter, stability
+│   ├── images/                   Image provider interface: openai (default, real pixels), image_worker, fastsd, pexels, puter, stability
 │   ├── master_agent.py           LangGraph Master Agent (Command Mode, daily planning)
 │   ├── sub_agents/               linkedin, email, research, reporting, tracker, facebook agents
 │   ├── dar_generator.py          Daily Activity Report generation
@@ -146,7 +146,7 @@ workpulse-ai/
 │   ├── team_analysis.py          Weekly team analysis
 │   ├── rag.py / memory.py        ChromaDB-backed retrieval and agent memory
 │   ├── seo_master_agent.py       LangGraph daily SEO pipeline
-│   └── seo/                      SEO content: blog, social, digests, quality, grammar, interlinking, meta rewrites
+│   └── seo/                      SEO content: blog, social, digests, quality, grammar, interlinking, meta rewrites, content gap
 │
 ├── automation/                   Integrations (mostly network clients)
 │   ├── linkedin/ facebook/ instagram/ twitter/   Social posting
@@ -256,6 +256,7 @@ commented list; this table groups them.
 | | `OLLAMA_TIMEOUT_SECONDS` | 120 — fast-model calls |
 | | `OLLAMA_GENERATE_TIMEOUT_SECONDS` | 600 — main-model calls |
 | SEO LLM | `SEO_LLM_PROVIDER_DEFAULT` | `ollama`; `claude` / `openai` need `CLAUDE_API_KEY` / `OPENAI_API_KEY` |
+| | `SEO_LLM_PROVIDER_BLOG_POST`, `SEO_LLM_PROVIDER_SOCIAL_LINKEDIN/_TWITTER/_INSTAGRAM/_FACEBOOK`, `SEO_LLM_PROVIDER_IMAGE_PROMPT`, `SEO_LLM_PROVIDER_GRAMMAR_CHECK`, `SEO_LLM_PROVIDER_CONTENT_GAP` | Per-task overrides (2026-09-29: all set to `openai` / GPT-6 Sol) — win over `SEO_LLM_PROVIDER_DEFAULT` for that one task only |
 | Email | `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`, `REPORT_RECIPIENT_EMAIL` | Gmail App Password, not the account password |
 | SSO | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `API_PUBLIC_URL`, `FRONTEND_URL` | Blank = SSO off |
 | Google (SEO) | `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` | Path to the service-account key file |
@@ -263,8 +264,8 @@ commented list; this table groups them.
 | | `GA4_PROPERTY_ID`, `PAGESPEED_API_KEY` | |
 | CMS | `WORDPRESS_URL/USERNAME/APP_PASSWORD`, `WEBFLOW_*` | Fallbacks; per-site values are stored in `seo_sites` |
 | SEO automation | `SEO_AUTOMATION_ENABLED` (True), `SEO_AUTOMATION_HOUR` (6) | Daily cycle + startup catch-up |
-| Images | `IMAGE_PROVIDER_DEFAULT` (`image_worker`), `IMAGE_WORKER_URL/API_KEY`, `PEXELS_API_KEY`, `STABILITY_API_KEY`, `PUTER_AUTH_TOKEN`, `FASTSD_API_URL` | |
-| Social | `LINKEDIN_EMAIL/PASSWORD`, `FACEBOOK_*`, `INSTAGRAM_*` | LinkedIn stores a session cookie file after first login |
+| Images | `IMAGE_PROVIDER_DEFAULT` (`openai`, since 2026-09-29 — was `image_worker`), `OPENAI_IMAGE_MODEL` (blank = `gpt-image-2.5-sunburst`), `IMAGE_WORKER_URL/API_KEY`, `PEXELS_API_KEY`, `STABILITY_API_KEY`, `PUTER_AUTH_TOKEN`, `FASTSD_API_URL` | Real generated pixels via OpenAI's Images API, not the prompt-writing step `image_worker` does |
+| Social | `LINKEDIN_EMAIL/PASSWORD`, `FACEBOOK_*`, `INSTAGRAM_*` | The `.env` default account only — additional accounts are added in the UI (`seo_linkedin_accounts`/`seo_facebook_accounts`), each with its own stored session/token, not `.env` |
 | Notifications | `SLACK_WEBHOOK_URL` | Digest delivery |
 | Research | `BACKLINK_PROVIDER_DEFAULT` (`google_alerts`), `GOOGLE_ALERTS_RSS_URL`, `SEMRUSH_API_KEY`, `SEMRUSH_DATABASE`, `RAPIDAPI_*`, `AHREFS_API_KEY` | Ahrefs is a documented extension point, not wired |
 | Sheets | `SEO_SHEETS_SHARE_EMAIL` | |
@@ -591,6 +592,16 @@ this module's own docstring states for every other structural finding.
    fabricating a statistic or source, and leading with the real point instead of a vague hook. Verified live on
    LinkedIn and X: real terminology, no fabricated numbers, opens with the actual point. Meta descriptions don't
    carry this brief — hasn't been asked for there.
+0.5. **Prompt-based generation** (user instruction): the Blog tab's "Additional instructions / prompt" field
+   (optional, free text) is passed through to `generate_blog_post(..., instructions=...)` and inserted into the
+   prompt as its own line, followed alongside the standing content brief above rather than instead of it — the
+   topic still becomes the exact title, deterministically enforced the same way it already was; `instructions`
+   is everything else (audience, tone, what to include or avoid, a requested analogy, structure asks). It's
+   treated as trusted first-party direction from the person generating their own site's content, not defended
+   against as injection. Verified live: a beginner/no-jargon/analogy/no-pricing instruction produced an article
+   that opened its first section with a real analogy ("a sorting desk between a customer's card and your
+   business bank account"), explained every piece of jargon where it was first used, and never mentioned
+   pricing or a provider by name.
 1. **Generate** (`ai/seo/blog_content.py`): the article only, targeting **700–800 words** with at most one retry (and
    only if the draft is under 85 % of the minimum). The draft is saved and returned immediately. The extras — originality
    check, meta title/description and keyword density, five FAQs (`content_structure.generate_faq`, tolerant parser +
@@ -599,9 +610,17 @@ this module's own docstring states for every other structural finding.
    post, and the Blog tab polls it and shows "preparing the extras" on each card. Bulk and calendar generation create
    all drafts first, then queue their extras. Measured on the local CPU: article ≈ 3 min, extras ≈ 5 min more.
 2. **Checks:** structure/word count, plagiarism + AI-detection score (real, via Quetext — §9.10), and grammar
-   (`grammar_checker.py`: ≈150-word chunks, ≤8 chunks, capped replies, 7-minute budget, partial results).
+   (`grammar_checker.py`: ≈150-word chunks, ≤8 chunks, capped replies, 7-minute budget, partial results; runs on
+   GPT-6 Sol as of 2026-09-29 (`SEO_LLM_PROVIDER_GRAMMAR_CHECK=openai`), switched from local Ollama — Quetext's
+   Essential plan does list a Grammar Checker, but only as a web-app tool at quetext.com, not a REST endpoint
+   their published API (quetext.com/developers-api) exposes, so it can't be wired up the way Plagiarism/AI
+   Detection were. Verified live: a planted-error test post ("This are a test sentence... He go to
+   market... buyed some apple") came back with all three real corrections).
 3. **Approve** (human) → **Publish** creates a **draft in the CMS** — it never makes a page public on its own.
-   Publish attaches a featured image (generated if missing), injects interlinks, and creates the draft, then runs
+   Publish attaches a featured image (generated if missing — `ai/images/providers/openai_image_provider.py`,
+   the default provider since 2026-09-29, real pixels via OpenAI's Images API, not `image_worker`'s
+   prompt-writing-only step; fixed a real live bug where generated images weren't relevant to the post,
+   verified with two live end-to-end generations), injects interlinks, and creates the draft, then runs
    best-effort post-publish steps (OG tags, interlink index, an indexing-submission attempt) that never affect the result.
    The featured image is inserted **centered, right after the first paragraph** (`_insert_featured_image` in
    `api/routes/seo.py`), not above the headline.
@@ -611,14 +630,110 @@ this module's own docstring states for every other structural finding.
 An unexpected exception during publish is stored on the post as its failure reason so it can be retried, rather
 than surfacing as a bare 500.
 
+**Content gap analysis / Keyword Gap** (`ai/seo/content_gap.py`, `POST /api/seo/content-gap/analyze`): sits above
+the generator form on the Blog tab. Went through three corrections from the user before landing here: (1) the
+first version compared a site only against its own post titles, reasoning about what topics "should" exist with
+no real data — corrected to a real cross-site comparison ("it should be something like comparison of two
+different websites"); (2) the single-competitor keyword-gap list felt too thin (often only 1-2 items) — a second,
+broader LLM pass (`suggest_broader_topics`) was added alongside it, reasoning about content themes/clusters/
+formats rather than one keyword at a time; (3) the user then showed Semrush's own Keyword Gap tool — six
+categories (Missing/Weak/Strong/Shared/Untapped/Unique), multiple competitors, a configurable ranking condition
+and position thresholds — and asked for it "accordingly," which is the current shape.
+
+`categorize_keyword_gap` is the real engine: pure rank/set comparison, no LLM. It fetches real organic-keyword
+data for this site's own domain and **every** competitor domain entered (comma-separated, `competitor_websites:
+list[str]`) via the same RapidAPI wrapper the Backlinks tab's Domain Keyword Check card uses
+(`automation/seo/rapidapi_keyword_client.py::fetch_keyword_analysis`), then assigns every keyword either side
+ranks for to exactly one category:
+- **unique** — only this site ranks
+- **missing** — the ranking condition is satisfied by the competitor(s) and this site doesn't rank
+- **untapped** — only *some* (not all) competitors rank and this site doesn't — only distinct from "missing"
+  when `ranking_condition="all"` and there are 2+ competitors; with one competitor or `"at_least_one"` it
+  collapses into missing (an honest limitation of that case, not a bug)
+- **weak** / **strong** — both this site and the competitor(s) rank; weak if the best competitor rank beats this
+  site's, strong if this site's beats theirs
+
+"Shared" isn't a stored seventh bucket — the frontend derives it as weak + strong together (everyone ranks).
+Two configurable inputs change what counts as "ranking": `your_position_threshold` (treat this site as absent if
+its rank is worse than N) and `competitor_position_cutoff` (ignore a competitor's rank if it's worse than N).
+A real bug was caught and fixed while testing the category logic itself: the first implementation made
+"untapped" mathematically unreachable (its gate required *all* competitors to rank before even considering the
+partial case) — caught with a synthetic multi-competitor unit test before it shipped, not by a user report.
+
+GPT-6 Sol's only job (`suggest_topics_for_gap_rows`) is turning each real "missing"/"untapped" keyword into a
+concrete article topic + rationale — weak/strong/unique rows are about an existing page's ranking, not a new
+article, so they're left as plain rank-comparison data with no LLM call. It never invents the keyword, volume,
+rank or URL, all merged back in by keyword after parsing; priority is derived from the real volume ordering,
+never asked of the model. `suggest_broader_topics` (from correction #2, kept) still runs alongside it for
+content-cluster-level ideas not tied to one literal keyword.
+
+Honest, confirmed-live limitation carried through every rebuild: the provider hard-caps at 5 keyword rows per
+domain with no working pagination (`pageSize` and `startingRow` were both tested with different values and every
+response came back identical) — every category above is drawn from a top-5 sample per domain, not a full
+keyword profile, so most categories will be sparse on a real run; the UI states this directly. Verified live
+with 2 real, unrelated competitor domains and `ranking_condition="all"`: correctly produced `weak` (this site
+ranks #49, one competitor ranks #6 for the same keyword), `unique` (this site ranks, neither competitor has the
+keyword at all), and 9 `untapped` rows (each keyword ranked by only one of the two competitors, correctly not
+counted as a full "missing" gap under the "all" condition) — no rows misclassified.
+
+**Keyword cannibalization** (Blog tab, `detectKeywordCannibalization` in `frontend/src/pages/Seo/SeoPage.tsx`):
+pure keyword-based, deterministic, computed entirely client-side from every post's `primary_keyword` /
+`secondary_keywords_json` — no backend route, no LLM (same "an exact match beats a guess" reasoning as keyword
+density). Groups posts by normalized (trimmed/lowercased/whitespace-collapsed) keyword: two or more posts sharing
+the same **primary** keyword is `high` severity, one post's primary overlapping another's secondary is `medium`.
+Stated limitation: exact keyword text only, not semantic — two posts on the same topic with differently-worded
+keywords won't be caught. Verified against real site data (no false positives — the site's real posts currently
+have no exact overlaps) and against a synthetic 3-post case confirming both severities and correct de-duplication
+when a single post's own keyword appears redundantly in both its primary and secondary fields.
+
 ### 9.7 Social pipeline
 
-Posts (`seo_social_posts`) for LinkedIn, X/Twitter, Instagram, Facebook. **Create** by AI (single, bulk, or a
-30-day content calendar) or by hand (**Posts → Add post**); **edit** text, platform, source URL and image URL;
-**delete** anything not yet posted; **images** by AI (**Generate image**) or upload; per-platform character
-limits are enforced in the UI; **schedule**, **approve**, **publish**. Instagram cannot publish without an
-image. Only LinkedIn is auto-posted through Playwright; the other platforms use the human review queue unless
+Posts (`seo_social_posts`) for LinkedIn, X/Twitter, Instagram, Facebook, Pinterest. **Create** by AI (single,
+bulk, or a 30-day content calendar) or by hand (**Posts → Add post**); **edit** text, platform, source URL and
+image URL; **delete** anything not yet posted; **images** by AI (**Generate image**) or upload; per-platform
+character limits are enforced in the UI; **schedule**, **approve**, **publish**. Instagram and Pinterest cannot
+publish without an image (`IMAGE_REQUIRED_PLATFORMS` in `SeoPage.tsx` — neither platform has a text-only post
+type). Only LinkedIn is auto-posted through Playwright; the other platforms use the human review queue unless
 their API credentials are set. Facebook supports multiple Pages (`seo_facebook_accounts`).
+
+**LinkedIn multi-account** (user instruction — "like facebook for LinkedIn also set multi account",
+`seo_linkedin_accounts`): same NULL-means-default-.env-account convention as Facebook's own multi-account
+support, with one real architectural difference driving everything else. Facebook auth is a stateless
+`(page_id, access_token)` pair pasted in from Meta's dashboard, so a new row is immediately usable. LinkedIn has
+no such artifact — `automation/linkedin/poster.py` logs in with Playwright and saves a real browser session
+(cookies + localStorage) to disk, which only a real login attempt can produce (and which can hit a CAPTCHA/2FA
+challenge only a human can clear). So a new `seo_linkedin_accounts` row starts `connected: false`, and
+`POST /api/seo/linkedin-accounts/{id}/login` is a separate, explicit step that drives a real login and only
+flips it to `true` on success — re-runnable any time a saved session expires, unlike a Facebook token that just
+keeps working until Meta revokes it. Each account gets its own session file
+(`agent/data/linkedin_sessions/{id}.json`, `session_path_for_account`); `post_to_linkedin` accepts an optional
+`account_id`/`email`/`password`/`page_url`/`session_path` override, all defaulting to the single `.env` account
+when omitted (unchanged behaviour for every install that never adds a second account). A real, separate bug this
+surfaced and fixed: `_rate_limit_status` previously counted every `platform='linkedin'` `post_log` row as one
+shared pool regardless of account — with two accounts, account B would have been throttled by account A's
+posts. Fixed by adding a nullable `linkedin_account_id` column to `post_log` (same additive-column convention)
+and scoping the daily-limit/min-interval queries by it. Verified live: created a test account (`connected:
+false`, password never echoed back), attempted a real login with fake, non-existent credentials (safe — no real
+LinkedIn account exists to affect), watched it fail gracefully with a clear reason and the account correctly
+stay unconnected (the failure was Playwright timing out on the login page itself, a pre-existing, already-
+documented risk this module's own top docstring already flagged — "not verified against a real session... DOM
+changes without notice" — not something introduced by this change); then verified the rate-limit fix directly
+with synthetic `post_log` rows: 10 posts logged against account 101 correctly blocked only that account
+(`"Daily post limit reached (10/10)"`) while account 102 and the default account remained unaffected.
+
+**Standard platform image dimensions** (user instruction — "Generate/resize images according to standard
+platform dimensions"; found already half-built and finished it, `ai/seo/image_pipeline.py`'s
+`_STANDARD_IMAGE_DIMENSIONS`): every AI-generated image is resized to its platform's real recommended size
+after generation, since no image provider here honors a requested width/height (verified live: the active
+provider always returns its own fixed sizes regardless of what's asked). Facebook (1200×630) and LinkedIn
+(1200×627) already had this; **Twitter/X (1600×900, 16:9), Instagram (1080×1080, 1:1) and Pinterest (1000×1500,
+2:3 portrait) were missing entirely** — every image for those three platforms was silently falling through to a
+generic 1024×1024 square instead. `_resize_to_standard` (letterbox-fit onto a blurred, filled background of the
+same image, never cropping real content away) is fully orientation-agnostic, so Pinterest's portrait target
+needed no code changes there, just the missing dimension entry. Verified live with three real generations
+(Instagram, Pinterest, Twitter/X) — each came back at exactly its target size; the Pinterest portrait result was
+visually inspected and showed no cropping, distortion, or letterbox bars (the source generation already matched
+the target aspect ratio closely).
 
 ### 9.8 Digests and roll-ups
 

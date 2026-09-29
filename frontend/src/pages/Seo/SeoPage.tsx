@@ -99,6 +99,10 @@ import {
   getSiteImageLibrary,
   uploadSiteImage,
   analyzeContentStructure,
+  analyzeContentGap,
+  ContentGapAnalysis,
+  KeywordGapRow,
+  TopicOpportunity,
   DigestRollup,
   DigestRollupPeriod,
   draftOutreachEmail,
@@ -139,6 +143,7 @@ import {
   getSeoDigests,
   checkKeywordDifficulty,
   checkRapidApiKeywords,
+  DomainKeywordAnalysis,
   checkSemrushMetrics,
   getTopBacklinks,
   getDomainAuthority,
@@ -208,6 +213,13 @@ import {
   createFacebookAccount,
   deleteFacebookAccount,
   FacebookAccount,
+  getLinkedInAccounts,
+  createLinkedInAccount,
+  deleteLinkedInAccount,
+  loginLinkedInAccount,
+  LinkedInAccount,
+  getLinkedInPageUrl,
+  setLinkedInPageUrl,
   getServerFileBackup,
   getSshStatus,
   listServerDir,
@@ -379,6 +391,82 @@ const jobStatusVariant: Record<string, "warning" | "success" | "outline" | "dest
 
 function formatJobType(jobType: string) {
   return jobType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// A publish failure's raw error can be a full Playwright/API error dump —
+// fine in the server log, unreadable as a toast or inline post-card
+// message. Keeps only the first line and hard-caps its length so a
+// human always sees a short, readable sentence instead of a wall of text;
+// callers pair this with a `title` attribute where the untruncated
+// message is still worth having on hover.
+function shortErrorMessage(message: string, maxLength = 180): string {
+  const firstLine = message.split("\n")[0].trim();
+  return firstLine.length > maxLength ? `${firstLine.slice(0, maxLength - 1)}…` : firstLine;
+}
+
+// Keyword Cannibalization Detection (user instruction) — pure keyword-based, deterministic, no LLM
+// (same "an exact match beats a guess" reasoning already agreed for keyword density): two or more
+// posts on this site targeting the same primary keyword, or one post's primary keyword overlapping
+// another's secondary keyword. Computed entirely from data the Blog tab already has loaded (every
+// post's primary_keyword / secondary_keywords_json) — no backend call needed. Not semantic: two
+// posts about the same topic phrased with different keywords won't be caught here, a real, stated
+// limitation rather than one silently glossed over.
+interface CannibalizationEntry {
+  postId: number;
+  title: string;
+  keyword: string;
+  role: "primary" | "secondary";
+}
+interface CannibalizationGroup {
+  keyword: string;
+  severity: "high" | "medium";
+  entries: CannibalizationEntry[];
+}
+
+function detectKeywordCannibalization(posts: BlogPost[]): CannibalizationGroup[] {
+  const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+  const byKeyword = new Map<string, CannibalizationEntry[]>();
+
+  for (const p of posts) {
+    if (p.status === "rejected") continue;
+    if (p.primary_keyword && p.primary_keyword.trim()) {
+      const k = norm(p.primary_keyword);
+      const list = byKeyword.get(k) ?? [];
+      list.push({ postId: p.id, title: p.title, keyword: p.primary_keyword.trim(), role: "primary" });
+      byKeyword.set(k, list);
+    }
+    let secondary: string[] = [];
+    try {
+      secondary = p.secondary_keywords_json ? JSON.parse(p.secondary_keywords_json) : [];
+    } catch {
+      secondary = [];
+    }
+    for (const sk of secondary) {
+      if (!sk || !sk.trim()) continue;
+      const k = norm(sk);
+      const list = byKeyword.get(k) ?? [];
+      list.push({ postId: p.id, title: p.title, keyword: sk.trim(), role: "secondary" });
+      byKeyword.set(k, list);
+    }
+  }
+
+  const groups: CannibalizationGroup[] = [];
+  for (const [keyword, entries] of byKeyword) {
+    const byPost = new Map<number, CannibalizationEntry>();
+    for (const e of entries) {
+      const existing = byPost.get(e.postId);
+      if (!existing || e.role === "primary") byPost.set(e.postId, e);
+    }
+    const distinct = Array.from(byPost.values());
+    if (distinct.length < 2) continue;
+    const primaryCount = distinct.filter((e) => e.role === "primary").length;
+    groups.push({ keyword, severity: primaryCount >= 2 ? "high" : "medium", entries: distinct });
+  }
+  groups.sort((a, b) => {
+    if (a.severity !== b.severity) return a.severity === "high" ? -1 : 1;
+    return b.entries.length - a.entries.length;
+  });
+  return groups;
 }
 
 // Module 60 — shared by both the blog and social draft cards below.
@@ -3678,6 +3766,14 @@ function SocialTab({ siteId }: { siteId: number }) {
   const [imageUrl, setImageUrl] = useState("");
   const [selectedPlatforms, setSelectedPlatforms] = useState<SocialPlatform[]>(["linkedin"]);
   const [facebookAccountId, setFacebookAccountId] = useState<number | "">("");
+  const [linkedinAccountId, setLinkedinAccountId] = useState<number | "">("");
+  // Freeform direction on top of the page title/excerpt — same
+  // "prompt on top of the topic" pattern as the Blog tab's own
+  // "Additional instructions / prompt" field.
+  const [socialInstructions, setSocialInstructions] = useState("");
+  // Per-post custom image prompt, same pattern as scheduleDrafts below —
+  // blank means "auto-derive from the post's own content" (unchanged).
+  const [imagePromptDrafts, setImagePromptDrafts] = useState<Record<number, string>>({});
   // The 128px card thumbnail is too small to actually judge a generated/
   // uploaded image — clicking it opens this full-size preview instead.
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
@@ -3694,6 +3790,29 @@ function SocialTab({ siteId }: { siteId: number }) {
   // site; posts for any site can publish through any connected account.
   const facebookAccountsQuery = useQuery({ queryKey: ["seo", "facebook-accounts"], queryFn: getFacebookAccounts });
   const facebookAccounts = facebookAccountsQuery.data ?? [];
+
+  // User instruction ("like facebook for LinkedIn also set multi account") — same global-not-per-site
+  // reasoning as the Facebook accounts above. Unlike Facebook, a new account isn't postable the moment
+  // it's created (connected: false) — LinkedIn hands out no reusable token, only a real login this app
+  // has to drive itself; the "Log in" button below runs that.
+  const linkedInAccountsQuery = useQuery({ queryKey: ["seo", "linkedin-accounts"], queryFn: getLinkedInAccounts });
+  const linkedInAccounts = linkedInAccountsQuery.data ?? [];
+
+  // Global (not scoped to this site) same as the Facebook accounts above —
+  // a Company Page is LinkedIn's own asset, not tied to one SEO site.
+  const linkedInPageUrlQuery = useQuery({ queryKey: ["seo", "linkedin-page-url"], queryFn: getLinkedInPageUrl });
+  const [linkedInPageUrlDraft, setLinkedInPageUrlDraft] = useState("");
+  useEffect(() => {
+    if (linkedInPageUrlQuery.data) setLinkedInPageUrlDraft(linkedInPageUrlQuery.data.page_url);
+  }, [linkedInPageUrlQuery.data]);
+  const saveLinkedInPageUrlMutation = useMutation({
+    mutationFn: (pageUrl: string) => setLinkedInPageUrl(pageUrl),
+    onSuccess: (result) => {
+      toast.success(result.page_url ? "LinkedIn Page URL saved." : "Cleared — LinkedIn posts will use the personal profile.");
+      queryClient.setQueryData(["seo", "linkedin-page-url"], result);
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't save the LinkedIn Page URL.")),
+  });
 
   const generateMutation = useMutation({
     // Module 61 — a mutationKey lets ContentGenerationStatusBar (rendered
@@ -3717,6 +3836,8 @@ function SocialTab({ siteId }: { siteId: number }) {
         image_url: imageUrl.trim() || undefined,
         platforms: selectedPlatforms,
         facebook_account_id: facebookAccountId === "" ? undefined : facebookAccountId,
+        linkedin_account_id: linkedinAccountId === "" ? undefined : linkedinAccountId,
+        instructions: socialInstructions.trim() || undefined,
       }),
     onSuccess: (created) => {
       toast.success(`Generated ${created.length} of ${selectedPlatforms.length} requested post(s).`);
@@ -3789,6 +3910,7 @@ function SocialTab({ siteId }: { siteId: number }) {
         source_url: newSourceUrl.trim() || undefined,
         image_url: newImageUrl.trim() || undefined,
         facebook_account_id: newPlatform === "facebook" && facebookAccountId !== "" ? facebookAccountId : null,
+        linkedin_account_id: newPlatform === "linkedin" && linkedinAccountId !== "" ? linkedinAccountId : null,
       }),
     onSuccess: () => {
       toast.success("Draft post added.");
@@ -3902,6 +4024,7 @@ function SocialTab({ siteId }: { siteId: number }) {
         platforms: selectedPlatforms,
         image_url: imageUrl.trim() || undefined,
         facebook_account_id: facebookAccountId === "" ? undefined : facebookAccountId,
+        linkedin_account_id: linkedinAccountId === "" ? undefined : linkedinAccountId,
       }),
     onSuccess: (created) => {
       toast.success(`Generated ${created.length} post(s) from the given topics.`);
@@ -3967,7 +4090,11 @@ function SocialTab({ siteId }: { siteId: number }) {
       if (result.status === "posted") {
         toast.success(`Posted to ${result.platform}.`);
       } else {
-        toast.info(result.error || "No automated posting exists for this platform — post it manually.");
+        toast.info(
+          result.error
+            ? shortErrorMessage(result.error)
+            : "No automated posting exists for this platform — post it manually."
+        );
       }
       queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
     },
@@ -3978,7 +4105,7 @@ function SocialTab({ siteId }: { siteId: number }) {
   // an Instagram draft become publishable, without requiring a human to
   // hand-paste an image URL from somewhere else first.
   const imageMutation = useMutation({
-    mutationFn: (id: number) => generateSocialPostImage(id),
+    mutationFn: ({ id, prompt }: { id: number; prompt?: string }) => generateSocialPostImage(id, prompt),
     onSuccess: (result) => {
       toast.success("Image generated and uploaded to the site.");
       if (result.image_url) setPreviewImageUrl(result.image_url);
@@ -4030,8 +4157,223 @@ function SocialTab({ siteId }: { siteId: number }) {
     onError: (err) => toast.error(serverErrorDetail(err, "Couldn't remove this Facebook account.")),
   });
 
+  // User instruction — LinkedIn multi-account, mirroring the Facebook account-management state/
+  // mutations above, plus loginAccountMutation for the one real extra step LinkedIn needs (see
+  // getLinkedInAccounts's own comment for why a new account can't post the moment it's created).
+  const [showAddLinkedInAccount, setShowAddLinkedInAccount] = useState(false);
+  const [newLinkedInLabel, setNewLinkedInLabel] = useState("");
+  const [newLinkedInEmail, setNewLinkedInEmail] = useState("");
+  const [newLinkedInPassword, setNewLinkedInPassword] = useState("");
+  const [newLinkedInPageUrl, setNewLinkedInPageUrl] = useState("");
+
+  const createLinkedInAccountMutation = useMutation({
+    mutationFn: () =>
+      createLinkedInAccount({
+        label: newLinkedInLabel.trim(),
+        email: newLinkedInEmail.trim(),
+        password: newLinkedInPassword,
+        page_url: newLinkedInPageUrl.trim() || undefined,
+      }),
+    onSuccess: () => {
+      toast.success('LinkedIn account added — click "Log in" to connect it before using it to post.');
+      setNewLinkedInLabel("");
+      setNewLinkedInEmail("");
+      setNewLinkedInPassword("");
+      setNewLinkedInPageUrl("");
+      setShowAddLinkedInAccount(false);
+      queryClient.invalidateQueries({ queryKey: ["seo", "linkedin-accounts"] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't add this LinkedIn account.")),
+  });
+
+  const deleteLinkedInAccountMutation = useMutation({
+    mutationFn: (id: number) => deleteLinkedInAccount(id),
+    onSuccess: () => {
+      toast.success("LinkedIn account removed.");
+      queryClient.invalidateQueries({ queryKey: ["seo", "linkedin-accounts"] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Couldn't remove this LinkedIn account.")),
+  });
+
+  const loginLinkedInAccountMutation = useMutation({
+    mutationFn: (id: number) => loginLinkedInAccount(id),
+    onSuccess: (result) => {
+      if (result.status === "success") {
+        toast.success(result.detail);
+      } else {
+        toast.error(result.detail);
+      }
+      queryClient.invalidateQueries({ queryKey: ["seo", "linkedin-accounts"] });
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Login attempt failed.")),
+  });
+
   return (
     <>
+      {selectedPlatforms.includes("linkedin") && (
+        <Card>
+          <CardContent className="p-6">
+            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+              <LinkedinIcon className="h-4 w-4 text-brand-500" />
+              LinkedIn Company Page
+            </h2>
+            <p className="mb-3 text-theme-sm text-gray-400">
+              Leave blank to post to the personal profile logged into LinkedIn. Paste a Company Page's URL to post
+              there instead — that account must be an admin of the Page.
+            </p>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Input
+                value={linkedInPageUrlDraft}
+                onChange={(e) => setLinkedInPageUrlDraft(e.target.value)}
+                placeholder="https://www.linkedin.com/company/your-page/"
+                className="sm:flex-1"
+              />
+              <Button
+                size="sm"
+                onClick={() => saveLinkedInPageUrlMutation.mutate(linkedInPageUrlDraft.trim())}
+                disabled={saveLinkedInPageUrlMutation.isPending || linkedInPageUrlDraft === (linkedInPageUrlQuery.data?.page_url ?? "")}
+              >
+                {saveLinkedInPageUrlMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                Save
+              </Button>
+              {linkedInPageUrlQuery.data?.page_url ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setLinkedInPageUrlDraft("");
+                    saveLinkedInPageUrlMutation.mutate("");
+                  }}
+                  disabled={saveLinkedInPageUrlMutation.isPending}
+                >
+                  Clear
+                </Button>
+              ) : null}
+            </div>
+            {linkedInPageUrlQuery.data?.page_url ? (
+              <p className="mt-2 text-theme-xs text-gray-400">Currently posting to: {linkedInPageUrlQuery.data.page_url}</p>
+            ) : (
+              <p className="mt-2 text-theme-xs text-gray-400">Currently posting to: personal profile</p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {selectedPlatforms.includes("linkedin") && (
+        <Card>
+          <CardContent className="p-6">
+            <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+              <LinkedinIcon className="h-4 w-4 text-brand-500" />
+              LinkedIn accounts
+            </h2>
+            <p className="mb-3 text-theme-sm text-gray-400">
+              Multiple LinkedIn logins to post through, like the Facebook accounts below. Unlike Facebook, a new
+              account needs a one-time real login before it can post — click "Log in" after adding it.
+            </p>
+            {linkedInAccounts.length === 0 && !showAddLinkedInAccount && (
+              <p className="text-theme-sm text-gray-400">
+                No extra accounts connected yet — posts will use the default account from .env.
+              </p>
+            )}
+            {linkedInAccounts.length > 0 && (
+              <div className="mb-3 space-y-2">
+                {linkedInAccounts.map((account: LinkedInAccount) => (
+                  <div
+                    key={account.id}
+                    className="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2 dark:border-gray-800"
+                  >
+                    <div>
+                      <p className="text-theme-sm font-medium text-gray-900 dark:text-white">{account.label}</p>
+                      <p className="text-theme-xs text-gray-400">
+                        {account.email}
+                        {account.page_url ? ` · Company Page: ${account.page_url}` : ""}
+                      </p>
+                      <Badge variant={account.connected ? "success" : "warning"} className="mt-1">
+                        {account.connected ? "Connected" : "Not connected"}
+                      </Badge>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => loginLinkedInAccountMutation.mutate(account.id)}
+                        disabled={loginLinkedInAccountMutation.isPending}
+                      >
+                        {loginLinkedInAccountMutation.isPending && loginLinkedInAccountMutation.variables === account.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : null}
+                        {account.connected ? "Re-log in" : "Log in"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => deleteLinkedInAccountMutation.mutate(account.id)}
+                        disabled={deleteLinkedInAccountMutation.isPending}
+                      >
+                        <XCircle className="h-3.5 w-3.5" />
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {showAddLinkedInAccount ? (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <Label htmlFor="li-account-label">Label</Label>
+                  <Input id="li-account-label" value={newLinkedInLabel} onChange={(e) => setNewLinkedInLabel(e.target.value)} placeholder="e.g. Company page" />
+                </div>
+                <div>
+                  <Label htmlFor="li-account-email">Email</Label>
+                  <Input id="li-account-email" value={newLinkedInEmail} onChange={(e) => setNewLinkedInEmail(e.target.value)} />
+                </div>
+                <div>
+                  <Label htmlFor="li-account-password">Password</Label>
+                  <Input
+                    id="li-account-password"
+                    type="password"
+                    value={newLinkedInPassword}
+                    onChange={(e) => setNewLinkedInPassword(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="li-account-page-url">Company Page URL (optional)</Label>
+                  <Input
+                    id="li-account-page-url"
+                    value={newLinkedInPageUrl}
+                    onChange={(e) => setNewLinkedInPageUrl(e.target.value)}
+                    placeholder="https://www.linkedin.com/company/your-page/"
+                  />
+                </div>
+                <div className="flex gap-2 sm:col-span-2">
+                  <Button
+                    size="sm"
+                    onClick={() => createLinkedInAccountMutation.mutate()}
+                    disabled={
+                      createLinkedInAccountMutation.isPending ||
+                      !newLinkedInLabel.trim() ||
+                      !newLinkedInEmail.trim() ||
+                      !newLinkedInPassword.trim()
+                    }
+                  >
+                    {createLinkedInAccountMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                    Save account
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setShowAddLinkedInAccount(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button size="sm" variant="outline" onClick={() => setShowAddLinkedInAccount(true)}>
+                + Add LinkedIn account
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {selectedPlatforms.includes("facebook") && (
         <Card>
           <CardContent className="p-6">
@@ -4173,6 +4515,41 @@ function SocialTab({ siteId }: { siteId: number }) {
                 </select>
               </div>
             )}
+            {selectedPlatforms.includes("linkedin") && linkedInAccounts.length > 0 && (
+              <div className="sm:col-span-2">
+                <Label htmlFor="social-li-account">LinkedIn account</Label>
+                <select
+                  id="social-li-account"
+                  value={linkedinAccountId}
+                  onChange={(e) => setLinkedinAccountId(e.target.value === "" ? "" : Number(e.target.value))}
+                  className="h-11 w-full rounded-lg border border-gray-300 bg-transparent px-4 text-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+                >
+                  <option value="">Default (.env)</option>
+                  {linkedInAccounts.map((account: LinkedInAccount) => (
+                    <option key={account.id} value={account.id} disabled={!account.connected}>
+                      {account.label}
+                      {account.connected ? "" : " (not connected yet)"}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div className="sm:col-span-2">
+              <Label htmlFor="social-instructions">Additional instructions / prompt (optional)</Label>
+              <textarea
+                id="social-instructions"
+                value={socialInstructions}
+                onChange={(e) => setSocialInstructions(e.target.value)}
+                rows={3}
+                placeholder="e.g. Write for a technical audience. Emphasize the security angle. Avoid mentioning pricing."
+                className="w-full rounded-lg border border-gray-300 bg-transparent px-4 py-2.5 text-sm text-gray-800 shadow-theme-xs placeholder:text-gray-400 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:placeholder:text-white/30 dark:focus:border-brand-800"
+              />
+              <p className="mt-1 text-theme-xs text-gray-400">
+                The page title and content excerpt still drive the post. Use this for anything else — audience,
+                angle, tone, what to include or avoid. Followed on top of each platform's standing format rules,
+                not instead of them.
+              </p>
+            </div>
           </div>
           <div className="mt-4 flex flex-wrap gap-2">
             {ALL_PLATFORMS.map((p) => {
@@ -4501,6 +4878,11 @@ function SocialTab({ siteId }: { siteId: number }) {
                         via {facebookAccounts.find((a: FacebookAccount) => a.id === post.facebook_account_id)?.label ?? "Default (.env)"}
                       </span>
                     )}
+                    {post.platform === "linkedin" && (
+                      <span className="text-theme-xs text-gray-400">
+                        via {linkedInAccounts.find((a: LinkedInAccount) => a.id === post.linkedin_account_id)?.label ?? "Default (.env)"}
+                      </span>
+                    )}
                   </div>
                   {post.image_url && (
                     <button
@@ -4589,7 +4971,11 @@ function SocialTab({ siteId }: { siteId: number }) {
                       No image URL — this post can't be published to {post.platform} until one is added.
                     </p>
                   )}
-                  {post.error && <p className="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">{post.error}</p>}
+                  {post.error && (
+                    <p className="mt-1 line-clamp-2 text-theme-xs text-gray-500 dark:text-gray-400" title={post.error}>
+                      {shortErrorMessage(post.error)}
+                    </p>
+                  )}
                   {post.status !== "posted" && editingPostId !== post.id && (
                     <div className="mt-3 flex flex-wrap gap-2">
                       {post.status === "draft" && (
@@ -4673,14 +5059,22 @@ function SocialTab({ siteId }: { siteId: number }) {
                     </div>
                   )}
                   {post.status !== "posted" && editingPostId !== post.id && (
-                    <div className="mt-2 flex flex-wrap gap-2">
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <Input
+                        value={imagePromptDrafts[post.id] ?? ""}
+                        onChange={(e) => setImagePromptDrafts((prev) => ({ ...prev, [post.id]: e.target.value }))}
+                        placeholder="Image prompt (optional — defaults to the post's own content)"
+                        className="h-9 max-w-xs"
+                      />
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => imageMutation.mutate(post.id)}
-                        disabled={imageMutation.isPending && imageMutation.variables === post.id}
+                        onClick={() =>
+                          imageMutation.mutate({ id: post.id, prompt: imagePromptDrafts[post.id]?.trim() || undefined })
+                        }
+                        disabled={imageMutation.isPending && imageMutation.variables?.id === post.id}
                       >
-                        {imageMutation.isPending && imageMutation.variables === post.id ? (
+                        {imageMutation.isPending && imageMutation.variables?.id === post.id ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         ) : (
                           <ImageIcon className="h-3.5 w-3.5" />
@@ -5055,7 +5449,7 @@ function BlogSeoToolsPanel({ siteId, post, editing = false }: { siteId: number; 
           <PostActionProgress
             startedAt={imageStartedAt}
             title="Generating the image…"
-            detail="The AI image is made on the image worker, then uploaded to your site. This usually takes 1–3 minutes — you can switch tabs, it keeps running. Please don't click again."
+            detail="The AI image is generated from your prompt, then uploaded to your site. This usually takes 1–3 minutes — you can switch tabs, it keeps running. Please don't click again."
           />
         )}
       </div>
@@ -5283,6 +5677,59 @@ function BlogSeoToolsPanel({ siteId, post, editing = false }: { siteId: number; 
   );
 }
 
+// One row in a Keyword Gap category section (Content Gap Analysis, BlogTab below). "Missing" and
+// "untapped" rows get a real GPT-6 Sol topic/rationale (see ai/seo/content_gap.py) and a "Use this
+// topic" button; weak/strong/unique rows are about an existing page's ranking, not a new article, so
+// they show as plain rank-comparison data with no topic suggestion.
+function KeywordGapRowCard({ row, onUse }: { row: KeywordGapRow; onUse?: () => void }) {
+  return (
+    <div className="rounded-md border border-gray-100 bg-gray-50 p-3 dark:border-gray-800 dark:bg-white/5">
+      <div className="mb-1 flex flex-wrap items-center gap-2">
+        {row.priority && (
+          <Badge variant={row.priority === "high" ? "destructive" : row.priority === "medium" ? "warning" : "outline"}>
+            {row.priority} priority
+          </Badge>
+        )}
+        <p className="font-medium text-gray-800 dark:text-white/90">{row.topic || row.keyword}</p>
+      </div>
+      <p className="text-theme-xs text-gray-500 dark:text-gray-400">
+        <span className="text-gray-400">Keyword — </span>
+        {row.keyword}
+        {row.search_volume != null && <span className="text-gray-400"> · ~{row.search_volume.toLocaleString()}/mo</span>}
+        {row.your_rank != null && <span className="text-gray-400"> · you rank #{row.your_rank}</span>}
+      </p>
+      <div className="mt-0.5 space-y-0.5 text-theme-xs text-gray-500 dark:text-gray-400">
+        {Object.entries(row.competitors).map(([domain, p]) => (
+          <p key={domain}>
+            <span className="text-gray-400">{domain} — </span>
+            {p.rank != null ? (
+              <>
+                rank #{p.rank}
+                {p.url && (
+                  <>
+                    {" · "}
+                    <a href={p.url} target="_blank" rel="noreferrer" className="text-brand-600 hover:underline dark:text-brand-400">
+                      {p.url}
+                    </a>
+                  </>
+                )}
+              </>
+            ) : (
+              "not ranking"
+            )}
+          </p>
+        ))}
+      </div>
+      {row.rationale && <p className="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">{row.rationale}</p>}
+      {onUse && (
+        <Button size="sm" variant="outline" className="mt-2" onClick={onUse}>
+          Use this topic
+        </Button>
+      )}
+    </div>
+  );
+}
+
 // The blueprint's "Content Word Limit + Structure" feature had a real
 // backend (ai/seo/content_structure.py, /api/seo/content/analyze) but
 // no way to use it on anything except a post this app itself generated
@@ -5345,6 +5792,19 @@ function ContentStructureChecker() {
                 ))}
               </ul>
             )}
+            {report.keyword_density.length > 0 && (
+              <div className="mt-3 rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
+                <p className="mb-1 font-medium text-gray-700 dark:text-gray-300">Keyword density</p>
+                <div className="space-y-1">
+                  {report.keyword_density.map((k) => (
+                    <p key={k.keyword} className={k.in_range ? "text-success-600 dark:text-success-400" : "text-warning-600 dark:text-warning-400"}>
+                      <span className="text-gray-400">{k.role === "primary" ? "Primary" : "Secondary"} — </span>
+                      {k.keyword}: {k.density}% ({k.count}×) — target {k.target_min}-{k.target_max}%
+                    </p>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </CardContent>
@@ -5384,6 +5844,7 @@ function BlogTab({ siteId }: { siteId: number }) {
   const [topic, setTopic] = useState("");
   const [primaryKeyword, setPrimaryKeyword] = useState("");
   const [secondaryKeywords, setSecondaryKeywords] = useState("");
+  const [instructions, setInstructions] = useState("");
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [seoToolsId, setSeoToolsId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -5419,6 +5880,7 @@ function BlogTab({ siteId }: { siteId: number }) {
     prevFollowupCount.current = followups.length;
   }, [followupSignature]); // eslint-disable-line react-hooks/exhaustive-deps
   const posts = postsQuery.data ?? [];
+  const cannibalizationGroups = useMemo(() => detectKeywordCannibalization(posts), [posts]);
 
   const startEditing = (post: BlogPost) => {
     setEditingId(post.id);
@@ -5484,6 +5946,7 @@ function BlogTab({ siteId }: { siteId: number }) {
         topic,
         primary_keyword: primaryKeyword.trim() || undefined,
         secondary_keywords: splitCsv(secondaryKeywords),
+        instructions: instructions.trim() || undefined,
       }),
     onSuccess: () => {
       toast.success("Blog post drafted.");
@@ -5507,6 +5970,51 @@ function BlogTab({ siteId }: { siteId: number }) {
     mutationKey: ["seo", "content-generate", "blog", "single", siteId],
   });
   const singleGeneratePending = generateMutation.isPending || isSingleGenerateMutating > 0;
+
+  // Content Gap Analysis / Keyword Gap (user instruction, corrected twice: first to compare this
+  // site's real domain against a competitor's rather than just this site's own post titles, then to
+  // reproduce Semrush's own Keyword Gap category system after the user showed that tool's category
+  // list and asked for it "accordingly" — Missing/Weak/Strong/Shared/Untapped/Unique, multiple
+  // competitors, configurable ranking condition and position thresholds. Real organic-keyword data
+  // via the same RapidAPI wrapper the Backlinks tab's Domain Keyword Check card uses (hard-capped at
+  // 5 keywords/domain, confirmed live — see ai/seo/content_gap.py). GPT-6 Sol only phrases each real
+  // missing/untapped keyword into a topic; the categorization itself is pure rank comparison, no LLM.
+  const [gapCompetitors, setGapCompetitors] = useState("");
+  const [gapRankingCondition, setGapRankingCondition] = useState<"all" | "at_least_one">("at_least_one");
+  const [gapYourThreshold, setGapYourThreshold] = useState("");
+  const [gapCompetitorCutoff, setGapCompetitorCutoff] = useState("");
+  const [gapContext, setGapContext] = useState("");
+  const [gapResult, setGapResult] = useState<ContentGapAnalysis | null>(null);
+  const gapMutation = useMutation({
+    mutationFn: () =>
+      analyzeContentGap({
+        site_id: siteId,
+        competitor_websites: gapCompetitors.split(",").map((s) => s.trim()).filter(Boolean),
+        ranking_condition: gapRankingCondition,
+        your_position_threshold: gapYourThreshold.trim() ? Number(gapYourThreshold) : undefined,
+        competitor_position_cutoff: gapCompetitorCutoff.trim() ? Number(gapCompetitorCutoff) : undefined,
+        industry_context: gapContext.trim() || undefined,
+      }),
+    onSuccess: (data) => setGapResult(data),
+    onError: (err) => toast.error(serverErrorDetail(err, "Content gap analysis failed.")),
+  });
+  const useGapRow = (r: KeywordGapRow) => {
+    setTopic(r.topic || r.keyword);
+    setPrimaryKeyword(r.keyword);
+    setInstructions(r.rationale ? `Context from content gap analysis: ${r.rationale}` : "");
+    toast.info("Loaded into the generator below — review and hit Generate.");
+  };
+  const useTopicOpportunity = (t: TopicOpportunity) => {
+    setTopic(t.topic);
+    setPrimaryKeyword("");
+    setInstructions(t.rationale ? `Context from content gap analysis: ${t.rationale}` : "");
+    toast.info("Loaded into the generator below — review and hit Generate.");
+  };
+  const gapRowsByCategory = useMemo(() => {
+    const grouped: Record<string, KeywordGapRow[]> = { missing: [], untapped: [], weak: [], strong: [], unique: [] };
+    for (const r of gapResult?.rows ?? []) grouped[r.category]?.push(r);
+    return grouped;
+  }, [gapResult]);
 
   // Module 60 — the automatic check runs at generation time; this is the
   // manual re-check button ContentQualityPanel shows (e.g. after editing
@@ -5726,6 +6234,200 @@ function BlogTab({ siteId }: { siteId: number }) {
       <Card>
         <CardContent className="p-6">
           <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <FileSearch className="h-4 w-4 text-brand-500" />
+            Content gap analysis
+          </h2>
+          <p className="mb-4 text-theme-sm text-gray-500 dark:text-gray-400">
+            Semrush-style Keyword Gap: compares this site's real ranking keywords against one or more
+            competitors' — real data via the same provider as the Backlinks tab's Domain Keyword Check, capped
+            at each domain's top 5 keywords (no full profile). Sorts every keyword into Missing, Untapped, Weak,
+            Strong or Unique, plus a broader pass suggesting content topics not tied to one literal keyword.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <Label htmlFor="gap-competitors">Competitor website(s), comma-separated</Label>
+              <Input
+                id="gap-competitors"
+                value={gapCompetitors}
+                onChange={(e) => setGapCompetitors(e.target.value)}
+                placeholder="competitor1.com, competitor2.com"
+              />
+            </div>
+            <div>
+              <Label htmlFor="gap-ranking-condition">Ranking condition</Label>
+              <select
+                id="gap-ranking-condition"
+                value={gapRankingCondition}
+                onChange={(e) => setGapRankingCondition(e.target.value as "all" | "at_least_one")}
+                className="h-11 w-full rounded-lg border border-gray-300 bg-transparent px-4 text-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
+              >
+                <option value="at_least_one">At least one competitor ranks</option>
+                <option value="all">All competitors rank</option>
+              </select>
+              <p className="mt-1 text-theme-xs text-gray-400">
+                "All" is what makes Untapped distinct from Missing — needs 2+ competitors.
+              </p>
+            </div>
+            <div>
+              <Label htmlFor="gap-context">Industry / focus (optional)</Label>
+              <Input
+                id="gap-context"
+                value={gapContext}
+                onChange={(e) => setGapContext(e.target.value)}
+                placeholder="e.g. B2B payment processing for small businesses"
+              />
+            </div>
+            <div>
+              <Label htmlFor="gap-your-threshold">Your position condition (optional)</Label>
+              <Input
+                id="gap-your-threshold"
+                type="number"
+                min="1"
+                value={gapYourThreshold}
+                onChange={(e) => setGapYourThreshold(e.target.value)}
+                placeholder="e.g. 10 — count as missing if you rank below this"
+              />
+            </div>
+            <div>
+              <Label htmlFor="gap-competitor-cutoff">Competitor position cutoff (optional)</Label>
+              <Input
+                id="gap-competitor-cutoff"
+                type="number"
+                min="1"
+                value={gapCompetitorCutoff}
+                onChange={(e) => setGapCompetitorCutoff(e.target.value)}
+                placeholder="e.g. 20 — ignore a competitor ranking below this"
+              />
+            </div>
+          </div>
+          <Button className="mt-3" onClick={() => gapMutation.mutate()} disabled={gapMutation.isPending || !gapCompetitors.trim()}>
+            {gapMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSearch className="h-4 w-4" />}
+            Analyze
+          </Button>
+          {gapMutation.isPending && (
+            <>
+              <ProgressBar className="mt-3 max-w-sm" />
+              <p className="mt-2 text-theme-xs text-gray-400">Fetching real keyword data for every domain — can take a minute or more with several competitors.</p>
+            </>
+          )}
+          {gapResult && (
+            <div className="mt-4">
+              <p className="mb-4 text-theme-xs text-gray-400">
+                {gapResult.this_domain} ({gapResult.this_domain_keyword_sample_count} sampled) vs.{" "}
+                {gapResult.competitor_domains
+                  .map((d) => `${d} (${gapResult.competitor_keyword_sample_counts[d] ?? 0} sampled)`)
+                  .join(", ")}
+              </p>
+
+              {(
+                [
+                  ["missing", "Missing — competitor(s) rank, you don't"],
+                  ["weak", "Weak — you rank, but lower than competitors"],
+                  ["strong", "Strong — you outrank them"],
+                  ["shared", "Shared — everyone ranks"],
+                  ["untapped", "Untapped — some competitors rank, you don't"],
+                  ["unique", "Unique — only you rank"],
+                ] as const
+              ).map(([cat, label]) => {
+                // "shared" isn't a category rows are tagged with in the data — it's weak + strong
+                // together (everyone ranks for the keyword), same list as those two sections just
+                // combined for a single at-a-glance view, matching Semrush's own category naming.
+                const rows = cat === "shared" ? [...(gapRowsByCategory.weak ?? []), ...(gapRowsByCategory.strong ?? [])] : gapRowsByCategory[cat] ?? [];
+                if (cat === "untapped" && gapRankingCondition !== "all") return null; // not distinct from Missing otherwise
+                return (
+                  <div key={cat} className="mb-4">
+                    <p className="mb-1 text-theme-xs font-medium text-gray-500 dark:text-gray-400">
+                      {label} ({rows.length})
+                    </p>
+                    {rows.length === 0 ? (
+                      <p className="text-theme-sm text-gray-400">None in this sample.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {rows.map((r, idx) => (
+                          <KeywordGapRowCard
+                            key={idx}
+                            row={r}
+                            onUse={cat === "missing" || cat === "untapped" ? () => useGapRow(r) : undefined}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              <p className="mb-1 text-theme-xs font-medium text-gray-500 dark:text-gray-400">
+                Missing topics &amp; content opportunities (broader ideas, not tied to one literal keyword)
+              </p>
+              {gapResult.topic_opportunities.length === 0 ? (
+                <p className="text-theme-sm text-gray-400">No broader opportunities returned — try again.</p>
+              ) : (
+                <div className="space-y-2">
+                  {gapResult.topic_opportunities.map((t, idx) => (
+                    <div key={idx} className="rounded-md border border-gray-100 bg-gray-50 p-3 dark:border-gray-800 dark:bg-white/5">
+                      <div className="mb-1 flex flex-wrap items-center gap-2">
+                        <Badge variant={t.priority === "high" ? "destructive" : t.priority === "medium" ? "warning" : "outline"}>
+                          {t.priority} priority
+                        </Badge>
+                        <p className="font-medium text-gray-800 dark:text-white/90">{t.topic}</p>
+                      </div>
+                      {t.rationale && <p className="text-theme-xs text-gray-500 dark:text-gray-400">{t.rationale}</p>}
+                      <Button size="sm" variant="outline" className="mt-2" onClick={() => useTopicOpportunity(t)}>
+                        Use this topic
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-6">
+          <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+            <WholeWord className="h-4 w-4 text-brand-500" />
+            Keyword cannibalization
+          </h2>
+          <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
+            Flags posts on this site targeting the same or overlapping keyword — they'll compete against each
+            other in search instead of one clearly winning. Checked automatically from every post's primary and
+            secondary keywords; this is exact keyword matching, not topic similarity, so two posts on the same
+            subject with differently-worded keywords won't show up here.
+          </p>
+          {cannibalizationGroups.length === 0 ? (
+            <p className="text-theme-sm text-gray-400">
+              {posts.length < 2 ? "Not enough posts with keywords set yet to check." : "No overlapping keywords found."}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {cannibalizationGroups.map((g) => (
+                <div key={g.keyword} className="rounded-md border border-gray-100 bg-gray-50 p-3 dark:border-gray-800 dark:bg-white/5">
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
+                    <Badge variant={g.severity === "high" ? "destructive" : "warning"}>
+                      {g.severity === "high" ? "Same primary keyword" : "Overlapping keyword"}
+                    </Badge>
+                    <p className="font-medium text-gray-800 dark:text-white/90">{g.keyword}</p>
+                  </div>
+                  <ul className="space-y-0.5 text-theme-xs text-gray-500 dark:text-gray-400">
+                    {g.entries.map((e) => (
+                      <li key={e.postId}>
+                        <span className="text-gray-400">{e.role === "primary" ? "Primary" : "Secondary"} — </span>
+                        {e.title}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-6">
+          <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
             <FileText className="h-4 w-4 text-brand-500" />
             Generate a blog post
           </h2>
@@ -5755,6 +6457,22 @@ function BlogTab({ siteId }: { siteId: number }) {
                 onChange={(e) => setSecondaryKeywords(e.target.value)}
                 placeholder="e.g. remote work tools, employee monitoring"
               />
+            </div>
+            <div className="sm:col-span-2">
+              <Label htmlFor="blog-instructions">Additional instructions / prompt (optional)</Label>
+              <textarea
+                id="blog-instructions"
+                value={instructions}
+                onChange={(e) => setInstructions(e.target.value)}
+                rows={3}
+                placeholder="e.g. Write for beginners with no payments background. Mention PCI compliance and 3-D Secure. Avoid discussing specific pricing."
+                className="w-full rounded-lg border border-gray-300 bg-transparent px-4 py-2.5 text-sm text-gray-800 shadow-theme-xs placeholder:text-gray-400 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:placeholder:text-white/30 dark:focus:border-brand-800"
+              />
+              <p className="mt-1 text-theme-xs text-gray-400">
+                The topic still becomes the exact title. Use this for anything else — audience, angle, what to
+                include or avoid. It's followed on top of the standing SEO / E-E-A-T / AEO / GEO writing rules,
+                not instead of them.
+              </p>
             </div>
           </div>
           <Button
@@ -6079,7 +6797,11 @@ function BlogTab({ siteId }: { siteId: number }) {
                       checking={qualityCheckMutation.isPending && qualityCheckMutation.variables === post.id}
                       quetextConfigured={quetextStatusQuery.data?.configured}
                     />
-                    {post.error && <p className="mt-1 text-theme-xs text-red-500">{post.error}</p>}
+                    {post.error && (
+                      <p className="mt-1 line-clamp-2 text-theme-xs text-red-500" title={post.error}>
+                        {shortErrorMessage(post.error)}
+                      </p>
+                    )}
                     {(post.slug || post.tags || post.categories) && (
                       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-theme-xs text-gray-400">
                         {post.slug && <span>/{post.slug}</span>}
@@ -6153,7 +6875,7 @@ function BlogTab({ siteId }: { siteId: number }) {
                         </p>
                         <ProgressBar />
                         <p className="mt-2 text-theme-xs text-gray-500 dark:text-gray-400">
-                          You can read and edit the draft now. Originality check, meta tags, FAQs, internal links and the grammar check fill in automatically.
+                          You can read and edit the draft now. Meta tags, FAQs, internal links and the grammar check fill in automatically. Run a plagiarism/AI-content check manually with Check now whenever you're ready.
                         </p>
                       </div>
                     )}
@@ -9738,13 +10460,13 @@ function KeywordDifficultyCard() {
 function RapidApiKeywordCard({ siteId }: { siteId: number }) {
   const toast = useToast();
   const [country, setCountry] = useState("us");
-  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [result, setResult] = useState<DomainKeywordAnalysis | null>(null);
 
   const checkMutation = useMutation({
     mutationFn: () => checkRapidApiKeywords(siteId, country),
     onSuccess: (data) => {
       setResult(data);
-      toast.success("Response received — see raw result below.");
+      toast.success(`${data.total_keywords} ranking keywords found for ${data.domain}.`);
     },
     onError: (err) => toast.error(serverErrorDetail(err, "RapidAPI keyword check failed.")),
   });
@@ -9754,12 +10476,12 @@ function RapidApiKeywordCard({ siteId }: { siteId: number }) {
       <CardContent className="p-6">
         <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
           <Search className="h-4 w-4 text-brand-500" />
-          Domain Keyword Check (RapidAPI, currently unavailable)
+          Domain Keyword Check (RapidAPI)
         </h2>
         <p className="mb-3 text-theme-sm text-gray-500 dark:text-gray-400">
-          A different third-party provider than the Keyword Research tool above. Live testing found this
-          provider's backend returning errors even for well-known domains — shown as raw data below in case
-          that changes.
+          A different third-party provider than the Keyword Research tool above — every organic keyword a
+          domain (yours or a competitor's) ranks for, with rank, search volume, difficulty and clicks. Shows a
+          sample of the provider's top keyword rows, not the full list.
         </p>
         <div className="flex flex-wrap gap-2">
           <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country code" className="max-w-24" />
@@ -9775,9 +10497,58 @@ function RapidApiKeywordCard({ siteId }: { siteId: number }) {
           </>
         )}
         {result && (
-          <pre className="mt-3 max-h-64 overflow-auto rounded-md border border-gray-200 bg-gray-50 p-3 text-theme-xs text-gray-700 dark:border-gray-800 dark:bg-white/5 dark:text-gray-300">
-            {JSON.stringify(result, null, 2)}
-          </pre>
+          <div className="mt-4">
+            <div className="mb-3 flex flex-wrap gap-2 text-theme-xs text-gray-500 dark:text-gray-400">
+              <Badge variant="outline">{result.domain}</Badge>
+              <Badge variant="outline">{result.total_keywords.toLocaleString()} ranking keywords</Badge>
+              <Badge variant="outline">{result.total_volume.toLocaleString()} total monthly search volume</Badge>
+              <Badge variant="outline">{result.total_seo_clicks.toLocaleString()} monthly SEO clicks</Badge>
+            </div>
+            {result.keywords.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-theme-sm">
+                  <thead>
+                    <tr className="border-b border-gray-100 text-theme-xs text-gray-400 dark:border-gray-800">
+                      <th className="py-2 pr-3 font-medium">Keyword</th>
+                      <th className="py-2 pr-3 font-medium">Rank</th>
+                      <th className="py-2 pr-3 font-medium">Volume</th>
+                      <th className="py-2 pr-3 font-medium">Difficulty</th>
+                      <th className="py-2 pr-3 font-medium">Clicks</th>
+                      <th className="py-2 font-medium">Top ranked URL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.keywords.map((k, idx) => (
+                      <tr key={idx} className="border-b border-gray-50 last:border-0 dark:border-gray-800/60">
+                        <td className="py-2 pr-3">{k.keyword}</td>
+                        <td className="py-2 pr-3">
+                          {k.rank ?? "—"}
+                          {/* Sign convention for rank_change isn't documented by the provider — shown as a
+                              plain delta rather than a colored up/down arrow to avoid guessing which
+                              direction is an improvement. */}
+                          {k.rank_change != null && k.rank_change !== 0 && (
+                            <span className="text-gray-400"> ({k.rank_change > 0 ? "+" : ""}{k.rank_change})</span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-3">{k.search_volume?.toLocaleString() ?? "—"}</td>
+                        <td className="py-2 pr-3">{k.difficulty ?? "—"}</td>
+                        <td className="py-2 pr-3">{k.total_monthly_clicks?.toLocaleString() ?? "—"}</td>
+                        <td className="max-w-xs truncate py-2">
+                          {k.top_ranked_url ? (
+                            <a href={k.top_ranked_url} target="_blank" rel="noreferrer" className="text-brand-600 hover:underline dark:text-brand-400">
+                              {k.top_ranked_url}
+                            </a>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>

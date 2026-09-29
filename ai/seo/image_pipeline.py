@@ -31,7 +31,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Optional
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from ai.images.factory import get_provider as get_image_provider
 from automation.seo.server_access import client_for_site
@@ -69,10 +69,27 @@ def is_ai_generated_image_provider(provider: Optional[str]) -> bool:
 # offer no stronger guarantee either. Enforcing each task's real target
 # resolution has to happen here, after generation, not by trusting the
 # provider.
+#
+# Twitter/X, Instagram and Pinterest were missing from this dict entirely
+# (found during a later audit of this feature) — every image for those
+# three platforms was silently falling through to the generic 1024x1024
+# square fallback in generate_and_publish_image below instead of each
+# platform's own real recommended size: Twitter/X's documented in-timeline
+# single-image size (1600x900, 16:9), Instagram's standard square feed
+# post (1080x1080, 1:1 — Instagram also supports 4:5 portrait and 1.91:1
+# landscape, but this app posts one image per post, and square is its
+# universal safe default across placements), and Pinterest's own
+# recommended "Standard Pin" size (1000x1500, 2:3 portrait — Pinterest
+# is the one platform here where portrait, not landscape, is the native
+# convention; _resize_to_standard below is orientation-agnostic so this
+# needed no change there).
 _STANDARD_IMAGE_DIMENSIONS = {
     "facebook": (1200, 630),
     "linkedin": (1200, 627),
     "blog_post": (1200, 600),
+    "twitter": (1600, 900),
+    "instagram": (1080, 1080),
+    "pinterest": (1000, 1500),
 }
 
 
@@ -83,29 +100,81 @@ def _standard_dimensions_for_task(task: str) -> Optional[tuple[int, int]]:
     return None
 
 
+# Two distinct problems, both confirmed live from real generated images,
+# both addressed by this same appended guidance:
+#
+# 1. The center-crop above is real and necessary (see
+#    _STANDARD_IMAGE_DIMENSIONS' own comment), but no image provider here
+#    offers a native ~1.91:1 generation size (OpenAI's Images API, the
+#    current default, only offers 1024x1024/1536x1024/1024x1536 —
+#    1536x1024 is the closest landscape option, at 1.5:1), so reaching
+#    1200x627/1200x630 crops roughly the top and bottom 10% each off
+#    whatever the provider actually drew. A dense infographic-style image
+#    (packed rows of text/panels edge-to-edge) got that crop and lost
+#    whole rows of content mid-sentence.
+# 2. Separate from our own crop: the model itself can render text/UI
+#    elements that bleed past its own canvas edges before we ever touch
+#    the image — confirmed live on a "meeting room with dashboard screens"
+#    image where a captions column ran off the right edge mid-word and a
+#    process-step row was cut off at the bottom. This happens because a
+#    prompt asking for a complex multi-panel dashboard/infographic mockup
+#    pushes the model to cram more distinct elements than fit legibly in
+#    frame — a rendering failure, not a crop artifact, so no amount of
+#    crop-margin alone fixes it; the fix is asking for fewer, larger,
+#    clearly-bounded elements in the first place.
+#
+# Applies regardless of which provider or which prompt (auto-derived or a
+# human's own) generated the base text.
+def _crop_safe_composition_guidance(standard_size: Optional[tuple[int, int]]) -> str:
+    if not standard_size:
+        return ""
+    target_w, target_h = standard_size
+    return (
+        f" Compose as a single wide landscape image (roughly {target_w}:{target_h}). Every element — "
+        "subject, text, icons, UI mockups — must be FULLY contained within the frame, with clear empty "
+        "margin on all four sides; nothing may be cropped, cut off, or bleed past any edge, especially "
+        "the top and bottom (those get cropped further for this format). If the scene involves multiple "
+        "panels, labels, or data points, keep the count small (2-4 at most) and each one large and simple "
+        "enough to fit with room to spare — do not pack many small panels or dense rows of text edge-to-edge; "
+        "a crowded layout is what causes elements to run off the canvas or overlap."
+    )
+
+
 def _resize_to_standard(image_bytes: bytes, target_size: tuple[int, int]) -> bytes:
-    """Center-crops to the target aspect ratio, then resizes to the exact
-    target dimensions — so the result is always precisely target_size,
-    never a random size dictated by whatever the provider happened to
-    generate."""
+    """Fits the whole source image inside target_size with no cropping —
+    scales it down (never up) so every pixel survives, then centers it on
+    a blurred, filled-to-cover copy of the same image so the letterbox
+    space reads as an intentional background rather than dead bars (the
+    same technique Instagram/Spotify use for non-matching aspect ratios).
+
+    This used to center-crop to the target ratio instead, which reliably
+    threw away real content: no image provider here generates a native
+    ~1.91:1 image (see generate_and_publish_image's own comment), so that
+    crop always cut roughly the top+bottom 20% off, and _crop_safe_
+    composition_guidance's prompt-level "leave that margin empty" request
+    was confirmed live, twice, not to be reliably followed — a post title
+    and a process-flow step both still got cut mid-element despite it. A
+    prompt is advice the model can ignore; not cropping the image we
+    already have is a hard guarantee, so that's what this does now."""
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     target_w, target_h = target_size
-    target_ratio = target_w / target_h
     src_w, src_h = image.size
-    src_ratio = src_w / src_h
 
-    if src_ratio > target_ratio:
-        new_w = round(src_h * target_ratio)
-        offset = (src_w - new_w) // 2
-        image = image.crop((offset, 0, offset + new_w, src_h))
-    else:
-        new_h = round(src_w / target_ratio)
-        offset = (src_h - new_h) // 2
-        image = image.crop((0, offset, src_w, offset + new_h))
+    fit_scale = min(target_w / src_w, target_h / src_h)
+    fit_w, fit_h = max(1, round(src_w * fit_scale)), max(1, round(src_h * fit_scale))
+    fitted = image.resize((fit_w, fit_h), Image.LANCZOS)
 
-    image = image.resize(target_size, Image.LANCZOS)
+    fill_scale = max(target_w / src_w, target_h / src_h)
+    fill_w, fill_h = max(target_w, round(src_w * fill_scale)), max(target_h, round(src_h * fill_scale))
+    background = image.resize((fill_w, fill_h), Image.LANCZOS)
+    left = (fill_w - target_w) // 2
+    top = (fill_h - target_h) // 2
+    background = background.crop((left, top, left + target_w, top + target_h))
+    background = background.filter(ImageFilter.GaussianBlur(radius=30))
+
+    background.paste(fitted, ((target_w - fit_w) // 2, (target_h - fit_h) // 2))
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
+    background.save(buffer, format="PNG")
     return buffer.getvalue()
 
 # Verified live against a real cPanel host this session: the FTP
@@ -216,7 +285,8 @@ def generate_and_publish_image(site, prompt: str, *, task: str = "seo_content") 
     provider = get_image_provider(task)
     standard_size = _standard_dimensions_for_task(task)
     request_width, request_height = standard_size or (1024, 1024)
-    result = provider.generate(prompt, width=request_width, height=request_height)
+    full_prompt = prompt + _crop_safe_composition_guidance(standard_size)
+    result = provider.generate(full_prompt, width=request_width, height=request_height)
     if not result.ok:
         return ImagePublishResult(
             ok=False,

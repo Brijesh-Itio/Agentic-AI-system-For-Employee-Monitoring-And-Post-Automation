@@ -634,6 +634,8 @@ class SeoSocialPost(Base):
     # through when more than one Facebook Page is configured; NULL means
     # "use the single default account from .env".
     facebook_account_id = Column(Integer, ForeignKey("seo_facebook_accounts.id"))
+    # User instruction — same convention, for seo_linkedin_accounts.
+    linkedin_account_id = Column(Integer, ForeignKey("seo_linkedin_accounts.id"))
     # Module 41 — when set and status='approved', the scheduler
     # (ai/seo/social_scheduler.py) auto-publishes this post once this
     # time arrives; NULL means manual-publish-only, unchanged behaviour.
@@ -650,6 +652,21 @@ class SeoFacebookAccount(Base):
     label = Column(String, nullable=False)
     page_id = Column(String, nullable=False)
     page_access_token = Column(String, nullable=False)
+    created_at = Column(DateTime)
+
+
+class SeoLinkedInAccount(Base):
+    __tablename__ = "seo_linkedin_accounts"
+    id = Column(Integer, primary_key=True)
+    label = Column(String, nullable=False)
+    email = Column(String, nullable=False)
+    password = Column(String, nullable=False)
+    page_url = Column(String)
+    # Set by automation/linkedin/poster.py's per-account login flow once a
+    # real Playwright login succeeds; NULL means "not connected yet" — see
+    # agent/database.py's seo_linkedin_accounts table comment for why this
+    # can't just be filled in at creation time the way a Facebook token can.
+    session_path = Column(String)
     created_at = Column(DateTime)
 
 

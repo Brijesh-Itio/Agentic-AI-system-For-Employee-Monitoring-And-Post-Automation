@@ -12,7 +12,13 @@ downloaded to a temp file first (_download_image_to_temp below) before
 handing it to post_to_linkedin. Fixed 2026-09-17: this download step was
 previously missing entirely, so every LinkedIn post published through
 this dispatcher went out text-only regardless of whether an image had
-been generated for it.
+been generated for it. User instruction added multi-account support
+(seo_linkedin_accounts table, mirroring Facebook's own): passing
+linkedin_account_id/email/password/page_url/session_path here posts
+through that specific connected account's own browser session instead of
+the single .env default — api/routes/seo.py's publish route resolves a
+post's chosen account before calling this, same shape as the Facebook
+account resolution already documented below.
 
 Instagram: automation/instagram/poster.py, the official Graph API
 (Content Publishing) rather than browser automation — Instagram polices
@@ -108,12 +114,21 @@ def publish_social_post(
     *,
     facebook_page_id: Optional[str] = None,
     facebook_access_token: Optional[str] = None,
+    linkedin_account_id: Optional[int] = None,
+    linkedin_email: Optional[str] = None,
+    linkedin_password: Optional[str] = None,
+    linkedin_page_url: Optional[str] = None,
+    linkedin_session_path=None,
 ) -> PublishResult:
     if platform == "linkedin":
         from automation.linkedin.poster import post_to_linkedin
 
         image_path = _download_image_to_temp(image_url) if image_url else None
-        result = post_to_linkedin(content=content, topic="seo-social-post", image_path=image_path)
+        result = post_to_linkedin(
+            content=content, topic="seo-social-post", image_path=image_path,
+            account_id=linkedin_account_id, email=linkedin_email, password=linkedin_password,
+            page_url=linkedin_page_url, session_path=linkedin_session_path,
+        )
         if result["status"] == "success":
             return PublishResult(ok=True, detail=result["detail"], external_post_id=result["post_id"])
         return PublishResult(ok=False, detail=result["detail"])

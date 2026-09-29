@@ -310,7 +310,7 @@ permission problem, the message names the Google account to add to Search Consol
 
 ### 15.8 Social
 
-Create, review and publish posts for LinkedIn, X (Twitter), Instagram and Facebook.
+Create, review and publish posts for LinkedIn, X (Twitter), Instagram, Facebook and Pinterest.
 
 - **Generate social content** — enter a page title and excerpt, choose platforms, and the AI drafts a post for each.
   You can also **bulk-generate** from several topics or create a **30-day content calendar**.
@@ -318,24 +318,72 @@ Create, review and publish posts for LinkedIn, X (Twitter), Instagram and Facebo
 - On any post that is not yet published you can **Edit** (text, platform, source link, image link), **Delete**,
   **Generate image** (AI) or **Upload image**, **Approve** or **Reject**, **Schedule** a date and time, and
   **Publish**. A counter shows the platform's character limit; you cannot save a post that is too long.
-- Instagram posts need an image before they can be published.
+- **Generate image** automatically resizes to each platform's real standard size — Facebook 1200×630, LinkedIn
+  1200×627, Twitter/X 1600×900, Instagram 1080×1080 (square), Pinterest 1000×1500 (portrait) — never a generic
+  square regardless of platform.
+- Instagram and Pinterest posts need an image before they can be published.
 - Select several posts to **Bulk approve**, **Bulk publish** or **Bulk delete**.
 - **Export to Sheet** writes every post to your connected Google Sheet.
 
 Approval is a deliberate step: nothing is published until you approve it (scheduled posts go out at their time).
 
+**Multiple accounts** — when you select LinkedIn or Facebook, a card appears to connect more than one account
+(e.g. several company pages, or a personal profile plus a page) instead of being limited to the single account
+in `.env`. Add one with a label, then pick it from a dropdown in the generator and on any draft. **Facebook**:
+paste in a Page ID and access token from Meta's own dashboard — it's ready to use immediately. **LinkedIn**:
+enter the account's email and password, then press **Log in** on that account's row — LinkedIn doesn't hand out
+a reusable token the way Facebook does, so this actually opens a real browser session once; after it succeeds
+the account shows **Connected** and is ready to post through. If it shows a CAPTCHA/2FA-style failure, log into
+that account normally in a browser first to clear the challenge, then try **Log in** again.
+
 ### 15.9 Blog
 
-**Generate a blog post** — enter a topic and keyword. WorkPulse writes the article first (about 700–800 words, usually
-a few minutes) and shows the draft as soon as it is ready. The meta title and description, keyword density, five FAQs,
-internal links and the plagiarism and grammar checks are then prepared in the background — a banner on the post shows
-what it is working on, and you can read and edit meanwhile.
+**Content gap analysis** — above the generator, sits a card that looks at every topic this site has already
+published or drafted and suggests specific topics it's missing, each with a suggested primary keyword and a
+reason grounded in what your existing posts don't cover yet. Optionally add an **industry/focus** line to steer
+it. Click **"Use this topic"** on any suggestion to load it straight into the generator form below. This is
+reasoned topical analysis, not real search-volume or competitor data — for that, see the Backlinks tab's keyword
+research and competitor analysis tools.
 
-Each draft shows badges for **structure issues** (missing H1, too short), **plagiarism**, **AI-content score** and
-**grammar**. The plagiarism and AI-content badges are a real, paid check against the whole web via Quetext — it
-runs automatically when the post is generated and again whenever you press **Re-check** after editing (it spends
-your Quetext word balance each time). Where no Quetext subscription is set up, those two badges and the check
-simply don't appear. The same applies to Social posts.
+**Content gap analysis (Keyword Gap)** — above the keyword cannibalization card. Enter one or more competitor
+websites (comma-separated), and optionally: a **ranking condition** ("All competitors rank" vs. "At least one" —
+"All" is what unlocks the separate Untapped category, and needs 2+ competitors to matter), **your position
+condition** (count yourself as not really ranking if you're worse than a position you set), a **competitor
+position cutoff** (ignore a competitor's ranking if it's worse than a position you set), and your industry/focus.
+Click **Analyze**. It pulls real ranking-keyword data for your site and every competitor (the same data source as
+the Backlinks tab's Domain Keyword Check, capped at each site's top 5 keywords — not a full profile) and sorts
+every keyword into:
+- **Missing** — competitor(s) rank, you don't
+- **Untapped** — only some competitors rank, you don't (only shown with "All competitors rank" selected)
+- **Weak** — everyone ranks, but a competitor beats you
+- **Strong** — everyone ranks, and you beat the competitor(s)
+- **Unique** — only you rank
+
+Missing and Untapped rows get a suggested article topic; Weak/Strong/Unique show the real rank comparison instead,
+since those are about an existing page's performance rather than a new article. Below all five sections sits
+**Missing topics & content opportunities** — broader ideas (content clusters, comparison pages, FAQ hubs) not
+tied to one single keyword. Click **"Use this topic"** on any Missing/Untapped/opportunity result to load it into
+the generator form below.
+
+**Keyword cannibalization** — below the content gap card, this flags posts on this site targeting the same or
+overlapping keyword, since they'd otherwise compete against each other in search instead of one clearly winning.
+Checked automatically from every post's primary/secondary keywords — exact keyword matching, not topic
+similarity, so two posts on the same subject with differently-worded keywords won't show up here.
+
+**Generate a blog post** — enter a topic and keyword. Optionally add **Additional instructions / prompt** — free
+text for anything the topic and keyword don't cover: audience, tone, an analogy to include, things to avoid
+(e.g. "write for a complete beginner, include a real-world analogy, don't mention pricing or specific
+providers"). It's followed on top of WorkPulse's standing SEO / E-E-A-T / AEO / GEO writing rules, not instead
+of them. WorkPulse writes the article first (about 700–800 words, usually a few minutes) and shows the draft as
+soon as it is ready. The meta title and description, keyword density, five FAQs, internal links and the grammar
+check are then prepared in the background — a banner on the post shows what it is working on, and you can read
+and edit meanwhile.
+
+Each draft shows badges for **structure issues** (missing H1, too short) and **grammar**. **Plagiarism** and
+**AI-content score** are a real, paid check against the whole web via Quetext — press **Check now** (or
+**Re-check** after editing) to run it; it is never fired automatically, since it spends your Quetext word
+balance each time you run it. Where no Quetext subscription is set up, that badge and the check simply don't
+appear. The same applies to Social posts.
 
 A draft moves through: **Draft → Approved → Published (as a CMS draft) → Live.**
 
@@ -344,7 +392,9 @@ A draft moves through: **Draft → Approved → Published (as a CMS draft) → L
   of the toolbar copies the whole article (formatting included) to paste elsewhere.
 - **SEO Tools** — meta title/description, slug, tags, categories, keyword density, internal links, image.
 - **Approve**, then **Publish**. Publishing creates a **draft in your CMS** — it does not make the page public. It
-  adds a featured image (generated if none) **centred after the first paragraph**, and related-reading links.
+  adds a featured image (generated if none, using real AI image generation so it reflects the actual post
+  content rather than a generic stock-style picture) **centred after the first paragraph**, and related-reading
+  links.
 - Press **Go Live** when you are ready for it to become public.
 - **Schedule** a date and time to publish automatically.
 - **Content calendar** plans a series of posts; **Export to Sheet** sends them to Google Sheets.

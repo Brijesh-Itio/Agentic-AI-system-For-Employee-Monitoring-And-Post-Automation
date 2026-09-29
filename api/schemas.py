@@ -789,6 +789,28 @@ class RapidApiKeywordCheckRequest(BaseModel):
     country: str = "us"
 
 
+class DomainKeywordRowOut(BaseModel):
+    keyword: str
+    rank: Optional[int] = None
+    rank_change: Optional[int] = None
+    search_volume: Optional[int] = None
+    difficulty: Optional[int] = None
+    seo_clicks: Optional[int] = None
+    seo_clicks_change: Optional[int] = None
+    total_monthly_clicks: Optional[int] = None
+    paid_competitors: Optional[int] = None
+    top_ranked_url: str = ""
+
+
+class DomainKeywordAnalysisOut(BaseModel):
+    domain: str
+    total_keywords: int
+    total_volume: int
+    total_seo_clicks: int
+    total_seo_clicks_change: int
+    keywords: list[DomainKeywordRowOut] = []
+
+
 class KeywordResearchRequest(BaseModel):
     keyword: str
     language: str = "en"
@@ -1190,8 +1212,8 @@ class ContentAnalyzeRequest(BaseModel):
     content_html: str
     primary_keyword: Optional[str] = None
     secondary_keywords: Optional[list[str]] = None
-    min_words: int = 1200
-    max_words: int = 1500
+    min_words: int = 700
+    max_words: int = 800
 
 
 class StructureIssueOut(BaseModel):
@@ -1218,6 +1240,54 @@ class StructureReportOut(BaseModel):
     passed: bool
     issues: list[StructureIssueOut]
     keyword_density: list[KeywordDensityOut] = []
+
+
+class ContentGapAnalysisRequest(BaseModel):
+    site_id: int
+    competitor_websites: list[str]
+    # "all" = a keyword only counts if EVERY competitor ranks for it; "at_least_one" = any one does.
+    # "all" is required for the "untapped" category to be distinct from "missing" — see
+    # ai/seo/content_gap.py's module docstring.
+    ranking_condition: str = "at_least_one"
+    # Treat this site as "not really ranking" for a keyword if its rank is worse than this (or it
+    # doesn't rank at all) — None means only literal absence counts.
+    your_position_threshold: Optional[int] = None
+    # Ignore a competitor's ranking for a keyword if their rank is worse than this — None means any
+    # rank counts.
+    competitor_position_cutoff: Optional[int] = None
+    industry_context: Optional[str] = None
+    country: str = "us"
+
+
+class CompetitorPresenceOut(BaseModel):
+    rank: Optional[int] = None
+    url: str = ""
+
+
+class KeywordGapRowOut(BaseModel):
+    keyword: str
+    search_volume: Optional[int] = None
+    your_rank: Optional[int] = None
+    category: str  # "missing" | "weak" | "strong" | "untapped" | "unique"
+    competitors: dict[str, CompetitorPresenceOut] = {}
+    topic: str = ""
+    rationale: str = ""
+    priority: str = ""
+
+
+class TopicOpportunityOut(BaseModel):
+    topic: str
+    rationale: str
+    priority: str
+
+
+class ContentGapAnalysisOut(BaseModel):
+    this_domain: str
+    competitor_domains: list[str]
+    this_domain_keyword_sample_count: int
+    competitor_keyword_sample_counts: dict[str, int]
+    rows: list[KeywordGapRowOut]
+    topic_opportunities: list[TopicOpportunityOut] = []
 
 
 # Module 60 — content plagiarism & humanization check. See
@@ -1475,6 +1545,7 @@ class SocialPostCreate(BaseModel):
     source_url: Optional[str] = None
     image_url: Optional[str] = None
     facebook_account_id: Optional[int] = None
+    linkedin_account_id: Optional[int] = None
 
 
 class SocialGenerateRequest(BaseModel):
@@ -1490,6 +1561,13 @@ class SocialGenerateRequest(BaseModel):
     # should publish through; ignored for every other platform. None =
     # use the single default account from .env.
     facebook_account_id: Optional[int] = None
+    # User instruction — same convention, for seo_linkedin_accounts.
+    linkedin_account_id: Optional[int] = None
+    # Freeform direction on top of the page title/excerpt (audience, angle,
+    # what to include/avoid) — the same "prompt on top of the topic"
+    # pattern as BlogGenerateRequest.instructions. See
+    # ai/seo/social_content.py's generate_social_post.
+    instructions: Optional[str] = None
 
 
 class SocialPostOut(BaseModel):
@@ -1507,6 +1585,7 @@ class SocialPostOut(BaseModel):
     created_at: Optional[datetime] = None
     posted_at: Optional[datetime] = None
     facebook_account_id: Optional[int] = None
+    linkedin_account_id: Optional[int] = None
     # Module 60 — same convention as BlogPostOut's own quality_report_json.
     quality_report_json: Optional[str] = None
     quality_checked_at: Optional[datetime] = None
@@ -1539,6 +1618,7 @@ class SocialBulkGenerateRequest(BaseModel):
     platforms: list[SocialPlatform] = ["linkedin"]
     image_url: Optional[str] = None
     facebook_account_id: Optional[int] = None
+    linkedin_account_id: Optional[int] = None
 
 
 class SocialCalendarGenerateRequest(BaseModel):
@@ -1555,6 +1635,7 @@ class SocialCalendarGenerateRequest(BaseModel):
     post_time: str = "10:00"
     image_url: Optional[str] = None
     facebook_account_id: Optional[int] = None
+    linkedin_account_id: Optional[int] = None
 
 
 class SocialExportRequest(BaseModel):
@@ -1584,6 +1665,40 @@ class FacebookAccountOut(BaseModel):
     # for how sensitive one of these is); the frontend never needs it back
     # after creation, only enough to identify/delete the right account.
     created_at: Optional[datetime] = None
+
+
+class LinkedInAccountCreate(BaseModel):
+    label: str
+    email: str
+    password: str
+    page_url: Optional[str] = None
+
+
+class LinkedInAccountOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    label: str
+    email: str
+    page_url: Optional[str] = None
+    # password and session_path deliberately omitted — same reasoning as
+    # FacebookAccountOut omitting page_access_token above; `connected`
+    # (whether session_path is set) is what the frontend actually needs.
+    connected: bool = False
+    created_at: Optional[datetime] = None
+
+
+class LinkedInAccountLoginOut(BaseModel):
+    status: str  # "success" | "failure"
+    detail: str
+
+
+class LinkedInPageUrlOut(BaseModel):
+    page_url: str
+
+
+class LinkedInPageUrlUpdate(BaseModel):
+    page_url: str
 
 
 class BacklinkPullRequest(BaseModel):
@@ -1972,6 +2087,9 @@ class BlogGenerateRequest(BaseModel):
     site_id: int
     topic: str
     primary_keyword: Optional[str] = None
+    # Freeform direction on top of the topic (audience, angle, what to include/avoid) — the "prompt"
+    # half of prompt-based blog writing; topic still becomes the exact title. See ai/seo/blog_content.py.
+    instructions: Optional[str] = None
     # Optional secondary/LSI keywords to track density for (target 0.5-1%
     # each, vs. the primary keyword's 1-1.5% — see ai/seo/content_
     # structure.py's SECONDARY_KEYWORD_DENSITY_TARGET). Purely a density-

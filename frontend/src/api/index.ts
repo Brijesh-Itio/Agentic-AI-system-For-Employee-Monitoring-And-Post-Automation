@@ -1325,6 +1325,8 @@ export interface SocialPost {
   // means the single default account from .env. Ignored for every other
   // platform.
   facebook_account_id: number | null;
+  // Same convention, for seo_linkedin_accounts (user instruction).
+  linkedin_account_id: number | null;
   // Module 41 — set means "auto-publish at this time once approved";
   // null means manual-publish-only.
   scheduled_for: string | null;
@@ -1342,6 +1344,8 @@ export const generateSocialPosts = (payload: {
   image_url?: string;
   platforms: SocialPlatform[];
   facebook_account_id?: number | null;
+  linkedin_account_id?: number | null;
+  instructions?: string;
 }) => api.post<SocialPost[]>("/api/seo/social/generate", payload, { timeout: 120_000 }).then((r) => r.data);
 
 export const scheduleSocialPost = (postId: number, scheduledFor: string | null) =>
@@ -1372,6 +1376,7 @@ export const bulkGenerateSocialPosts = (payload: {
   platforms: SocialPlatform[];
   image_url?: string;
   facebook_account_id?: number | null;
+  linkedin_account_id?: number | null;
 }) => api.post<SocialPost[]>("/api/seo/social/bulk-generate", payload, { timeout: 0 }).then((r) => r.data);
 
 export const generateSocialCalendar = (payload: {
@@ -1383,6 +1388,7 @@ export const generateSocialCalendar = (payload: {
   post_time: string;
   image_url?: string;
   facebook_account_id?: number | null;
+  linkedin_account_id?: number | null;
 }) => api.post<SocialPost[]>("/api/seo/social/generate-calendar", payload, { timeout: 0 }).then((r) => r.data);
 
 export interface SocialExportResult {
@@ -1410,6 +1416,40 @@ export const createFacebookAccount = (payload: { label: string; page_id: string;
 export const deleteFacebookAccount = (accountId: number) =>
   api.delete(`/api/seo/facebook-accounts/${accountId}`);
 
+// User instruction — LinkedIn multi-account, mirroring the Facebook accounts pattern above with one
+// real difference: a new account starts `connected: false` (LinkedIn hands out no reusable token the
+// way Meta does), and only becomes postable after loginLinkedInAccount actually drives a real browser
+// login for it — see automation/linkedin/poster.py's module docstring for why that can't happen at
+// creation time the way a Facebook token can.
+export interface LinkedInAccount {
+  id: number;
+  label: string;
+  email: string;
+  page_url: string | null;
+  connected: boolean;
+  created_at: string | null;
+}
+
+export const getLinkedInAccounts = () =>
+  api.get<LinkedInAccount[]>("/api/seo/linkedin-accounts").then((r) => r.data);
+
+export const createLinkedInAccount = (payload: { label: string; email: string; password: string; page_url?: string }) =>
+  api.post<LinkedInAccount>("/api/seo/linkedin-accounts", payload).then((r) => r.data);
+
+export const deleteLinkedInAccount = (accountId: number) =>
+  api.delete(`/api/seo/linkedin-accounts/${accountId}`);
+
+export const loginLinkedInAccount = (accountId: number) =>
+  api
+    .post<{ status: "success" | "failure"; detail: string }>(`/api/seo/linkedin-accounts/${accountId}/login`, {}, { timeout: 90_000 })
+    .then((r) => r.data);
+
+export const getLinkedInPageUrl = () =>
+  api.get<{ page_url: string }>("/api/seo/social/linkedin-page-url").then((r) => r.data);
+
+export const setLinkedInPageUrl = (pageUrl: string) =>
+  api.put<{ page_url: string }>("/api/seo/social/linkedin-page-url", { page_url: pageUrl }).then((r) => r.data);
+
 export const getSocialPosts = (siteId: number, status?: string) =>
   api.get<SocialPost[]>("/api/seo/social", { params: { site_id: siteId, status } }).then((r) => r.data);
 
@@ -1426,6 +1466,7 @@ export const createSocialPost = (payload: {
   source_url?: string;
   image_url?: string;
   facebook_account_id?: number | null;
+  linkedin_account_id?: number | null;
 }) => api.post<SocialPost>("/api/seo/social", payload).then((r) => r.data);
 
 // Module 60 — manual re-check, e.g. after editing a draft's content. See
@@ -1542,14 +1583,34 @@ export const getSemrushBacklinkGap = (siteId: number, competitorDomains: string[
     )
     .then((r) => r.data);
 
-// Module 37 — a third-party RapidAPI keyword wrapper (NOT Semrush's own
-// official API — see automation/seo/rapidapi_keyword_client.py). Every
-// live test this session returned the provider's own generic error
-// shape rather than real data, so this returns the raw response as-is
-// (unknown/unverified shape) rather than a typed model.
+// Module 37 — "Competitor Website Keywords Analysis", a third-party RapidAPI wrapper (NOT
+// Semrush's own official API — see automation/seo/rapidapi_keyword_client.py's module docstring
+// for the key-mismatch bug that made this look broken and the real, verified response shape).
+export interface DomainKeywordRow {
+  keyword: string;
+  rank: number | null;
+  rank_change: number | null;
+  search_volume: number | null;
+  difficulty: number | null;
+  seo_clicks: number | null;
+  seo_clicks_change: number | null;
+  total_monthly_clicks: number | null;
+  paid_competitors: number | null;
+  top_ranked_url: string;
+}
+
+export interface DomainKeywordAnalysis {
+  domain: string;
+  total_keywords: number;
+  total_volume: number;
+  total_seo_clicks: number;
+  total_seo_clicks_change: number;
+  keywords: DomainKeywordRow[];
+}
+
 export const checkRapidApiKeywords = (siteId: number, country = "us") =>
   api
-    .post<Record<string, unknown>>("/api/seo/keywords/rapidapi-check", { site_id: siteId, country }, { timeout: 90_000 })
+    .post<DomainKeywordAnalysis>("/api/seo/keywords/rapidapi-check", { site_id: siteId, country }, { timeout: 90_000 })
     .then((r) => r.data);
 
 // A DIFFERENT RapidAPI product ("Semrush Magic Tool", not the one
@@ -2414,6 +2475,9 @@ export const generateBlogPost = (payload: {
   topic: string;
   primary_keyword?: string;
   secondary_keywords?: string[];
+  // Freeform direction on top of the topic — audience, angle, what to include/avoid — followed
+  // alongside the standing SEO/E-E-A-T/AEO/GEO brief (ai/seo/blog_content.py), not instead of it.
+  instructions?: string;
   min_words?: number;
   max_words?: number;
 }) => api.post<BlogPost>("/api/seo/blog/generate", payload, { timeout: 0 }).then((r) => r.data);
@@ -2666,6 +2730,49 @@ export const analyzeContentStructure = (payload: {
   min_words?: number;
   max_words?: number;
 }) => api.post<StructureReport>("/api/seo/content/analyze", payload).then((r) => r.data);
+
+export type KeywordGapCategory = "missing" | "weak" | "strong" | "untapped" | "unique";
+
+export interface CompetitorPresence {
+  rank: number | null;
+  url: string;
+}
+
+export interface KeywordGapRow {
+  keyword: string;
+  search_volume: number | null;
+  your_rank: number | null;
+  category: KeywordGapCategory;
+  competitors: Record<string, CompetitorPresence>;
+  topic: string;
+  rationale: string;
+  priority: string;
+}
+
+export interface TopicOpportunity {
+  topic: string;
+  rationale: string;
+  priority: "high" | "medium" | "low";
+}
+
+export interface ContentGapAnalysis {
+  this_domain: string;
+  competitor_domains: string[];
+  this_domain_keyword_sample_count: number;
+  competitor_keyword_sample_counts: Record<string, number>;
+  rows: KeywordGapRow[];
+  topic_opportunities: TopicOpportunity[];
+}
+
+export const analyzeContentGap = (payload: {
+  site_id: number;
+  competitor_websites: string[];
+  ranking_condition?: "all" | "at_least_one";
+  your_position_threshold?: number;
+  competitor_position_cutoff?: number;
+  industry_context?: string;
+  country?: string;
+}) => api.post<ContentGapAnalysis>("/api/seo/content-gap/analyze", payload, { timeout: 5 * 60_000 }).then((r) => r.data);
 
 export interface FaqPair {
   question: string;

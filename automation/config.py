@@ -10,6 +10,7 @@ from api.config import PROJECT_ROOT, settings
 
 LINKEDIN_EMAIL: str = settings.LINKEDIN_EMAIL
 LINKEDIN_PASSWORD: str = settings.LINKEDIN_PASSWORD
+LINKEDIN_PAGE_URL: str = settings.LINKEDIN_PAGE_URL
 LINKEDIN_COOKIES_PATH: Path = PROJECT_ROOT / "linkedin_cookies.json"
 
 # 18.2 — topics rotate through this list so none repeats until all have

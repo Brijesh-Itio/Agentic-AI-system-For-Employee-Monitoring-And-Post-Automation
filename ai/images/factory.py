@@ -40,6 +40,10 @@ def _build_provider(provider_name: str) -> ImageProvider:
         from ai.images.providers.image_worker_provider import ImageWorkerProvider
 
         return ImageWorkerProvider()
+    if provider_name == "openai":
+        from ai.images.providers.openai_image_provider import OpenAiImageProvider
+
+        return OpenAiImageProvider()
 
     logger.warning("Unknown image provider %r requested, falling back to fastsd", provider_name)
     return FastSdProvider()

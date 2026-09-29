@@ -43,6 +43,7 @@ def generate_blog_post(
     min_words: int = 700,
     max_words: int = 800,
     max_attempts: int = 2,
+    instructions: Optional[str] = None,
 ) -> Optional[BlogPostDraft]:
     """Never raises — returns None on LLM failure or unparseable output,
     matching this codebase's graceful-degrade convention.
@@ -94,11 +95,17 @@ def generate_blog_post(
         "out on its own and still make sense — a clear claim followed by the specific reasoning or detail "
         "behind it — rather than prose that only makes sense read start to finish.\n\n"
     )
+    # The user's own freeform brief on top of the topic — audience, angle, what to include/avoid, tone,
+    # structure requests. Followed alongside the standing content_brief above, never in place of it: this
+    # is additional direction from the person generating the post for their own site, not untrusted
+    # third-party input, so it's passed straight through rather than defended against as an injection risk.
+    instructions_line = f"Additional instructions to follow as well:\n{instructions.strip()}\n\n" if instructions and instructions.strip() else ""
     prompt = (
         f'Write a complete, in-depth blog post about: "{topic}".\n'
         f'The post title, and the single <h1>, must be exactly: "{topic}" — do not reword it.\n'
         f"{keyword_line}"
         f"{content_brief}"
+        f"{instructions_line}"
         f"Target length: {min_words}-{max_words} words — this is a real constraint, not a suggestion. Reach it "
         "with genuinely useful detail, examples, and explanation; never pad with repetition or filler.\n\n"
         "Output ONLY these three sections, each on its own line, in this exact format "

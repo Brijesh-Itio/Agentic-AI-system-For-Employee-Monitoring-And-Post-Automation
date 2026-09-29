@@ -14,6 +14,7 @@ called from a plain APScheduler job with no FastAPI request in scope —
 same pattern every other scheduled job in api/main.py already uses.
 """
 import logging
+from pathlib import Path
 
 from agent import database
 from automation.seo.social_poster import PublishResult, publish_social_post
@@ -37,12 +38,38 @@ def publish_one(post_id: int) -> PublishResult:
         facebook_page_id = account["page_id"]
         facebook_access_token = account["page_access_token"]
 
+    linkedin_account_id = None
+    linkedin_email = None
+    linkedin_password = None
+    linkedin_page_url = None
+    linkedin_session_path = None
+    if row["platform"] == "linkedin" and row["linkedin_account_id"] is not None:
+        account = database.get_linkedin_account(row["linkedin_account_id"])
+        if account is None:
+            detail = f"LinkedIn account {row['linkedin_account_id']} was deleted"
+            database.mark_social_post_failed(post_id, detail)
+            return PublishResult(ok=False, detail=detail)
+        if account["session_path"] is None:
+            detail = f"LinkedIn account {account['label']!r} isn't connected yet — log in from the LinkedIn accounts card first"
+            database.mark_social_post_failed(post_id, detail)
+            return PublishResult(ok=False, detail=detail)
+        linkedin_account_id = account["id"]
+        linkedin_email = account["email"]
+        linkedin_password = account["password"]
+        linkedin_page_url = account["page_url"]
+        linkedin_session_path = Path(account["session_path"])
+
     result = publish_social_post(
         row["platform"],
         row["content"],
         image_url=row["image_url"],
         facebook_page_id=facebook_page_id,
         facebook_access_token=facebook_access_token,
+        linkedin_account_id=linkedin_account_id,
+        linkedin_email=linkedin_email,
+        linkedin_password=linkedin_password,
+        linkedin_page_url=linkedin_page_url,
+        linkedin_session_path=linkedin_session_path,
     )
     if result.ok:
         database.mark_social_post_posted(post_id, result.external_post_id)

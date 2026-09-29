@@ -59,10 +59,16 @@ from api.schemas import (
     BlogTaxonomyUpdate,
     CmsPostOut,
     CmsStatusOut,
+    CompetitorPresenceOut,
     ContentAnalyzeRequest,
+    ContentGapAnalysisOut,
+    ContentGapAnalysisRequest,
     ContentQualityCheckRequest,
     ContentQualityReportOut,
     DigestGenerateRequest,
+    DomainKeywordAnalysisOut,
+    KeywordGapRowOut,
+    TopicOpportunityOut,
     DigestRollupGenerateRequest,
     DigestOut,
     DigestRollupOut,
@@ -189,6 +195,11 @@ from api.schemas import (
     SocialExportResult,
     FacebookAccountCreate,
     FacebookAccountOut,
+    LinkedInAccountCreate,
+    LinkedInAccountLoginOut,
+    LinkedInAccountOut,
+    LinkedInPageUrlOut,
+    LinkedInPageUrlUpdate,
     StructureReportOut,
     TechnicalAuditRequest,
     PageTagAuditOut,
@@ -209,6 +220,7 @@ from api.schemas import (
 from ai.seo.blog_content import generate_blog_post
 from ai.seo.blog_meta_generator import generate_blog_meta_tags
 from ai.seo.content_quality import assess_humanization, check_plagiarism
+from ai.seo.content_gap import categorize_keyword_gap, suggest_broader_topics, suggest_topics_for_gap_rows
 from ai.seo.content_structure import analyze_structure, generate_faq
 from ai.seo.daily_digest import generate_daily_digest
 from ai.seo.grammar_checker import apply_suggestion as apply_grammar_suggestion, check_grammar
@@ -706,19 +718,15 @@ def semrush_backlink_gap(payload: SemrushBacklinkGapRequest, db: Session = Depen
     return fetch_semrush_backlink_gap(targets)
 
 
-@router.post("/keywords/rapidapi-check")
+@router.post("/keywords/rapidapi-check", response_model=DomainKeywordAnalysisOut)
 def check_rapidapi_keywords(payload: RapidApiKeywordCheckRequest, db: Session = Depends(get_db)):
-    """Module 37 — a third-party RapidAPI keyword wrapper (NOT Semrush's
-    own official API, see automation/seo/rapidapi_keyword_client.py's
-    module docstring). Returns the provider's raw JSON response rather
-    than a typed model: every live test this session returned their own
-    generic error shape, not real data, so there's no verified success
-    shape to model against yet — the frontend shows this as raw JSON
-    until a real successful response has actually been observed."""
+    """Module 37 — 'Competitor Website Keywords Analysis', a third-party RapidAPI wrapper (NOT
+    Semrush's own official API, see automation/seo/rapidapi_keyword_client.py's module docstring
+    for the key-mismatch bug that made this look broken and the real, now-verified response shape)."""
     from automation.seo.rapidapi_keyword_client import fetch_keyword_analysis, is_configured
 
     if not is_configured():
-        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_KEY is not set in .env")
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_MAGIC_KEY is not set in .env")
 
     site = _site_or_404(payload.site_id, db)
     domain = urlparse(site.base_url).netloc or site.base_url
@@ -1881,6 +1889,74 @@ def analyze_content_route(payload: ContentAnalyzeRequest):
     return _structure_report_out(report)
 
 
+@router.post("/content-gap/analyze", response_model=ContentGapAnalysisOut)
+def analyze_content_gap_route(payload: ContentGapAnalysisRequest, db: Session = Depends(get_db)):
+    """Content Gap Analysis / Keyword Gap (user instruction, corrected twice: first to be a real
+    cross-site comparison rather than self-comparison against this site's own titles, then to
+    reproduce Semrush's own Keyword Gap category system — Missing/Weak/Strong/Shared/Untapped/
+    Unique, multi-competitor, configurable ranking condition and position thresholds — see
+    ai/seo/content_gap.py's module docstring for exact category definitions and the honest 5-
+    keyword-per-domain sample-size limitation this all runs against, confirmed live not assumed."""
+    from automation.seo.rapidapi_keyword_client import fetch_keyword_analysis, is_configured as rapidapi_configured
+
+    site = _site_or_404(payload.site_id, db)
+    if not rapidapi_configured():
+        raise HTTPException(status_code=400, detail="RAPIDAPI_SEMRUSH_MAGIC_KEY is not set in .env")
+
+    competitor_domains = [
+        (urlparse(w).netloc or w.strip()) for w in payload.competitor_websites if w and w.strip()
+    ]
+    if not competitor_domains:
+        raise HTTPException(status_code=400, detail="At least one competitor website is required")
+
+    this_domain = urlparse(site.base_url).netloc or site.base_url
+    this_analysis = fetch_keyword_analysis(this_domain, country=payload.country)
+
+    competitor_keyword_sets: dict = {}
+    competitor_sample_counts: dict = {}
+    for domain in competitor_domains:
+        analysis = fetch_keyword_analysis(domain, country=payload.country)
+        if analysis is None:
+            raise HTTPException(status_code=502, detail=f"Could not fetch keyword data for {domain} — see server logs")
+        competitor_keyword_sets[analysis.domain] = analysis.keywords
+        competitor_sample_counts[analysis.domain] = len(analysis.keywords)
+
+    rows = categorize_keyword_gap(
+        this_analysis.keywords if this_analysis else [],
+        competitor_keyword_sets,
+        ranking_condition=payload.ranking_condition,
+        your_position_threshold=payload.your_position_threshold,
+        competitor_position_cutoff=payload.competitor_position_cutoff,
+    )
+    rows = suggest_topics_for_gap_rows(rows, site_id=payload.site_id, industry_context=payload.industry_context)
+
+    seen_titles: set = set()
+    existing_topics = [
+        row.title
+        for row in db.query(SeoBlogPost.title).filter(SeoBlogPost.site_id == payload.site_id, SeoBlogPost.status != "rejected").all()
+        if row.title and not (row.title in seen_titles or seen_titles.add(row.title))
+    ]
+    topic_opportunities = suggest_broader_topics(
+        existing_topics, competitor_keyword_sets, site_id=payload.site_id, industry_context=payload.industry_context,
+    ) or []
+
+    return ContentGapAnalysisOut(
+        this_domain=this_domain,
+        competitor_domains=list(competitor_keyword_sets.keys()),
+        this_domain_keyword_sample_count=len(this_analysis.keywords) if this_analysis else 0,
+        competitor_keyword_sample_counts=competitor_sample_counts,
+        rows=[
+            KeywordGapRowOut(
+                keyword=r.keyword, search_volume=r.search_volume, your_rank=r.your_rank, category=r.category,
+                competitors={d: CompetitorPresenceOut(rank=p.rank, url=p.url) for d, p in r.competitors.items()},
+                topic=r.topic, rationale=r.rationale, priority=r.priority,
+            )
+            for r in rows
+        ],
+        topic_opportunities=[TopicOpportunityOut(**t.__dict__) for t in topic_opportunities],
+    )
+
+
 # Module 60 — content plagiarism & humanization check. See
 # ai/seo/content_quality.py's module docstring for what each check
 # honestly does and doesn't cover.
@@ -2614,7 +2690,13 @@ def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = De
     candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
     for platform in payload.platforms:
-        draft = generate_social_post(platform, payload.page_title, payload.content_excerpt, site_id=payload.site_id)
+        draft = generate_social_post(
+            platform,
+            payload.page_title,
+            payload.content_excerpt,
+            site_id=payload.site_id,
+            instructions=payload.instructions,
+        )
         if draft is None:
             continue  # one platform failing shouldn't fail the whole batch
         post_id = database.create_social_post(
@@ -2624,6 +2706,7 @@ def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = De
             payload.source_url,
             payload.image_url,
             facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
+            linkedin_account_id=payload.linkedin_account_id if platform == "linkedin" else None,
         )
         created_ids.append(post_id)
 
@@ -2697,6 +2780,7 @@ def create_social_post_route(payload: SocialPostCreate, db: Session = Depends(ge
         (payload.source_url or "").strip() or None,
         (payload.image_url or "").strip() or None,
         facebook_account_id=payload.facebook_account_id if payload.platform == "facebook" else None,
+        linkedin_account_id=payload.linkedin_account_id if payload.platform == "linkedin" else None,
     )
     db.expire_all()
     return db.query(SeoSocialPost).filter(SeoSocialPost.id == post_id).first()
@@ -2893,6 +2977,7 @@ def bulk_generate_social_posts_route(payload: SocialBulkGenerateRequest, db: Ses
                 None,
                 payload.image_url,
                 facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
+                linkedin_account_id=payload.linkedin_account_id if platform == "linkedin" else None,
             )
             created_ids.append(post_id)
 
@@ -2943,6 +3028,7 @@ def generate_social_calendar_route(payload: SocialCalendarGenerateRequest, db: S
                 None,
                 payload.image_url,
                 facebook_account_id=payload.facebook_account_id if platform == "facebook" else None,
+                linkedin_account_id=payload.linkedin_account_id if platform == "linkedin" else None,
             )
             database.set_social_post_schedule(post_id, scheduled_for)
             created_ids.append(post_id)
@@ -3042,6 +3128,74 @@ def delete_facebook_account_route(account_id: int):
     ok = database.delete_facebook_account(account_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"No Facebook account {account_id}")
+
+
+def _linkedin_account_out(row) -> LinkedInAccountOut:
+    return LinkedInAccountOut(
+        id=row["id"], label=row["label"], email=row["email"], page_url=row["page_url"],
+        connected=row["session_path"] is not None, created_at=row["created_at"],
+    )
+
+
+@router.get("/linkedin-accounts", response_model=list[LinkedInAccountOut])
+def list_linkedin_accounts_route():
+    return [_linkedin_account_out(row) for row in database.list_linkedin_accounts()]
+
+
+@router.post("/linkedin-accounts", response_model=LinkedInAccountOut, status_code=201)
+def create_linkedin_account_route(payload: LinkedInAccountCreate):
+    """Unlike a Facebook account, this alone does NOT make the account
+    ready to post through — LinkedIn hands out no reusable token the way
+    Meta does, only a login the model can drive itself. The row is created
+    with connected=False; POST .../login runs the actual browser login and
+    flips it to True on success (see agent/database.py's seo_linkedin_
+    accounts table comment for why this has to be a separate step)."""
+    account_id = database.create_linkedin_account(payload.label, payload.email, payload.password, payload.page_url)
+    return _linkedin_account_out(database.get_linkedin_account(account_id))
+
+
+@router.delete("/linkedin-accounts/{account_id}", status_code=204)
+def delete_linkedin_account_route(account_id: int):
+    ok = database.delete_linkedin_account(account_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No LinkedIn account {account_id}")
+
+
+@router.post("/linkedin-accounts/{account_id}/login", response_model=LinkedInAccountLoginOut)
+def login_linkedin_account_route(account_id: int):
+    """Drives a real Playwright login for this specific account — public
+    and effectively irreversible the moment it runs (same stance
+    automation/linkedin/poster.py's module docstring already states for
+    posting itself), so this only ever runs when a human clicks "Log in"
+    for this account, never automatically. Re-callable any time a saved
+    session stops working."""
+    account = database.get_linkedin_account(account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail=f"No LinkedIn account {account_id}")
+
+    from automation.linkedin.poster import login_linkedin_account
+
+    result = login_linkedin_account(account_id, account["email"], account["password"])
+    return LinkedInAccountLoginOut(status=result["status"], detail=result["detail"])
+
+
+# Key must match automation/linkedin/poster.py's _resolve_page_url(), which
+# reads the same app_settings row so a UI change here takes effect on the
+# very next LinkedIn post with no backend restart needed.
+_LINKEDIN_PAGE_URL_SETTING_KEY = "linkedin_page_url"
+
+
+@router.get("/social/linkedin-page-url", response_model=LinkedInPageUrlOut)
+def get_linkedin_page_url_route():
+    stored = database.get_app_setting(_LINKEDIN_PAGE_URL_SETTING_KEY)
+    return LinkedInPageUrlOut(page_url=stored if stored is not None else settings.LINKEDIN_PAGE_URL)
+
+
+@router.put("/social/linkedin-page-url", response_model=LinkedInPageUrlOut)
+def set_linkedin_page_url_route(payload: LinkedInPageUrlUpdate):
+    page_url = payload.page_url.strip()
+    database.set_app_setting(_LINKEDIN_PAGE_URL_SETTING_KEY, page_url)
+    return LinkedInPageUrlOut(page_url=page_url)
 
 
 @router.post("/backlinks/pull", response_model=list[BacklinkMentionOut], status_code=201)
@@ -3414,7 +3568,7 @@ def generate_blog_post_route(payload: BlogGenerateRequest, db: Session = Depends
 
     draft = generate_blog_post(
         payload.topic, payload.primary_keyword, site_id=payload.site_id,
-        min_words=payload.min_words, max_words=payload.max_words,
+        min_words=payload.min_words, max_words=payload.max_words, instructions=payload.instructions,
     )
     if draft is None:
         raise HTTPException(status_code=502, detail="Blog post generation failed — see server logs")

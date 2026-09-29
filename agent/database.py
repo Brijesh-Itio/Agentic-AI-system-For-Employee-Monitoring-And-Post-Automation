@@ -842,6 +842,38 @@ CREATE TABLE IF NOT EXISTS seo_facebook_accounts (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- User instruction ("like facebook for LinkedIn also set multi account") —
+-- multiple LinkedIn accounts, mirroring seo_facebook_accounts' table shape
+-- and its NULL-means-default-.env-account convention exactly. Global, not
+-- per-site, same reasoning as that table's own comment: a LinkedIn login
+-- (or Company Page) isn't tied to one SEO site.
+--
+-- The two tables differ in one real way, not a cosmetic one: Facebook auth
+-- is a stateless (page_id, access_token) pair pasted in from Meta's own
+-- dashboard, so a row is immediately usable the moment it's created.
+-- LinkedIn has no equivalent artifact — automation/linkedin/poster.py logs
+-- in with Playwright and saves a real browser session (cookies +
+-- localStorage) to disk; that can only be produced by actually driving a
+-- login for this exact account, which needs a real login attempt (and can
+-- hit a CAPTCHA/2FA challenge only a human can clear), not a synchronous
+-- DB insert. So a new row here starts with session_path NULL ("not
+-- connected yet"); POST /api/seo/linkedin-accounts/{id}/login runs the
+-- actual Playwright login and fills session_path in only on success —
+-- re-runnable any time a session expires, unlike Facebook's token which
+-- just keeps working until Meta revokes it. session_path itself is never
+-- user-supplied: automation/linkedin/poster.py derives it deterministically
+-- as agent/data/linkedin_sessions/{id}.json, one file per account, so
+-- there's no path collision or user-facing filesystem detail to get wrong.
+CREATE TABLE IF NOT EXISTS seo_linkedin_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    email TEXT NOT NULL,
+    password TEXT NOT NULL,
+    page_url TEXT,
+    session_path TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Module 31 — Backlink/brand-mention monitoring. UNIQUE(site_id,
 -- source_url) makes re-polling the same feed idempotent (a mention seen
 -- again on a later poll doesn't duplicate). outreach_subject/body are
@@ -1134,6 +1166,11 @@ _SEO_SOCIAL_POSTS_EXTRA_COLUMNS = {
     # publishes through when more than one is configured. NULL = use the
     # single default account from .env (see that table's own comment).
     "facebook_account_id": "INTEGER",
+    # User instruction — same convention as facebook_account_id above, for
+    # seo_linkedin_accounts. NULL = use the single default .env account
+    # (LINKEDIN_EMAIL/PASSWORD + the global linkedin_page_url app_setting),
+    # unchanged behaviour for installs that never add a second account.
+    "linkedin_account_id": "INTEGER",
     # Module 41 — when set AND status='approved', the scheduler job
     # (ai/seo/social_scheduler.py, registered in api/main.py) auto-
     # publishes this post once scheduled_for arrives. NULL means no
@@ -1147,6 +1184,19 @@ _SEO_SOCIAL_POSTS_EXTRA_COLUMNS = {
     # ContentQualityReportOut (api/schemas.py). NULL means not checked yet.
     "quality_report_json": "TEXT",
     "quality_checked_at": "DATETIME",
+}
+
+# User instruction — multi-account LinkedIn. Rate limiting
+# (automation/linkedin/poster.py's _rate_limit_status) counted every
+# post_log row with platform='linkedin' as one shared pool regardless of
+# which account posted it, which becomes wrong once a second account
+# exists (account B would get throttled by account A's posts). This column
+# scopes the daily-limit/min-interval queries per account when set; NULL
+# rows (posted through the default .env account, or logged before this
+# column existed) are still counted together as one pool, matching
+# pre-multi-account behaviour exactly.
+_POST_LOG_EXTRA_COLUMNS = {
+    "linkedin_account_id": "INTEGER",
 }
 
 # Module 36 — blog posts shipped without a featured-image field; added
@@ -1281,6 +1331,7 @@ def init_db() -> None:
             _ensure_extra_columns(conn, "seo_technical_issues", _SEO_TECHNICAL_ISSUES_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_semrush_metrics", _SEO_SEMRUSH_METRICS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_social_posts", _SEO_SOCIAL_POSTS_EXTRA_COLUMNS)
+            _ensure_extra_columns(conn, "post_log", _POST_LOG_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_blog_posts", _SEO_BLOG_POSTS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_index_status", _SEO_INDEX_STATUS_EXTRA_COLUMNS)
             _ensure_extra_columns(conn, "seo_daily_digests", _SEO_DAILY_DIGESTS_EXTRA_COLUMNS)
@@ -2778,14 +2829,15 @@ def create_social_post(
     source_url: Optional[str] = None,
     image_url: Optional[str] = None,
     facebook_account_id: Optional[int] = None,
+    linkedin_account_id: Optional[int] = None,
 ) -> int:
     with write_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO seo_social_posts (site_id, platform, source_url, content, image_url, status, facebook_account_id)
-            VALUES (?, ?, ?, ?, ?, 'draft', ?)
+            INSERT INTO seo_social_posts (site_id, platform, source_url, content, image_url, status, facebook_account_id, linkedin_account_id)
+            VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)
             """,
-            (site_id, platform, source_url, content, image_url, facebook_account_id),
+            (site_id, platform, source_url, content, image_url, facebook_account_id, linkedin_account_id),
         )
         return cur.lastrowid
 
@@ -2905,6 +2957,41 @@ def delete_facebook_account(account_id: int) -> bool:
     with write_cursor() as cur:
         cur.execute("DELETE FROM seo_facebook_accounts WHERE id = ?", (account_id,))
         return cur.rowcount > 0
+
+
+# ── seo_linkedin_accounts — user instruction, multi-account LinkedIn ──
+
+def create_linkedin_account(label: str, email: str, password: str, page_url: Optional[str]) -> int:
+    with write_cursor() as cur:
+        cur.execute(
+            "INSERT INTO seo_linkedin_accounts (label, email, password, page_url) VALUES (?, ?, ?, ?)",
+            (label, email, password, page_url or None),
+        )
+        return cur.lastrowid
+
+
+def list_linkedin_accounts():
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_linkedin_accounts ORDER BY created_at ASC").fetchall()
+
+
+def get_linkedin_account(account_id: int):
+    conn = get_connection()
+    return conn.execute("SELECT * FROM seo_linkedin_accounts WHERE id = ?", (account_id,)).fetchone()
+
+
+def delete_linkedin_account(account_id: int) -> bool:
+    with write_cursor() as cur:
+        cur.execute("DELETE FROM seo_linkedin_accounts WHERE id = ?", (account_id,))
+        return cur.rowcount > 0
+
+
+def set_linkedin_account_session(account_id: int, session_path: Optional[str]) -> None:
+    """Called by automation/linkedin/poster.py's per-account login flow —
+    session_path is set on a successful login, cleared back to NULL if a
+    saved session stops working and needs a fresh login."""
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_linkedin_accounts SET session_path = ? WHERE id = ?", (session_path, account_id))
 
 
 # ── seo_social_posts scheduling/bulk actions — module 41 ──

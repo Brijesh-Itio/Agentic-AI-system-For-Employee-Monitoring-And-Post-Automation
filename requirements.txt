@@ -36,6 +36,11 @@ chromadb==1.5.9
 langgraph==1.2.11
 langchain-core==1.5.4
 
+# openai — the default provider for both text (GPT-6 Sol, via ai/llm) and
+# image generation (ai/images/providers/openai_image_provider.py) as of
+# 2026-09-29, not an optional extra like the other provider SDKs below.
+openai==3.19.2
+
 # apscheduler installed for Module 33 (SEO Agentic AI: autonomous daily
 # scheduling) — a real BackgroundScheduler thread firing the SEO pipeline
 # on a cron-style schedule, not a hand-rolled sleep loop.

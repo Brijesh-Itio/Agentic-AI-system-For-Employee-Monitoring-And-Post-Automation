@@ -100,7 +100,12 @@ def _looks_like_leaked_instructions(text: str) -> bool:
 
 
 def generate_social_post(
-    platform: str, page_title: str, content_excerpt: str, *, site_id: Optional[int] = None
+    platform: str,
+    page_title: str,
+    content_excerpt: str,
+    *,
+    site_id: Optional[int] = None,
+    instructions: Optional[str] = None,
 ) -> Optional[SocialPostDraft]:
     """Never raises — returns None on LLM failure, matching this
     codebase's graceful-degrade convention."""
@@ -108,9 +113,20 @@ def generate_social_post(
         logger.error("generate_social_post: unsupported platform %r", platform)
         return None
 
+    # The user's own freeform brief on top of the page title/excerpt —
+    # audience, angle, what to include/avoid, tone — same pattern and same
+    # trust level as ai/seo/blog_content.py's instructions_line: additional
+    # direction from the person generating the post for their own site, not
+    # untrusted third-party input, so it's passed straight through.
+    instructions_line = (
+        f"Additional instructions to follow as well:\n{instructions.strip()}\n\n"
+        if instructions and instructions.strip()
+        else ""
+    )
     prompt = (
         f"{_CONTENT_BRIEF}"
         f"{_PLATFORM_PROMPTS[platform]}\n\n"
+        f"{instructions_line}"
         f"PAGE TITLE: {page_title}\n\n"
         f"PAGE CONTENT:\n{content_excerpt[:1500]}"
     )

@@ -10,21 +10,27 @@ keyword research specifically. No guarantee of data accuracy, freshness,
 or continued uptime — these wrapper products typically scrape Semrush's
 own site and can silently break when Semrush changes its UI.
 
-Endpoint (POST /web-keyoword-tool.php — sic, the provider's own typo,
-kept verbatim since it's the real path) and auth (X-Rapidapi-Key/-Host
-headers, form-urlencoded country/website body) verified live this
-session via direct calls against the real API using the user-supplied
-key. What was NOT verified: the shape of a *successful* response — every
-live test this session (a throwaway test domain, a real production
-domain, and even example.com) returned the provider's own generic
-{"success": false, "error": "API Error"}, suggesting an outage on their
-side rather than a request-format problem. fetch_keyword_analysis
-therefore returns the raw parsed JSON on a 200 rather than a typed
-dataclass — inventing named fields for a shape never actually observed
-would be guessing, which this codebase's own convention (see
-automation/seo/backlinks/factory.py's docstring) explicitly avoids.
-Once a real successful response is seen, this should be tightened into
-a proper dataclass matching what's actually returned.
+fetch_keyword_analysis calls "Competitor Website Keywords Analysis"
+(POST /web-keyoword-tool.php — sic, the provider's own typo, kept
+verbatim since it's the real path): every organic keyword a domain
+ranks for, with per-keyword rank/volume/difficulty/clicks plus
+domain-level totals. Originally looked broken — every live call this
+session returned the provider's own generic {"success": false, "error":
+"API Error"} — but that was this function using its own dedicated
+RAPIDAPI_SEMRUSH_KEY setting, a different (stale) key from the one
+already working for every other endpoint in this module and in
+rapidapi_domain_client.py. RapidAPI keys are per-account, not per-API
+(see rapidapi_domain_client.py's module docstring) — switching this
+function to the already-verified-working RAPIDAPI_SEMRUSH_MAGIC_KEY
+fixed it. Re-verified live this session against a real domain (webpays.com): a
+real 200 with 2,675 total ranking keywords, 113,238 total monthly
+search volume, and 5 real keyword rows. Pagination was then explicitly
+tested, not just left unverified: both `pageSize` and `startingRow`
+were sent with different values (50; 1, 6, 11) and every response came
+back with the exact same 5 rows regardless — the provider hard-caps
+this endpoint at its top 5 keywords with no working pagination. Callers
+(e.g. content gap analysis, ai/seo/content_gap.py) must treat this as a
+genuine top-5 sample per domain, not a full keyword list.
 """
 import logging
 from dataclasses import dataclass, field
@@ -205,27 +211,68 @@ def fetch_keyword_difficulty(keyword: str, country: str = "us") -> Optional[Keyw
 
 
 def is_configured() -> bool:
-    return bool(settings.RAPIDAPI_SEMRUSH_KEY)
+    # Same RapidAPI application/key as the Magic Tool, semrush-seo10, and
+    # rapidapi_domain_client.py endpoints — see module docstring.
+    return bool(settings.RAPIDAPI_SEMRUSH_MAGIC_KEY)
 
 
 def _headers() -> dict:
     return {
         "Content-Type": "application/x-www-form-urlencoded",
         "x-rapidapi-host": HOST,
-        "x-rapidapi-key": settings.RAPIDAPI_SEMRUSH_KEY,
+        "x-rapidapi-key": settings.RAPIDAPI_SEMRUSH_MAGIC_KEY,
     }
 
 
-def fetch_keyword_analysis(website: str, country: str = "us") -> Optional[dict]:
-    """Calls the 'Competitor Website Keywords Analysis' endpoint. Never
-    raises — returns None if unconfigured, on a network/timeout failure,
-    or if the provider's own response isn't valid JSON; returns the raw
-    parsed JSON dict otherwise (including the provider's own
-    {"success": false, ...} error shape — callers check `.get("success")`
-    rather than assume every 200 means real data, since that's exactly
-    what this session's live testing found)."""
+@dataclass
+class DomainKeywordRow:
+    keyword: str
+    rank: Optional[int]
+    rank_change: Optional[int]
+    search_volume: Optional[int]
+    difficulty: Optional[int]
+    seo_clicks: Optional[int]
+    seo_clicks_change: Optional[int]
+    total_monthly_clicks: Optional[int]
+    paid_competitors: Optional[int]
+    top_ranked_url: str = ""
+
+
+@dataclass
+class DomainKeywordAnalysis:
+    domain: str
+    total_keywords: int
+    total_volume: int
+    total_seo_clicks: int
+    total_seo_clicks_change: int
+    keywords: List[DomainKeywordRow] = field(default_factory=list)
+
+
+def _parse_domain_keyword_row(raw: dict) -> DomainKeywordRow:
+    return DomainKeywordRow(
+        keyword=raw.get("keyword", ""),
+        rank=raw.get("rank"),
+        rank_change=raw.get("rankChange"),
+        search_volume=raw.get("searchVolume"),
+        difficulty=raw.get("rankingDifficulty"),
+        seo_clicks=raw.get("seoClicks"),
+        seo_clicks_change=raw.get("seoClicksChange"),
+        total_monthly_clicks=raw.get("totalMonthlyClicks"),
+        paid_competitors=raw.get("paidCompetitors"),
+        top_ranked_url=raw.get("topRankedUrl", ""),
+    )
+
+
+def fetch_keyword_analysis(website: str, country: str = "us") -> Optional[DomainKeywordAnalysis]:
+    """Calls the 'Competitor Website Keywords Analysis' endpoint — every
+    organic keyword a domain ranks for, with per-keyword rank/volume/
+    difficulty/clicks and domain-level totals (see module docstring for
+    the key-mismatch bug this fixed, and for what's verified vs. not).
+    Never raises — returns None if unconfigured, on a network/timeout
+    failure, on the provider's own {"success": false} error shape, or if
+    the response doesn't match the verified shape."""
     if not is_configured():
-        logger.error("RapidAPI Semrush wrapper not configured — set RAPIDAPI_SEMRUSH_KEY in .env")
+        logger.error("RapidAPI Semrush wrapper not configured — set RAPIDAPI_SEMRUSH_MAGIC_KEY in .env")
         return None
 
     def _do_request():
@@ -240,7 +287,19 @@ def fetch_keyword_analysis(website: str, country: str = "us") -> Optional[dict]:
 
     try:
         response = with_retry(_do_request, max_attempts=2, retry_on=(requests.RequestException,))
-        return response.json()
+        body = response.json()
+        if not body.get("success"):
+            logger.warning("RapidAPI Semrush keyword lookup returned success=false (website=%s): %s", website, body.get("error"))
+            return None
+        data = body.get("data", {})
+        return DomainKeywordAnalysis(
+            domain=body.get("domain", website),
+            total_keywords=data.get("total", 0),
+            total_volume=data.get("totalVolume", 0),
+            total_seo_clicks=data.get("totalSeoClicks", 0),
+            total_seo_clicks_change=data.get("totalSeoClicksChange", 0),
+            keywords=[_parse_domain_keyword_row(r) for r in data.get("keywords", [])],
+        )
     except Exception:
         logger.exception("RapidAPI Semrush keyword lookup failed (website=%s)", website)
         return None

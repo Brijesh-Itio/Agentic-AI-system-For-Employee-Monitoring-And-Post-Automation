@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     LINKEDIN_EMAIL: str = ""
     LINKEDIN_PASSWORD: str = ""
 
+    # LinkedIn Company Page posting: the logged-in account above must be an
+    # admin of this Page. Leave blank to keep posting to that account's own
+    # personal profile feed (the original behavior). Set to the Page's
+    # public URL (e.g. https://www.linkedin.com/company/your-page/) to post
+    # there instead — every LinkedIn post then goes out as the Page, not the
+    # personal profile.
+    LINKEDIN_PAGE_URL: str = ""
+
 
     # ── Pexels image search (module 18.3, fallback only) ──
     # Free API key, not Playwright scraping: Pexels/Pixabay both sit behind
@@ -275,22 +283,34 @@ class Settings(BaseSettings):
     # ── SEO Agentic AI: generic image provider layer (module 27) ──
     # Per-task overrides read IMAGE_PROVIDER_<TASK> from the environment
     # directly, same as SEO_LLM_PROVIDER_<TASK> — see ai/images/factory.py.
-    # Now "image_worker" (see ai/images/providers/image_worker_provider.py)
-    # per user request, 2026-09-17 — a personal Cloudflare Worker
-    # endpoint, verified live to return a real generated image. This
-    # single setting drives image generation for BOTH blog post featured
-    # images (ai/seo/image_pipeline.py's generate_and_publish_image) and
-    # social post images (api/routes/seo.py's generate_social_post_image_
-    # route) since both already resolve providers through this same
-    # factory — no separate wiring needed per content type.
-    # "fastsd" (zero-cost local stack, module 18.3) and "puter" (parked —
-    # see PUTER_AUTH_TOKEN's comment) both stay available via
-    # IMAGE_PROVIDER_DEFAULT or a per-task override if this worker ever
-    # goes down.
-    IMAGE_PROVIDER_DEFAULT: str = "image_worker"
+    # Was "image_worker" (a free personal Cloudflare Worker) from
+    # 2026-09-17; switched to "openai" on 2026-09-29 per user request
+    # after real testing showed image_worker's output wasn't reliably
+    # relevant to the prompt — a real gpt-image-2.5-sunburst generation
+    # this session produced a genuinely on-prompt, high-quality image
+    # (verified by looking at it, not just checking the call succeeded).
+    # This single setting drives image generation for BOTH blog post
+    # featured images (ai/seo/image_pipeline.py's generate_and_publish_
+    # image) and social post images (api/routes/seo.py's generate_
+    # social_post_image_route) since both already resolve providers
+    # through this same factory — no separate wiring needed per content
+    # type. "image_worker", "fastsd" (zero-cost local stack, module
+    # 18.3), "stability" and "puter" (parked) all stay available via
+    # IMAGE_PROVIDER_DEFAULT or a per-task override.
+    IMAGE_PROVIDER_DEFAULT: str = "openai"
     # Blank = stays off; ai/images/providers/stability_provider.py fails
     # closed with a clear error rather than silently falling back.
     STABILITY_API_KEY: str = ""
+
+    # ── OpenAI image generation (module 27 follow-up, 2026-09-29) — real
+    # pixels via the Images API, using the same OPENAI_API_KEY already
+    # configured for text (ai/llm/providers/openai_provider.py) — no
+    # second key needed. Default model is the account's flagship
+    # (gpt-image-2.5-sunburst, verified live); set this to
+    # "gpt-image-2.5-flare" for the faster/cheaper everyday tier, or an
+    # older gpt-image-1/1.5/2 generation if the account doesn't have
+    # access to 2.5. See ai/images/providers/openai_image_provider.py.
+    OPENAI_IMAGE_MODEL: str = ""
 
     # ── Personal image-generation worker (module 27, current default) ──
     # A single Cloudflare Worker endpoint the user runs themselves —

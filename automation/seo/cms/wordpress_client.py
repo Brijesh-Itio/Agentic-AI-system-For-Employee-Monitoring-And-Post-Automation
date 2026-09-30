@@ -242,6 +242,7 @@ class WordPressClient(CmsClient):
         slug: Optional[str] = None,
         tags: Optional[List[str]] = None,
         categories: Optional[List[str]] = None,
+        featured_media: Optional[str] = None,
     ) -> CmsResult:
         if not self._credentials_configured():
             return CmsResult(ok=False, detail="WordPress credentials not configured")
@@ -263,6 +264,8 @@ class WordPressClient(CmsClient):
             payload["categories"] = self._resolve_or_create_terms("categories", categories)
         if status is not None:
             payload["status"] = status
+        if featured_media is not None:
+            payload["featured_media"] = int(featured_media)
         if not payload:
             return CmsResult(ok=False, detail="No fields to update")
 
@@ -310,6 +313,7 @@ class WordPressClient(CmsClient):
         slug: Optional[str] = None,
         tags: Optional[List[str]] = None,
         categories: Optional[List[str]] = None,
+        featured_media: Optional[str] = None,
     ) -> CmsResult:
         if not self._credentials_configured():
             return CmsResult(ok=False, detail="WordPress credentials not configured")
@@ -323,6 +327,8 @@ class WordPressClient(CmsClient):
             payload["tags"] = self._resolve_or_create_terms("tags", tags)
         if categories:
             payload["categories"] = self._resolve_or_create_terms("categories", categories)
+        if featured_media is not None:
+            payload["featured_media"] = int(featured_media)
 
         try:
             response = requests.post(
@@ -339,3 +345,30 @@ class WordPressClient(CmsClient):
         except Exception as exc:
             logger.exception("WordPress create_post() failed (base_url=%s)", self._base_url)
             return CmsResult(ok=False, detail=str(exc))
+
+    def upload_media(self, image_bytes: bytes, filename: str, *, mime_type: str = "image/webp") -> Optional[str]:
+        """POST /wp-json/wp/v2/media takes the raw binary body directly
+        (Content-Disposition + Content-Type headers, not a JSON payload)
+        — genuinely different from every other call in this client."""
+        if not self._credentials_configured():
+            return None
+        try:
+            headers = {
+                **_HEADERS,
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": mime_type,
+            }
+            response = requests.post(
+                f"{self._base_url}/wp-json/wp/v2/media",
+                data=image_bytes,
+                auth=self._auth(),
+                headers=headers,
+                timeout=TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            media_id = _parse_json(response).get("id")
+            logger.info("WordPress media uploaded: id=%s filename=%s", media_id, filename)
+            return str(media_id) if media_id is not None else None
+        except Exception:
+            logger.exception("WordPress upload_media(%s) failed (base_url=%s)", filename, self._base_url)
+            return None

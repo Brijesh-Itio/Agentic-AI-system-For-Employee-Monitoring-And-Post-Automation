@@ -27,6 +27,7 @@ from typing import Dict, List, Optional
 import requests
 from bs4 import BeautifulSoup
 
+from ai.seo.thin_content_assessor import assess_thin_content
 from automation.seo.crawler import CrawledPage, USER_AGENT
 
 logger = logging.getLogger(__name__)
@@ -742,22 +743,33 @@ THIN_CONTENT_CRITICAL_WORDS = 100
 _BOILERPLATE_TAGS = ("script", "style", "noscript", "nav", "header", "footer", "form", "aside")
 
 
-def detect_thin_content(pages: List[CrawledPage]) -> List[TechnicalIssue]:
-    """Flags pages with too little real body text to plausibly satisfy a
-    searcher's intent or say anything specific about their topic — "thin
-    content" in the sense Google's own Panda/Helpful Content guidance
-    describes (pages providing little or no unique value), approximated
-    here the only way a static crawl safely can: real body word count
-    after stripping navigation/boilerplate. This is a starting signal for
-    a human to review, not a judgement that the page is worthless — a
-    short page can be exactly right for its purpose (a contact page, a
-    thank-you page); that's exactly why this stays an audit finding you
-    approve or reject, never an auto-applied rewrite (see this module's
-    own docstring on why applying content changes automatically is out
-    of scope). A specific, page-aware improvement plan is available via
-    the existing "Get AI suggestion" action every issue already has
-    (ai/seo/issue_remediation.py's generate_ai_suggestion, which works
-    for any rule name, not just this one)."""
+def detect_thin_content(pages: List[CrawledPage], *, site_id: Optional[int] = None) -> List[TechnicalIssue]:
+    """Flags pages whose content is genuinely thin in the sense Google's
+    own Panda/Helpful Content guidance actually means it: unclear,
+    insufficient, or failing to serve the reader — NOT simply "short."
+    Word count alone is only ever a cheap first-pass signal (a widely
+    used practitioner proxy — Screaming Frog, SEMrush and similar audit
+    tools default to a similar figure), never a verdict on its own: a
+    page under THIN_CONTENT_WARNING_WORDS is not flagged directly, it's
+    handed to ai/seo/thin_content_assessor.py's assess_thin_content,
+    which judges the page's own actual relevance, clarity, usefulness,
+    and completeness for its apparent purpose — so a short page that
+    fully and clearly answers one narrow question (a contact page, a
+    focused FAQ answer) is correctly NOT flagged, while a padded or vague
+    page can still be, regardless of length. If that qualitative check is
+    unavailable (e.g. the local LLM isn't reachable during this crawl),
+    this falls back to flagging by word count alone rather than silently
+    dropping the signal — same graceful-degrade convention as every other
+    LLM-backed step in this codebase.
+
+    This is a starting signal for a human to review, not a judgement that
+    the page is worthless — that's exactly why this stays an audit
+    finding you approve or reject, never an auto-applied rewrite (see
+    this module's own docstring on why applying content changes
+    automatically is out of scope). A specific, page-aware improvement
+    plan is available via the existing "Get AI suggestion" action every
+    issue already has (ai/seo/issue_remediation.py's generate_ai_
+    suggestion, which works for any rule name, not just this one)."""
     issues = []
     for page in pages:
         if not page.html or page.status_code != 200:
@@ -772,23 +784,54 @@ def detect_thin_content(pages: List[CrawledPage]) -> List[TechnicalIssue]:
             continue
 
         severity = "critical" if word_count < THIN_CONTENT_CRITICAL_WORDS else "warning"
+        message = (
+            f"Only about {word_count} words of real body content (menus/footers excluded) — "
+            f"below the {THIN_CONTENT_WARNING_WORDS}-word range typically needed to cover a topic "
+            "in enough depth to be worth ranking on its own."
+        )
+        suggested_fix = (
+            "Expand this page with real, specific detail — answer the questions a reader searching "
+            "this topic would actually have, add concrete examples, and cover sub-topics a single "
+            "paragraph can't. If the page is intentionally short for its purpose (a contact page, a "
+            "thank-you page), reject this finding rather than padding it with filler. Use \"Get AI "
+            "suggestion\" for a page-specific improvement plan."
+        )
+
+        # Verified live against this app's own local model: it correctly
+        # recognized a short contact page as adequate, but ALSO called a
+        # genuinely vague, padded marketing paragraph "not thin" — too
+        # lenient to trust as a hard override on a small CPU-only model.
+        # So a "not thin" verdict downgrades a finding (never below
+        # "warning") and says so explicitly for a human to weigh, rather
+        # than silently deleting it — a wrong "not thin" call can never
+        # make genuinely thin content invisible, only a "genuinely thin"
+        # call can ever raise/enrich one. This is the literal ask: word
+        # count alone shouldn't decide the verdict, but it also shouldn't
+        # be discarded just because a small local model sounds confident.
+        assessment = assess_thin_content(text, page.url, word_count, site_id=site_id)
+        if assessment is not None:
+            if assessment.is_thin:
+                if assessment.reason:
+                    message += f" Content review: {assessment.reason}"
+                if assessment.missing_topics:
+                    suggested_fix = (
+                        "Specific gaps to cover: " + "; ".join(assessment.missing_topics) + ". " + suggested_fix
+                    )
+            else:
+                severity = "warning"
+                message += (
+                    f" Content review suggests this may be adequate for its own purpose despite the low word "
+                    f"count: {assessment.reason} Verify this is intentional (e.g. a contact or narrowly-"
+                    "focused page) before spending effort expanding it."
+                )
+
         issues.append(
             TechnicalIssue(
                 rule="thin_content",
                 severity=severity,
                 url=page.url,
-                message=(
-                    f"Only about {word_count} words of real body content (menus/footers excluded) — "
-                    f"below the {THIN_CONTENT_WARNING_WORDS}-word range typically needed to cover a topic "
-                    "in enough depth to be worth ranking on its own."
-                ),
-                suggested_fix=(
-                    "Expand this page with real, specific detail — answer the questions a reader searching "
-                    "this topic would actually have, add concrete examples, and cover sub-topics a single "
-                    "paragraph can't. If the page is intentionally short for its purpose (a contact page, a "
-                    "thank-you page), reject this finding rather than padding it with filler. Use \"Get AI "
-                    "suggestion\" for a page-specific improvement plan."
-                ),
+                message=message,
+                suggested_fix=suggested_fix,
             )
         )
     return issues
@@ -1065,24 +1108,33 @@ _ALL_DETECTORS = (
     detect_invalid_schema,
     detect_url_structure,
     detect_temporary_redirect_overuse,
-    detect_thin_content,
 )
 
 
 def run_all_detectors(
-    pages: List[CrawledPage], known_urls: Optional[List[str]] = None, base_url: Optional[str] = None
+    pages: List[CrawledPage], known_urls: Optional[List[str]] = None, base_url: Optional[str] = None,
+    site_id: Optional[int] = None,
 ) -> List[TechnicalIssue]:
     """Runs every detector, isolating failures so one bad detector can't
     hide the others' findings. known_urls (sitemap.xml URLs) is optional
     — orphan detection is simply skipped without it, rather than failing.
     base_url is optional too — robots.txt conflict detection is skipped
-    without it (needed to locate /robots.txt)."""
+    without it (needed to locate /robots.txt). site_id routes detect_thin_
+    content's qualitative LLM check (ai/seo/thin_content_assessor.py) to
+    the right per-site provider override, same as every other LLM-backed
+    call in this codebase — detect_thin_content works fine without it
+    (falls back to global provider config), so this stays optional too."""
     issues: List[TechnicalIssue] = []
     for detector in _ALL_DETECTORS:
         try:
             issues.extend(detector(pages))
         except Exception:
             logger.exception("Technical SEO detector %s failed", detector.__name__)
+
+    try:
+        issues.extend(detect_thin_content(pages, site_id=site_id))
+    except Exception:
+        logger.exception("Technical SEO detector detect_thin_content failed")
 
     try:
         issues.extend(detect_orphaned_pages(pages, known_urls))

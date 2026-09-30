@@ -1212,8 +1212,8 @@ class ContentAnalyzeRequest(BaseModel):
     content_html: str
     primary_keyword: Optional[str] = None
     secondary_keywords: Optional[list[str]] = None
-    min_words: int = 700
-    max_words: int = 800
+    min_words: int = 1000
+    max_words: int = 1200
 
 
 class StructureIssueOut(BaseModel):
@@ -1568,6 +1568,11 @@ class SocialGenerateRequest(BaseModel):
     # pattern as BlogGenerateRequest.instructions. See
     # ai/seo/social_content.py's generate_social_post.
     instructions: Optional[str] = None
+    # User instruction — a real AI-generated image automatically, right after the post's text, via a
+    # new background job (api/routes/seo.py's _start_social_image_jobs) — social had no automatic
+    # image step at all before this. Ignored if image_url is already supplied directly. Default True,
+    # matching blog's own default; a checkbox in the UI can turn it off.
+    generate_image: bool = True
 
 
 class SocialPostOut(BaseModel):
@@ -2095,8 +2100,13 @@ class BlogGenerateRequest(BaseModel):
     # structure.py's SECONDARY_KEYWORD_DENSITY_TARGET). Purely a density-
     # tracking input, not worked into the generation prompt itself.
     secondary_keywords: Optional[list[str]] = None
-    min_words: int = 700
-    max_words: int = 800
+    min_words: int = 1000
+    max_words: int = 1200
+    # User instruction — a real AI-generated featured image automatically, right after the article
+    # itself, as part of the same background followups pipeline (_run_blog_followup_job) bulk/calendar
+    # generation already does this for; default True so a user gets it without an extra click, with a
+    # checkbox in the UI to opt out.
+    generate_image: bool = True
 
 
 class ImageGenerateRequest(BaseModel):
@@ -2172,6 +2182,14 @@ class BlogPostOut(BaseModel):
     # ("manual-upload"). None for an image attached before this column
     # existed.
     image_source: Optional[str] = None
+    # User instruction — Trusted URL Sources: JSON-encoded list of real,
+    # web-search-verified TrustedSourceOut. None = never run for this post.
+    trusted_sources_json: Optional[str] = None
+    # Bug fix (2026-09-30) — "confirmed" (the live CMS page's SEO plugin
+    # echoed back the meta title/description we sent), "not_confirmed"
+    # (sent but not echoed — most likely no supported SEO plugin active),
+    # or None (never attempted: not published yet, or no meta tags set).
+    meta_pushed_status: Optional[str] = None
     slug: Optional[str] = None
     # JSON-encoded arrays of plain names, same convention as
     # structure_issues_json above — the frontend JSON.parses these.
@@ -2258,8 +2276,8 @@ class BlogBulkGenerateRequest(BaseModel):
     # own full draft post (title/excerpt/content + structure check),
     # same as calling /blog/generate once per topic but in one request.
     topics: list[str]
-    min_words: int = 700
-    max_words: int = 800
+    min_words: int = 1000
+    max_words: int = 1200
     # A real AI-generated featured image for every post, not just text —
     # slower per post but matches /blog/{id}/publish's own auto-image
     # behavior instead of leaving every bulk post imageless until
@@ -2275,8 +2293,8 @@ class BlogCalendarGenerateRequest(BaseModel):
     days: int = 30
     # "HH:MM", the local time of day each day's post gets scheduled for.
     post_time: str = "10:00"
-    min_words: int = 700
-    max_words: int = 800
+    min_words: int = 1000
+    max_words: int = 1200
     generate_image: bool = True
 
 

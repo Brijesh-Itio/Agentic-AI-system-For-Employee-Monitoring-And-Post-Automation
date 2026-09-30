@@ -40,8 +40,8 @@ def generate_blog_post(
     primary_keyword: Optional[str] = None,
     *,
     site_id: Optional[int] = None,
-    min_words: int = 700,
-    max_words: int = 800,
+    min_words: int = 1000,
+    max_words: int = 1200,
     max_attempts: int = 2,
     instructions: Optional[str] = None,
 ) -> Optional[BlogPostDraft]:

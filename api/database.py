@@ -751,6 +751,13 @@ class SeoBlogPost(Base):
     grammar_report_json = Column(String)
     grammar_checked_at = Column(DateTime)
     image_source = Column(String)
+    # User instruction — Trusted URL Sources, JSON-encoded list of real,
+    # web-search-verified {url, title, quoted_text}. NULL = never run.
+    trusted_sources_json = Column(String)
+    # Bug fix (2026-09-30) — whether meta_title/meta_description actually
+    # landed on the live CMS page's own SEO-plugin fields at last publish.
+    # See agent/database.py's _SEO_BLOG_POSTS_EXTRA_COLUMNS comment.
+    meta_pushed_status = Column(String)
 
 
 def init_db() -> None:

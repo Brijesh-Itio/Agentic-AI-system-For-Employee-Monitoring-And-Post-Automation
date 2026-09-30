@@ -222,6 +222,7 @@ from ai.seo.blog_meta_generator import generate_blog_meta_tags
 from ai.seo.content_quality import assess_humanization, check_plagiarism
 from ai.seo.content_gap import categorize_keyword_gap, suggest_broader_topics, suggest_topics_for_gap_rows
 from ai.seo.content_structure import analyze_structure, generate_faq
+from ai.seo.source_research import add_inline_trusted_sources
 from ai.seo.daily_digest import generate_daily_digest
 from ai.seo.grammar_checker import apply_suggestion as apply_grammar_suggestion, check_grammar
 from ai.seo.image_pipeline import generate_and_publish_image, upload_image_bytes
@@ -2153,7 +2154,7 @@ def run_technical_audit_route(payload: TechnicalAuditRequest, db: Session = Depe
         raise HTTPException(status_code=502, detail="Crawl failed — see server logs")
 
     known_urls = fetch_sitemap_urls(site.base_url)
-    issues = run_all_detectors(pages, known_urls=known_urls, base_url=site.base_url)
+    issues = run_all_detectors(pages, known_urls=known_urls, base_url=site.base_url, site_id=payload.site_id)
 
     run_date = date_cls.today()
     database.upsert_technical_issues(payload.site_id, run_date, issues)
@@ -2209,7 +2210,7 @@ def run_page_tag_audit_route(payload: PageTagAuditRequest, db: Session = Depends
     if site is None:
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
-    report = run_page_tag_audit(payload.url)
+    report = run_page_tag_audit(payload.url, site_id=payload.site_id)
     if report.fetch_error:
         raise HTTPException(status_code=502, detail=f"Could not fetch {payload.url}: {report.fetch_error}")
 
@@ -2679,6 +2680,69 @@ def adopt_sheets_route(payload: SheetsAdoptRequest):
     )
 
 
+# ── Automatic image follow-up for social posts (user instruction) ──
+# Social posts had no background-job system at all before this — generation was fully synchronous
+# (create the post, return immediately), with an image only ever added afterward via the manual
+# "Generate image" button or an upload. Mirrors blog's _followup_state/_start_blog_followups/
+# _run_blog_followup_job pattern (api/routes/seo.py, above), but deliberately its own, separate,
+# smaller state dict — social has exactly one automatic step (the image), not blog's five, so reusing
+# the same dict/lock would conflate two genuinely different post types and pipelines for no benefit.
+_social_image_state: dict[int, dict] = {}
+_social_image_state_lock = threading.Lock()
+_social_image_worker_lock = threading.Lock()
+
+
+def _set_social_image_stage(post_id: int, stage: Optional[str]) -> None:
+    with _social_image_state_lock:
+        if stage is None:
+            _social_image_state.pop(post_id, None)
+        elif post_id in _social_image_state:
+            _social_image_state[post_id]["stage"] = stage
+
+
+def _run_social_image_job(job: dict) -> None:
+    from api.database import SessionLocal
+
+    post_id, site_id = job["post_id"], job["site_id"]
+    db = SessionLocal()
+    try:
+        site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+        if site is None:
+            return
+        image_prompt = derive_image_prompt(job["content"], site_id=site_id) or job["content"][:200]
+        result = generate_and_publish_image(site, image_prompt, task=f"social_{job['platform']}")
+        if result.ok:
+            database.set_social_post_image(post_id, result.url)
+        else:
+            logger.warning("Automatic image generation failed for social post %s: %s", post_id, result.error)
+    except Exception:
+        logger.exception("Automatic image generation failed for social post %s — the draft is saved without one", post_id)
+    finally:
+        db.close()
+        _set_social_image_stage(post_id, None)
+
+
+def _start_social_image_jobs(jobs: list) -> None:
+    if not jobs:
+        return
+    with _social_image_state_lock:
+        for job in jobs:
+            _social_image_state[job["post_id"]] = {"site_id": job["site_id"], "stage": "Generating the image"}
+
+    def _worker() -> None:
+        with _social_image_worker_lock:
+            for job in jobs:
+                _run_social_image_job(job)
+
+    threading.Thread(target=_worker, daemon=True, name="social-image-followups").start()
+
+
+@router.get("/social/followups")
+def list_social_image_followups_route(site_id: int):
+    with _social_image_state_lock:
+        return [{"post_id": pid, "stage": v["stage"]} for pid, v in _social_image_state.items() if v["site_id"] == site_id]
+
+
 @router.post("/social/generate", response_model=list[SocialPostOut], status_code=201)
 def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = Depends(get_db)):
     site = db.query(SeoSite).filter(SeoSite.id == payload.site_id).first()
@@ -2689,6 +2753,7 @@ def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = De
     # per platform — see _check_and_store_social_quality's own comment.
     candidates = _load_quality_check_candidates(db, payload.site_id)
     created_ids = []
+    image_jobs = []
     for platform in payload.platforms:
         draft = generate_social_post(
             platform,
@@ -2709,10 +2774,15 @@ def generate_social_posts_route(payload: SocialGenerateRequest, db: Session = De
             linkedin_account_id=payload.linkedin_account_id if platform == "linkedin" else None,
         )
         created_ids.append(post_id)
+        # User instruction — automatic image generation, same as blog. Skipped when the caller already
+        # supplied an image_url directly (respecting that manual input rather than overwriting it).
+        if payload.generate_image and not payload.image_url:
+            image_jobs.append({"post_id": post_id, "site_id": payload.site_id, "platform": platform, "content": draft.content})
 
     if not created_ids:
         raise HTTPException(status_code=502, detail="Social content generation failed for every requested platform")
 
+    _start_social_image_jobs(image_jobs)
     db.expire_all()
     return db.query(SeoSocialPost).filter(SeoSocialPost.id.in_(created_ids)).all()
 
@@ -3446,6 +3516,26 @@ def _generate_and_store_internal_links(post_id: int, site_id: int, title: str, c
         logger.exception("Auto internal-link suggestion failed for blog post %s — post saved without any", post_id)
 
 
+def _generate_and_store_trusted_sources(post_id: int, site_id: int, title: str, primary_keyword: Optional[str], content_html: str) -> str:
+    """Trusted URL Sources (user instruction — automatic on every generation, inline in the article
+    itself, not a separate manual panel). Returns the (possibly citation-augmented) content_html so the
+    caller's local copy stays in sync with what's now stored — see ai/seo/source_research.py's module
+    docstring for why an LLM never rewrites the article's own sentences here. Never raises — a research
+    hiccup must not block the draft or any later follow-up step."""
+    try:
+        new_content, sources = add_inline_trusted_sources(content_html, title, primary_keyword, site_id=site_id)
+        if sources:
+            database.set_blog_post_trusted_sources(
+                post_id, json.dumps([{"url": s.url, "title": s.title, "quoted_text": s.quoted_text} for s in sources])
+            )
+        if new_content != content_html:
+            database.set_blog_post_content(post_id, new_content)
+        return new_content
+    except Exception:
+        logger.exception("Trusted source research failed for blog post %s — post saved without inline citations", post_id)
+        return content_html
+
+
 def _generate_and_store_blog_grammar(post_id: int, site_id: int, content_html: str) -> None:
     """Grammar check & fix suggestions (ai/seo/grammar_checker.py). Never
     raises — a failure here must not block the draft being created."""
@@ -3501,6 +3591,10 @@ def _run_blog_followup_job(job: dict) -> None:
         _generate_and_store_internal_links(post_id, site_id, job["title"], job["content_html"])
         _set_followup_stage(post_id, "Checking grammar")
         _generate_and_store_blog_grammar(post_id, site_id, job["content_html"])
+        _set_followup_stage(post_id, "Finding trusted sources")
+        job["content_html"] = _generate_and_store_trusted_sources(
+            post_id, site_id, job["title"], job["primary_keyword"], job["content_html"]
+        )
         if job.get("generate_image"):
             _set_followup_stage(post_id, "Generating the image")
             try:
@@ -3599,7 +3693,7 @@ def generate_blog_post_route(payload: BlogGenerateRequest, db: Session = Depends
         "primary_keyword": payload.primary_keyword,
         "secondary_keywords_json": json.dumps(payload.secondary_keywords) if payload.secondary_keywords else None,
         "content_html": draft.content_html, "keyword_density_json": _keyword_density_json(structure),
-        "generate_image": False,
+        "generate_image": payload.generate_image,
     }])
     _log_to_sheet_safe(
         "Content Pipeline",
@@ -3724,17 +3818,20 @@ def update_blog_post_route(post_id: int, payload: BlogPostUpdate, db: Session = 
     on whatever the LLM produced. Re-runs the same structure checker
     generate_blog_post_route does, so the issue badges reflect the edit
     immediately rather than showing stale findings from the original
-    draft. Allowed while 'draft', 'approved', or 'failed' — once it's
-    actually 'published'/'live' the content already exists in the CMS,
-    so editing here wouldn't be reflected there and would just be
-    misleading; 'approved'/'failed' still only exist locally."""
+    draft.
+
+    Fixed 2026-09-30: 'published'/'live' used to be blocked outright,
+    reasoning that "the content already exists in the CMS, so editing
+    here wouldn't be reflected there." That's no longer true —
+    _publish_blog_post_steps now syncs an edit like this one to the CMS
+    (via update_post) the next time Publish/Sync is clicked, rather than
+    only ever creating a duplicate post — so blocking the edit itself
+    was actively preventing the fix for the exact bug it was worried
+    about. Every status is editable now; nothing here talks to the CMS
+    directly, so there's no live-content risk from the edit itself."""
     row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
-    if row.status not in ("draft", "approved", "failed"):
-        raise HTTPException(
-            status_code=409, detail=f"Can't edit a post that's already in the CMS (current status: {row.status})"
-        )
 
     secondary_keywords = json.loads(row.secondary_keywords_json) if row.secondary_keywords_json else None
     structure = analyze_structure(payload.content, primary_keyword=row.primary_keyword, secondary_keywords=secondary_keywords)
@@ -3829,6 +3926,28 @@ def generate_blog_post_faqs_route(post_id: int, db: Session = Depends(get_db)):
     if faqs is None:
         raise HTTPException(status_code=502, detail="FAQ generation failed — see server logs")
     database.set_blog_post_faqs(post_id, json.dumps([{"question": f.question, "answer": f.answer} for f in faqs]))
+    db.expire_all()
+    return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+
+
+@router.post("/blog/{post_id}/trusted-sources/generate", response_model=BlogPostOut)
+def generate_blog_post_trusted_sources_route(post_id: int, db: Session = Depends(get_db)):
+    """Trusted URL Sources — manual re-run of the same pipeline the background followups job now runs
+    automatically on every new post (user instruction: real citations inline in the article itself, not
+    a separate panel). For posts generated before this existed, or to refresh citations after editing
+    the article's content."""
+    row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
+
+    new_content, sources = add_inline_trusted_sources(row.content, row.title, row.primary_keyword, site_id=row.site_id)
+    if sources is None:
+        raise HTTPException(status_code=502, detail="Trusted source research failed or found no real citations — see server logs")
+    database.set_blog_post_trusted_sources(
+        post_id, json.dumps([{"url": s.url, "title": s.title, "quoted_text": s.quoted_text} for s in sources])
+    )
+    if new_content != row.content:
+        database.set_blog_post_content(post_id, new_content)
     db.expire_all()
     return db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
 
@@ -4041,6 +4160,87 @@ def _insert_featured_image(content: str, image_url: str, title: str) -> str:
     return figure + "\n" + content
 
 
+def _append_faq_section(content: str, faqs_json: Optional[str]) -> str:
+    """Confirmed bug (user report, 2026-09-30): generate_faq() /
+    /blog/{id}/faqs/generate persist Q&A pairs on the post's own
+    faqs_json column, but nothing ever read that column when building the
+    HTML sent to the CMS — a post could have real, stored FAQs that never
+    appeared on the published page at all. Renders them as a genuine
+    on-page FAQ section (so readers actually see them) plus a
+    schema.org FAQPage JSON-LD block (so the AEO/GEO-oriented FAQ feature
+    this codebase already invests in — see ai/seo/content_structure.py's
+    generate_faq — actually has a chance of being picked up as a rich
+    result, which plain HTML text alone doesn't guarantee). Skipped
+    entirely (returns content unchanged) when there are no FAQs, or the
+    stored JSON fails to parse — never blocks a publish over this."""
+    import html as _html
+    import json as _json
+
+    if not faqs_json:
+        return content
+    try:
+        pairs = _json.loads(faqs_json)
+    except Exception:
+        logger.warning("Could not parse faqs_json for this post — publishing without an FAQ section")
+        return content
+    pairs = [p for p in pairs if p.get("question") and p.get("answer")]
+    if not pairs:
+        return content
+
+    items_html = "\n".join(
+        f'<div class="wp-block-group faq-item" style="margin-bottom:1.25em;">'
+        f'<h3>{_html.escape(p["question"])}</h3>'
+        f'<p>{_html.escape(p["answer"])}</p>'
+        f"</div>"
+        for p in pairs
+    )
+    faq_section = (
+        '<div class="faq-section" style="margin-top:2em;">'
+        "<h2>Frequently Asked Questions</h2>"
+        f"{items_html}"
+        "</div>"
+    )
+
+    schema_entities = [
+        {
+            "@type": "Question",
+            "name": p["question"],
+            "acceptedAnswer": {"@type": "Answer", "text": p["answer"]},
+        }
+        for p in pairs
+    ]
+    schema_json = _json.dumps({"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": schema_entities})
+    schema_script = f'<script type="application/ld+json">{schema_json}</script>'
+
+    return f"{content}\n{faq_section}\n{schema_script}"
+
+
+def _upload_featured_media(client, image_url: str, title: str) -> Optional[str]:
+    """Best-effort: downloads the already-published image (uploaded via
+    SFTP by ai/seo/image_pipeline.py, or a manual upload — either way,
+    already a live URL by the time this runs) and re-uploads those same
+    bytes to the CMS's own media library, so it can be set as the post's
+    REAL Featured Image (WordPress's dedicated featured_media field) —
+    confirmed as a separate, previously never-connected mechanism from
+    _insert_featured_image's inline <img>, which stays for readers
+    scrolling the article itself; this covers WordPress's Featured
+    Image box, which was always empty before. Never raises — a failure
+    here degrades to "no featured image set", same graceful-degrade
+    convention as image generation itself, rather than blocking the
+    whole publish."""
+    import requests
+
+    try:
+        response = requests.get(image_url, timeout=30)
+        response.raise_for_status()
+        filename = image_url.split("/")[-1].split("?")[0] or "featured-image.webp"
+        content_type = response.headers.get("Content-Type") or "image/webp"
+        return client.upload_media(response.content, filename, mime_type=content_type)
+    except Exception:
+        logger.exception("Featured image upload to CMS failed for %r (post %r) — publishing without one", image_url, title)
+        return None
+
+
 def _schedule_sitemap_update(site_id: int, url: Optional[str]) -> None:
     """A post just went live — fold its URL into the site's sitemap (debounced,
     on a background thread). Must never affect the go-live result itself."""
@@ -4075,6 +4275,63 @@ def _do_go_live_blog_post(post_id: int, db: Session) -> tuple[bool, str]:
     else:
         database.mark_blog_post_go_live_failed(post_id, result.detail)
         return False, result.detail
+
+
+# Bug fix (2026-09-30) — a generated post's meta_title/meta_description
+# (ai/seo/blog_meta_generator.py) were computed, stored, and shown in this
+# app's own UI, but publish never actually sent them to the CMS — so a
+# reviewer would see a correctly-sized meta title/description here and
+# then find neither one in the live page's <head> (confirmed via view-
+# source). Same dual-key, tried-together, write-then-verify approach as
+# automation/seo/issue_applier.py's missing_meta_description/
+# missing_canonical fixes, for the identical reason: the REST API gives
+# no reliable way to detect which SEO plugin (if any) a WordPress site
+# runs, and WordPress silently drops a meta key nothing has registered
+# for REST access rather than erroring, so a successful-looking write
+# call is not proof the value actually landed.
+_META_TITLE_KEYS = ("_yoast_wpseo_title", "rank_math_title")
+_META_DESCRIPTION_KEYS = ("_yoast_wpseo_metadesc", "rank_math_description")
+
+
+def _push_blog_meta_tags(client, cms_post_id: str, meta_title: Optional[str], meta_description: Optional[str]) -> Optional[str]:
+    """Best-effort push of this post's SEO meta title/description to the
+    live CMS page, right after create_post/update_post already succeeded.
+    Returns None if there was nothing to push (no meta_title/description
+    set yet) or the push was confirmed; otherwise a short detail string
+    explaining what wasn't confirmed, for meta_pushed_status. Never
+    raises, and a failure here never fails the publish itself — the post
+    is already live/synced by the time this runs."""
+    if not meta_title and not meta_description:
+        return None
+
+    meta: dict = {}
+    if meta_title:
+        meta.update({k: meta_title for k in _META_TITLE_KEYS})
+    if meta_description:
+        meta.update({k: meta_description for k in _META_DESCRIPTION_KEYS})
+
+    try:
+        result = client.update_post(cms_post_id, meta=meta)
+    except Exception:
+        logger.exception("Meta tag push failed for CMS post %s — post itself already published/synced", cms_post_id)
+        return "not_confirmed"
+
+    if not result.ok:
+        logger.warning("Meta tag push to CMS post %s not accepted: %s", cms_post_id, result.detail)
+        return "not_confirmed"
+
+    echoed = result.meta or {}
+    title_ok = not meta_title or any((echoed.get(k) or "").strip() == meta_title.strip() for k in _META_TITLE_KEYS)
+    desc_ok = not meta_description or any((echoed.get(k) or "").strip() == meta_description.strip() for k in _META_DESCRIPTION_KEYS)
+    if title_ok and desc_ok:
+        return "confirmed"
+
+    logger.warning(
+        "Meta tag push to CMS post %s not confirmed in update response — most likely no SEO plugin exposing "
+        "%s/%s for REST access is active on this site",
+        cms_post_id, _META_TITLE_KEYS, _META_DESCRIPTION_KEYS,
+    )
+    return "not_confirmed"
 
 
 def _do_publish_blog_post(post_id: int, db: Session, go_live: bool = False) -> tuple[bool, str]:
@@ -4115,7 +4372,23 @@ def _publish_blog_post_steps(post_id: int, db: Session, go_live: bool = False) -
     reviews, /blog/{id}/publish's own long-standing behavior); the
     scheduler passes go_live=True — a post someone scheduled for a
     specific time is expected to actually appear on the site at that
-    time, not land in an admin queue nobody's watching."""
+    time, not land in an admin queue nobody's watching.
+
+    Fixed 2026-09-30 (three confirmed user-reported bugs, one root
+    cause each): this used to unconditionally call create_post, even
+    for a post that already had a cms_post_id — so re-running publish
+    after editing a title/excerpt, or after regenerating FAQs, could
+    only ever create a SECOND, duplicate CMS post rather than update the
+    existing one (see agent/database.py's mark_blog_post_go_live_failed
+    docstring, which already warned about this exact risk). Now branches
+    on cms_post_id: update the existing post if there is one, create a
+    new one only if there isn't. FAQs (generated separately and stored
+    on faqs_json) were never read here at all, so a post with real,
+    stored FAQs could still publish with none of them on the page —
+    _append_faq_section fixes that. The featured image was only ever
+    spliced inline into the HTML body (_insert_featured_image); nothing
+    ever populated WordPress's actual Featured Image field
+    (featured_media) — _upload_featured_media fixes that, best-effort."""
     row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
@@ -4123,7 +4396,11 @@ def _publish_blog_post_steps(post_id: int, db: Session, go_live: bool = False) -
     # is typically transient/config-related (e.g. CMS credentials just
     # weren't set yet), and the content was already approved once; only
     # 'draft'/'rejected' genuinely need a human decision first.
-    if row.status not in ("approved", "failed"):
+    # 'published'/'live' are allowed too — now that an existing
+    # cms_post_id branches to update_post below instead of create_post,
+    # re-running publish on an already-published post is a safe sync of
+    # its current title/excerpt/content/FAQs, not a duplicate-post risk.
+    if row.status not in ("approved", "failed", "published", "live"):
         raise HTTPException(status_code=409, detail=f"Post must be approved first (current status: {row.status})")
 
     site = db.query(SeoSite).filter(SeoSite.id == row.site_id).first()
@@ -4145,19 +4422,52 @@ def _publish_blog_post_steps(post_id: int, db: Session, go_live: bool = False) -
     if image_url:
         content = _insert_featured_image(content, image_url, row.title)
     content = _inject_interlinks(row.site_id, post_id, row.title, content, stored_links_json=row.internal_links_json)
+    content = _append_faq_section(content, row.faqs_json)
 
     client = _cms_client_for(site)
+    featured_media = _upload_featured_media(client, image_url, row.title) if image_url else None
+    tags = json.loads(row.tags) if row.tags else None
+    categories = json.loads(row.categories) if row.categories else None
+
+    if row.cms_post_id:
+        # Already exists in the CMS — sync the current title/excerpt/
+        # content/FAQs/image to it instead of creating a duplicate post.
+        result = client.update_post(
+            row.cms_post_id,
+            title=row.title,
+            excerpt=row.excerpt,
+            content=content,
+            slug=row.slug,
+            tags=tags,
+            categories=categories,
+            featured_media=featured_media,
+        )
+        if result.ok:
+            link = result.post.link if result.post else row.cms_post_link
+            database.mark_blog_post_synced(post_id, link)
+            pushed = _push_blog_meta_tags(client, row.cms_post_id, row.meta_title, row.meta_description)
+            database.set_blog_post_meta_pushed_status(post_id, pushed)
+            return True, "Synced"
+        else:
+            database.mark_blog_post_sync_failed(post_id, result.detail)
+            return False, result.detail
+
     result = client.create_post(
         title=row.title,
         content=content,
         excerpt=row.excerpt,
         slug=row.slug,
-        tags=json.loads(row.tags) if row.tags else None,
-        categories=json.loads(row.categories) if row.categories else None,
+        tags=tags,
+        categories=categories,
+        featured_media=featured_media,
     )
     if result.ok:
         link = result.post.link if result.post else None
-        database.mark_blog_post_published(post_id, result.post.id if result.post else None, link)
+        new_cms_post_id = result.post.id if result.post else None
+        database.mark_blog_post_published(post_id, new_cms_post_id, link)
+        if new_cms_post_id:
+            pushed = _push_blog_meta_tags(client, new_cms_post_id, row.meta_title, row.meta_description)
+            database.set_blog_post_meta_pushed_status(post_id, pushed)
         _run_post_publish_automation(site, post_id, row.title, row.excerpt, link)
         if go_live:
             # mark_blog_post_published just wrote cms_post_id through
@@ -4243,7 +4553,7 @@ def bulk_publish_blog_posts_route(payload: BlogBulkIdsRequest, db: Session = Dep
 
 def _generate_and_save_blog_post(
     db: Session, site: SeoSite, topic: str, min_words: int, generate_image: bool, candidates=None,
-    max_words: int = 800, jobs: Optional[list] = None,
+    max_words: int = 1200, jobs: Optional[list] = None,
 ) -> Optional[int]:
     """Shared by bulk-generate and generate-calendar below: one full
     draft (text via generate_blog_post + structure check, matching

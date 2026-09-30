@@ -189,7 +189,7 @@ def technical_audit_node(state: SeoAgentState) -> dict:
         if not pages:
             raise RuntimeError("crawl_site returned no pages")
         known_urls = fetch_sitemap_urls(site["base_url"])
-        issues = run_all_detectors(pages, known_urls=known_urls, base_url=site["base_url"])
+        issues = run_all_detectors(pages, known_urls=known_urls, base_url=site["base_url"], site_id=site["id"])
         database.upsert_technical_issues(site["id"], run_date, issues)
         for issue in issues[:20]:
             _log_to_sheet(

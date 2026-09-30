@@ -212,7 +212,7 @@ def _run_job(job_id: str, action: str, params: dict, user_id: str) -> None:
                 raise RuntimeError(f"Crawl of {site['base_url']} failed or found nothing — see server logs")
 
             known_urls = fetch_sitemap_urls(site["base_url"])
-            issues = run_all_detectors(pages, known_urls=known_urls, base_url=site["base_url"])
+            issues = run_all_detectors(pages, known_urls=known_urls, base_url=site["base_url"], site_id=site["id"])
             agent_db.upsert_technical_issues(site["id"], date_type.today(), issues)
 
             critical = sum(1 for i in issues if i.severity == "critical")

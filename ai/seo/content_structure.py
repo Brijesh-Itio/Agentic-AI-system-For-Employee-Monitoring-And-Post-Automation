@@ -96,8 +96,8 @@ def analyze_structure(
     *,
     primary_keyword: Optional[str] = None,
     secondary_keywords: Optional[List[str]] = None,
-    min_words: int = 700,
-    max_words: int = 800,
+    min_words: int = 1000,
+    max_words: int = 1200,
 ) -> StructureReport:
     """Pure, synchronous, no external calls — safe to run on every draft
     before it's ever pushed anywhere. Heading detection is a light regex

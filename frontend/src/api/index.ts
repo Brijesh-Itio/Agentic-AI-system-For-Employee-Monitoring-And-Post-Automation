@@ -1346,6 +1346,10 @@ export const generateSocialPosts = (payload: {
   facebook_account_id?: number | null;
   linkedin_account_id?: number | null;
   instructions?: string;
+  // User instruction — a real AI-generated image automatically, prepared in the background right
+  // after the post's text (new: social had no automatic image step before this). Defaults true
+  // server-side; sent explicitly so the UI's checkbox can turn it off. Ignored if image_url is set.
+  generate_image?: boolean;
 }) => api.post<SocialPost[]>("/api/seo/social/generate", payload, { timeout: 120_000 }).then((r) => r.data);
 
 export const scheduleSocialPost = (postId: number, scheduledFor: string | null) =>
@@ -2444,6 +2448,12 @@ export interface BlogPost {
   // afterward via updateBlogPostMeta.
   meta_title: string | null;
   meta_description: string | null;
+  // Bug fix (2026-09-30) — whether meta_title/meta_description were
+  // actually confirmed on the live CMS page at last publish: "confirmed"
+  // (the SEO plugin echoed the value back), "not_confirmed" (sent but not
+  // echoed — most likely no supported SEO plugin active on that site), or
+  // null (never attempted — not published yet, or no meta tags set).
+  meta_pushed_status: "confirmed" | "not_confirmed" | null;
   // JSON-encoded list of the secondary keywords this post's density was
   // tracked against, and the resulting density report — JSON.parse
   // keyword_density_json into KeywordDensity[] before use.
@@ -2457,6 +2467,9 @@ export interface BlogPost {
   // JSON-encoded GrammarReport — JSON.parse before use.
   grammar_report_json: string | null;
   grammar_checked_at: string | null;
+  // User instruction — Trusted URL Sources: JSON-encoded TrustedSource[] (real, web-search-verified,
+  // manual-only). JSON.parse before use, same convention as faqs_json. null = never run.
+  trusted_sources_json: string | null;
 }
 
 // Same classification the backend's ai/seo/image_pipeline.py uses for
@@ -2480,12 +2493,21 @@ export const generateBlogPost = (payload: {
   instructions?: string;
   min_words?: number;
   max_words?: number;
+  // User instruction — a real AI-generated featured image automatically, prepared alongside the
+  // other extras in the background. Defaults true server-side; sent explicitly so the UI's checkbox
+  // can turn it off.
+  generate_image?: boolean;
 }) => api.post<BlogPost>("/api/seo/blog/generate", payload, { timeout: 0 }).then((r) => r.data);
 
 // Posts whose extras (originality check, meta tags, FAQs, internal links, grammar, image) are still being
 // prepared in the background after the article was created.
 export const getBlogFollowups = (siteId: number) =>
   api.get<{ post_id: number; stage: string }[]>("/api/seo/blog/followups", { params: { site_id: siteId } }).then((r) => r.data);
+
+// User instruction — social's own background image-generation job (api/routes/seo.py's
+// _start_social_image_jobs), same polling shape as getBlogFollowups above.
+export const getSocialFollowups = (siteId: number) =>
+  api.get<{ post_id: number; stage: string }[]>("/api/seo/social/followups", { params: { site_id: siteId } }).then((r) => r.data);
 
 export const getBlogPosts = (siteId: number, status?: string) =>
   api.get<BlogPost[]>("/api/seo/blog", { params: { site_id: siteId, status } }).then((r) => r.data);
@@ -2514,6 +2536,18 @@ export const generateBlogPostMeta = (postId: number) =>
 
 export const generateBlogPostFaqs = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/faqs/generate`, {}, { timeout: 5 * 60_000 }).then((r) => r.data);
+
+export interface TrustedSource {
+  url: string;
+  title: string;
+  quoted_text: string;
+}
+
+// Real web-search-grounded research (user instruction), manual-only — a genuinely different, slower
+// call than everything else on this post (multiple real web searches per request, verified live
+// ~15-20s), so it gets its own generous timeout rather than reusing the 5-minute one above.
+export const generateBlogPostTrustedSources = (postId: number) =>
+  api.post<BlogPost>(`/api/seo/blog/${postId}/trusted-sources/generate`, {}, { timeout: 3 * 60_000 }).then((r) => r.data);
 
 export const generateBlogPostInterlinks = (postId: number) =>
   api.post<BlogPost>(`/api/seo/blog/${postId}/interlinks/generate`, {}, { timeout: 3 * 60_000 }).then((r) => r.data);

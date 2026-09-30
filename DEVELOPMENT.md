@@ -602,13 +602,22 @@ this module's own docstring states for every other structural finding.
    that opened its first section with a real analogy ("a sorting desk between a customer's card and your
    business bank account"), explained every piece of jargon where it was first used, and never mentioned
    pricing or a provider by name.
-1. **Generate** (`ai/seo/blog_content.py`): the article only, targeting **700–800 words** with at most one retry (and
-   only if the draft is under 85 % of the minimum). The draft is saved and returned immediately. The extras — originality
-   check, meta title/description and keyword density, five FAQs (`content_structure.generate_faq`, tolerant parser +
-   one retry), internal links and the grammar check, plus the image for bulk runs — are then prepared by one background
-   worker (`_start_blog_followups` in `api/routes/seo.py`). `GET /api/seo/blog/followups` reports the current step per
-   post, and the Blog tab polls it and shows "preparing the extras" on each card. Bulk and calendar generation create
-   all drafts first, then queue their extras. Measured on the local CPU: article ≈ 3 min, extras ≈ 5 min more.
+1. **Generate** (`ai/seo/blog_content.py`): the article only, targeting **1000–1200 words** (this range has moved
+   twice on user instruction: 700–800 to speed up generation, then 1200–1500, now settled at 1000–1200) with at
+   most one retry (and only if the draft is under 85 % of the minimum). The draft is saved and returned
+   immediately. The extras — meta title/description and keyword density, five FAQs
+   (`content_structure.generate_faq`, tolerant parser + one retry), internal links, the grammar check,
+   trusted-source citations, and a featured image — are then prepared by one background worker
+   (`_start_blog_followups` in `api/routes/seo.py`). `GET /api/seo/blog/followups` reports the current step per
+   post, and the Blog tab polls it and shows "preparing the extras" on each card. Bulk and calendar generation
+   create all drafts first, then queue their extras. Measured on the local CPU at the original 700–800 target:
+   article ≈ 3 min, extras ≈ 5 min more — expect somewhat longer at 1000–1200.
+   **The featured image is now automatic for single-post generation too** (user instruction —
+   previously only bulk/calendar generation did this, `BlogGenerateRequest.generate_image: bool = True`, a checkbox
+   in the Blog tab's generator form defaults it on); a toast fires ("Content ready — featured image generated.")
+   when that image lands, by detecting the followups stage dropping from `"Generating the image"` (the pipeline's
+   last step) to absent. Verified live end-to-end: a real post about card tokenization automatically got a real,
+   topic-relevant image (a checkout form, a blank card, and a secured server room) with zero manual click.
 2. **Checks:** structure/word count, plagiarism + AI-detection score (real, via Quetext — §9.10), and grammar
    (`grammar_checker.py`: ≈150-word chunks, ≤8 chunks, capped replies, 7-minute budget, partial results; runs on
    GPT-6 Sol as of 2026-09-29 (`SEO_LLM_PROVIDER_GRAMMAR_CHECK=openai`), switched from local Ollama — Quetext's
@@ -629,6 +638,61 @@ this module's own docstring states for every other structural finding.
 
 An unexpected exception during publish is stored on the post as its failure reason so it can be retried, rather
 than surfacing as a bare 500.
+
+**Trusted URL Sources** (user instruction, `ai/seo/source_research.py`, `POST
+/api/seo/blog/{id}/trusted-sources/generate`, "Find trusted sources" button in the SEO Tools panel): real,
+web-search-grounded research, genuinely different from every other LLM call in this codebase. Every other task
+(blog writing, social writing, grammar checking, image prompts, content gap) goes through `ai/llm/factory.py`'s
+shared `LLMProvider.generate()`, which for OpenAI is a plain Chat Completions call — no web access, no way to
+verify a URL is real, which is exactly why the standing content brief already tells the model to never invent a
+statistic or source. This feature needed the opposite: real citations. Verified live that GPT-6 Sol genuinely
+supports OpenAI's **Responses API** (`client.responses.create` with `tools=[{"type": "web_search"}]`) — a
+different endpoint, confirmed by real `web_search_call` output items and real `url_citation` annotations (exact
+URL, page title, and the character span of the generated text that citation backs) for claims it actually
+looked up, not recalled from training data. Deliberately its own module calling the OpenAI SDK directly rather
+than going through the factory — same "call the SDK directly for an OpenAI-specific capability" pattern already
+used by `ai/images/providers/openai_image_provider.py` — so this can never affect Ollama/Claude or any other
+existing task; user's explicit instruction was "make sure existing things should not disturb." Manual-only, same
+reasoning as Quetext (a real, metered call, ~15-20s for several search rounds). A real bug was caught and fixed
+mid-build: the annotation's `start_index`/`end_index` span covers the inline citation marker itself
+(`"([domain.com](url))"`), not the sentence it backs — a naive `text[start:end]` extraction returned the citation
+marker as the "quoted claim." Fixed by walking back from just before the cited sentence's own closing
+punctuation to the previous sentence boundary, confirmed against real captured API output before and after the
+fix. Strips the `?utm_source=openai` tracking parameter the web_search tool appends to every URL. Verified live
+end-to-end via the actual HTTP route (not just the bare function) on two real existing posts: real, specific,
+correctly-attributed sources — Stripe's own pricing page, the Federal Reserve's Regulation II page, Visa's and
+Mastercard's own rules documents — each with the real sentence it backs, not a fabricated citation.
+
+Corrected shortly after (user instruction, shown a reference screenshot of inline citation pills embedded
+directly in article text): citations needed to live **inside the published article itself**, automatically on
+every generation, not in a separate manual panel. `match_sources_to_paragraphs` + `insert_citation_links`
+(`ai/seo/source_research.py`) implement this without letting an LLM rewrite the article's own sentences — the
+independently-researched sources above are worded in the model's own summary, not verbatim from the article, so
+they can't be reliably string-matched into the existing text. Instead a second, narrowly-scoped call (routed
+through the normal shared `ai/llm/factory.py` provider — no web access needed for this part, it's pure
+classification) is asked ONLY which paragraph number a source's claim best matches, never to rewrite anything;
+verified live it correctly declines a forced match (a synthetic "unrelated weather report" source was correctly
+left unmatched against clearly-unrelated paragraphs). `insert_citation_links` then does the actual insertion
+itself — deterministic string manipulation, appending a small citation badge just before a matched paragraph's
+closing `</p>`, working backward through matched paragraphs so no insertion's offset can shift an earlier one
+(unit-verified with synthetic multi-citation data before the live test). Wired into `_run_blog_followup_job`
+(`api/routes/seo.py`) as a new automatic stage, "Finding trusted sources," right after the grammar check; the
+manual button (`POST /blog/{id}/trusted-sources/generate`) still exists as **"Refresh trusted sources"** for
+posts generated before this existed or after editing an article's content, now running the identical
+insert-in-place pipeline rather than only populating the side panel.
+
+Citation badges are styled with an **inline `style=` attribute, not a CSS class** — this HTML gets published
+verbatim into the user's own CMS (WordPress/Webflow), where none of this app's stylesheet loads, so an external
+class would render as a plain unstyled link on the live site; the class is kept alongside purely as a future
+styling hook for this app's own Preview/Edit surfaces. A real bug was caught and fixed before this shipped:
+`sanitizeBlogHtml`'s (`SeoPage.tsx`) DOMPurify `ALLOWED_ATTR` didn't include `class`, `style`, or `title` —
+every citation's styling and hover tooltip would have been silently stripped in the Preview/View content
+surfaces (the link itself would still work, just unstyled) had this not been caught before the live test.
+Verified live end-to-end on a real new-post generation (not just the bare functions): 6 real citations were
+automatically inserted, each on the correct paragraph — EMVCo's own technical 3-D Secure documentation on the
+technical explanation paragraphs, Visa's corporate page on the issuer-risk paragraph, the European Banking
+Authority's real regulatory press release on the SCA/EEA paragraph — and several paragraphs correctly received
+no citation at all rather than a forced one.
 
 **Content gap analysis / Keyword Gap** (`ai/seo/content_gap.py`, `POST /api/seo/content-gap/analyze`): sits above
 the generator form on the Blog tab. Went through three corrections from the user before landing here: (1) the
@@ -695,6 +759,22 @@ character limits are enforced in the UI; **schedule**, **approve**, **publish**.
 publish without an image (`IMAGE_REQUIRED_PLATFORMS` in `SeoPage.tsx` — neither platform has a text-only post
 type). Only LinkedIn is auto-posted through Playwright; the other platforms use the human review queue unless
 their API credentials are set. Facebook supports multiple Pages (`seo_facebook_accounts`).
+
+**Automatic image generation** (user instruction, matching what blog's single-post generation just got):
+`generate_social_posts_route` used to be fully synchronous — text generated, post created, response returned,
+with an image only ever added afterward via the manual **Generate image** button or an upload. There was no
+background-job system for social at all. Added one from scratch, deliberately its own, smaller state
+(`_social_image_state`/`_start_social_image_jobs`/`_run_social_image_job` in `api/routes/seo.py`) rather than
+reusing blog's — social has exactly one automatic step (the image), not blog's five, so sharing blog's dict/lock
+would conflate two different post types and pipelines for no benefit. `SocialGenerateRequest.generate_image: bool
+= True` (a checkbox in the Social tab's generator form, disabled and implicitly off when an `image_url` is
+already typed in, so a manually-supplied image is never overwritten); `GET /api/seo/social/followups` reports the
+stage the same shape as blog's own followups endpoint, and the Social tab polls it, shows a small
+"Generating the image" badge on the post card, and fires the same "Content ready — image generated." toast on
+completion. Verified live end-to-end: `POST /social/generate` returned the post immediately with `image_url:
+null`, the followups endpoint correctly reported `"Generating the image"` for ~39s, and the post ended up with a
+real, topic-relevant image (a card reader, secured server racks, and "Data Security Our Priority" signage) for a
+post about card tokenization — with zero manual click.
 
 **LinkedIn multi-account** (user instruction — "like facebook for LinkedIn also set multi account",
 `seo_linkedin_accounts`): same NULL-means-default-.env-account convention as Facebook's own multi-account

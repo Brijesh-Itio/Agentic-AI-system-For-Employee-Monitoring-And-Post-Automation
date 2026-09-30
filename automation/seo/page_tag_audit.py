@@ -10,8 +10,11 @@ shape from the crawl-wide issue queue: a human pasting in one URL wants
 "what does this page's <head> actually look like right now," not a
 site-wide backlog entry per problem.
 
-Deterministic, no LLM; read-only against the live URL — this module never
-writes anything, matching every other detector in this package.
+Read-only against the live URL — this module never writes anything,
+matching every other detector in this package. Deterministic except for
+one check: content length also runs the same qualitative thin-content
+review technical_audit.py's detect_thin_content does (ai/seo/
+thin_content_assessor.py) — see _audit_content_length's own docstring.
 """
 import json
 import logging
@@ -22,6 +25,7 @@ from typing import Callable, List, Optional
 import requests
 from bs4 import BeautifulSoup
 
+from ai.seo.thin_content_assessor import assess_thin_content
 from automation.seo.crawler import USER_AGENT
 from automation.seo.technical_audit import (
     HREFLANG_RE,
@@ -273,7 +277,7 @@ def _audit_structured_data(soup: BeautifulSoup) -> "tuple[str, TagFinding]":
     )
 
 
-def _audit_content_length(soup: BeautifulSoup) -> "tuple[str, TagFinding]":
+def _audit_content_length(soup: BeautifulSoup, url: str, *, site_id: Optional[int] = None) -> "tuple[str, TagFinding]":
     """Thin-content check — same threshold and same boilerplate-stripped
     word count as technical_audit.py's detect_thin_content (module 28.2),
     just reported here as one more row in this page's own tag report
@@ -281,25 +285,51 @@ def _audit_content_length(soup: BeautifulSoup) -> "tuple[str, TagFinding]":
     fit for "content length" (there's no tag to be missing), but reusing
     this report's own two-bucket shape — rather than adding a third
     top-level section for one check — is what actually answers "where do
-    I see this for one page," which is the whole point of this module."""
+    I see this for one page," which is the whole point of this module.
+
+    Same qualitative review as detect_thin_content, for the same reason:
+    word count alone isn't what Google's own guidance means by "thin" —
+    a short, focused page can be complete, and a longer one can still be
+    vague. See detect_thin_content's own docstring for why a "not thin"
+    verdict only softens the wording here rather than moving the finding
+    to "existing" outright: a small local model can be too lenient, so a
+    wrong "not thin" call must never make this look like a non-issue,
+    only ever add context for a human to weigh. Falls back to the plain
+    word-count wording if the assessment is unavailable (e.g. the local
+    LLM isn't reachable), same graceful-degrade convention as everywhere
+    else this pattern is used."""
     soup_copy = BeautifulSoup(str(soup), "html.parser")
     for tag in soup_copy.find_all(_BOILERPLATE_TAGS):
         tag.decompose()
     main = soup_copy.find("main") or soup_copy.find("article") or soup_copy.body or soup_copy
-    word_count = len((main.get_text(" ", strip=True) if main else "").split())
+    text = main.get_text(" ", strip=True) if main else ""
+    word_count = len(text.split())
 
     if word_count >= THIN_CONTENT_WARNING_WORDS:
         return "existing", TagFinding(
             tag="Content length", detail=f"{word_count} words of real body content — looks sufficient.",
         )
+
     severity = "very thin" if word_count < THIN_CONTENT_CRITICAL_WORDS else "thin"
-    return "missing", TagFinding(
-        tag="Content length",
-        detail=(
-            f"Only {word_count} words of real body content (menus/footers not counted) — {severity}, below "
-            f"the {THIN_CONTENT_WARNING_WORDS}-word range typically needed to cover a topic in enough depth."
-        ),
+    detail = (
+        f"Only {word_count} words of real body content (menus/footers not counted) — {severity}, below "
+        f"the {THIN_CONTENT_WARNING_WORDS}-word range typically needed to cover a topic in enough depth."
     )
+
+    assessment = assess_thin_content(text, url, word_count, site_id=site_id)
+    if assessment is not None:
+        if assessment.is_thin:
+            if assessment.reason:
+                detail += f" Content review: {assessment.reason}"
+            if assessment.missing_topics:
+                detail += " Specific gaps to cover: " + "; ".join(assessment.missing_topics) + "."
+        else:
+            detail += (
+                f" Content review suggests this may be adequate for its own purpose despite the low word "
+                f"count: {assessment.reason} Verify this is intentional before spending effort expanding it."
+            )
+
+    return "missing", TagFinding(tag="Content length", detail=detail)
 
 
 def _audit_html_lang(soup: BeautifulSoup) -> "tuple[str, TagFinding]":
@@ -320,10 +350,13 @@ def _audit_html_lang(soup: BeautifulSoup) -> "tuple[str, TagFinding]":
     return "existing", TagFinding(tag="HTML lang attribute", detail="Present and looks valid.", values=[lang_value])
 
 
-def run_page_tag_audit(url: str) -> PageTagAuditReport:
+def run_page_tag_audit(url: str, *, site_id: Optional[int] = None) -> PageTagAuditReport:
     """Never raises — a fetch failure comes back as fetch_error set and
     every bucket empty, matching this codebase's graceful-degrade
-    convention; the caller (api/routes/seo.py) turns that into a 502."""
+    convention; the caller (api/routes/seo.py) turns that into a 502.
+    site_id routes the content-length check's qualitative LLM review to
+    the right per-site provider override (see _audit_content_length) —
+    optional, since that check works fine without it."""
     try:
         response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, headers={"User-Agent": USER_AGENT})
         response.raise_for_status()
@@ -413,7 +446,7 @@ def run_page_tag_audit(url: str) -> PageTagAuditReport:
     schema_kind, schema_finding = _audit_structured_data(soup)
     buckets[schema_kind].append(schema_finding)
 
-    content_kind, content_finding = _audit_content_length(soup)
+    content_kind, content_finding = _audit_content_length(soup, url, site_id=site_id)
     buckets[content_kind].append(content_finding)
 
     return PageTagAuditReport(

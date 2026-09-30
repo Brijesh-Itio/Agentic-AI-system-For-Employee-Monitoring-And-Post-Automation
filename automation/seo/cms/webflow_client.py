@@ -143,11 +143,12 @@ class WebflowClient(CmsClient):
         slug: Optional[str] = None,
         tags: Optional[List[str]] = None,
         categories: Optional[List[str]] = None,
+        featured_media: Optional[str] = None,
     ) -> CmsResult:
         if not self._credentials_configured():
             return CmsResult(ok=False, detail="Webflow credentials not configured")
-        # tags/categories: see create_post's comment above — no generic
-        # Webflow equivalent, silently ignored.
+        # tags/categories/featured_media: see create_post's comment above
+        # — no generic Webflow equivalent, silently ignored.
         if meta is not None:
             # Webflow has no generic "meta" concept — SEO fields are
             # either real Webflow-native settings or plain fieldData
@@ -218,13 +219,15 @@ class WebflowClient(CmsClient):
         slug: Optional[str] = None,
         tags: Optional[List[str]] = None,
         categories: Optional[List[str]] = None,
+        featured_media: Optional[str] = None,
     ) -> CmsResult:
         if not self._credentials_configured():
             return CmsResult(ok=False, detail="Webflow credentials not configured")
-        # tags/categories have no generic Webflow equivalent (a
-        # collection's schema is arbitrary, unlike WordPress's built-in
-        # taxonomies) — silently ignored, same as meta above, rather than
-        # guessing at a field mapping nothing here actually verified.
+        # tags/categories/featured_media have no generic Webflow
+        # equivalent (a collection's schema is arbitrary, unlike
+        # WordPress's built-in taxonomies/media library) — silently
+        # ignored, same as meta above, rather than guessing at a field
+        # mapping nothing here actually verified.
 
         field_data = {
             settings.WEBFLOW_FIELD_TITLE: title,
@@ -248,3 +251,12 @@ class WebflowClient(CmsClient):
         except Exception as exc:
             logger.exception("Webflow create_post() failed (collection_id=%s)", self._collection_id)
             return CmsResult(ok=False, detail=str(exc))
+
+    def upload_media(self, image_bytes: bytes, filename: str, *, mime_type: str = "image/webp") -> Optional[str]:
+        # Webflow's asset upload is a separate, multi-step flow (request
+        # an upload URL/fields from the Assets API, then PUT the file to
+        # S3 with those exact fields) that nothing in this codebase has
+        # verified live yet — returning None (not supported) rather than
+        # guessing at an unverified shape, same rule as admin_edit_url
+        # above.
+        return None

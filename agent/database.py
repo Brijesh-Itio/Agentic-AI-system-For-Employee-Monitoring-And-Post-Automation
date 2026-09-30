@@ -1254,6 +1254,23 @@ _SEO_BLOG_POSTS_EXTRA_COLUMNS = {
     # "manual-upload". NULL for any image attached before this column
     # existed.
     "image_source": "TEXT",
+    # User instruction — Trusted URL Sources (ai/seo/source_research.py):
+    # JSON-encoded list of real, web-search-verified {url, title,
+    # quoted_text}, manual-only (same reasoning as quality_report_json —
+    # a real paid/metered call, never fired automatically). NULL means
+    # never run for this post.
+    "trusted_sources_json": "TEXT",
+    # Bug fix (2026-09-30) — meta_title/meta_description were generated
+    # and shown in the UI but never actually sent to the CMS at publish
+    # time, so they never appeared in the live page's <head>. This
+    # records what _push_blog_meta_tags (api/routes/seo.py) found on its
+    # last attempt: "confirmed" (the SEO plugin's own postmeta echoed the
+    # value back), "not_confirmed" (WordPress accepted the write but
+    # didn't echo it back — almost always because no SEO plugin exposing
+    # those meta keys for REST access is active on this site), or NULL
+    # (never attempted — e.g. not published yet, or no meta_title/
+    # meta_description set at all).
+    "meta_pushed_status": "TEXT",
 }
 
 
@@ -3200,6 +3217,16 @@ def update_blog_post(
         return cur.rowcount > 0
 
 
+def set_blog_post_content(post_id: int, content: str) -> bool:
+    """User instruction — Trusted URL Sources inline insertion: a dedicated setter for content_html
+    alone, same "sparse update" shape as set_blog_post_taxonomy/set_blog_post_image below, rather than
+    reusing update_blog_post (which also demands title/excerpt/recomputed structure fields — a manual-
+    edit-form concern this automatic followup step has no business touching)."""
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET content = ? WHERE id = ?", (content, post_id))
+        return cur.rowcount > 0
+
+
 def set_blog_post_taxonomy(post_id: int, slug: Optional[str], tags_json: Optional[str], categories_json: Optional[str]) -> None:
     """Module 38 — a dedicated setter rather than folding these into
     update_blog_post's own signature, so existing callers of that
@@ -3250,6 +3277,34 @@ def mark_blog_post_published(post_id: int, cms_post_id: Optional[str], cms_post_
             """,
             (cms_post_id, cms_post_link, post_id),
         )
+
+
+def mark_blog_post_synced(post_id: int, cms_post_link: Optional[str] = None) -> None:
+    """The post already existed in the CMS (cms_post_id was already set)
+    — _publish_blog_post_steps just pushed the current title/excerpt/
+    content/FAQs to it via update_post rather than creating a duplicate.
+    Deliberately does NOT touch status, unlike mark_blog_post_published:
+    the post could already be 'live' (genuinely public), and syncing a
+    later edit must never silently downgrade that back to 'published'
+    (CMS-draft-only) — that would misrepresent a live post as not yet
+    public."""
+    with write_cursor() as cur:
+        if cms_post_link is not None:
+            cur.execute(
+                "UPDATE seo_blog_posts SET cms_post_link = ?, error = NULL WHERE id = ?",
+                (cms_post_link, post_id),
+            )
+        else:
+            cur.execute("UPDATE seo_blog_posts SET error = NULL WHERE id = ?", (post_id,))
+
+
+def mark_blog_post_sync_failed(post_id: int, error: str) -> None:
+    """Same reasoning as mark_blog_post_go_live_failed: leaves status
+    untouched (it may already be 'live') and only records the error, so
+    a failed sync is visible without misrepresenting an actually-live
+    post as merely 'failed'/not-yet-published."""
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET error = ? WHERE id = ?", (error, post_id))
 
 
 def mark_blog_post_live(post_id: int) -> None:
@@ -3324,9 +3379,25 @@ def set_blog_post_seo_meta(
             )
 
 
+def set_blog_post_meta_pushed_status(post_id: int, status: Optional[str]) -> None:
+    """See _SEO_BLOG_POSTS_EXTRA_COLUMNS's meta_pushed_status comment for
+    what "confirmed"/"not_confirmed"/None mean. Called after every publish
+    attempt (api/routes/seo.py's _push_blog_meta_tags) — status is
+    recomputed fresh each time rather than left stale from a previous
+    publish."""
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET meta_pushed_status = ? WHERE id = ?", (status, post_id))
+
+
 def set_blog_post_faqs(post_id: int, faqs_json: str) -> bool:
     with write_cursor() as cur:
         cur.execute("UPDATE seo_blog_posts SET faqs_json = ? WHERE id = ?", (faqs_json, post_id))
+        return cur.rowcount > 0
+
+
+def set_blog_post_trusted_sources(post_id: int, trusted_sources_json: str) -> bool:
+    with write_cursor() as cur:
+        cur.execute("UPDATE seo_blog_posts SET trusted_sources_json = ? WHERE id = ?", (trusted_sources_json, post_id))
         return cur.rowcount > 0
 
 

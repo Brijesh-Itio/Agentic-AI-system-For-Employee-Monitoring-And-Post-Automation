@@ -110,6 +110,8 @@ import {
   Ga4PageRow,
   generateBlogPost,
   generateBlogPostFaqs,
+  generateBlogPostTrustedSources,
+  TrustedSource,
   generateBlogPostImage,
   generateBlogPostInterlinks,
   generateBlogPostMeta,
@@ -131,6 +133,7 @@ import {
   getBacklinks,
   getBlogPosts,
   getBlogFollowups,
+  getSocialFollowups,
   getGa4Pages,
   getGscPages,
   getGscQueries,
@@ -658,7 +661,13 @@ const blogStatusVariant: Record<string, "warning" | "success" | "outline" | "des
 function sanitizeBlogHtml(html: string): string {
   return DOMPurify.sanitize(html, {
     ALLOWED_TAGS: ["h1", "h2", "h3", "p", "br", "strong", "em", "ul", "ol", "li", "a"],
-    ALLOWED_ATTR: ["href", "rel", "target"],
+    // "class"/"style"/"title" added for Trusted URL Sources (user instruction) — the automatic inline
+    // citation links (ai/seo/source_research.py's insert_citation_links) carry class="trusted-source-
+    // citation", an inline style="..." pill (inline since the published CMS post won't load this app's
+    // own stylesheet), and title="..." for the real source's page title as a hover tooltip; all three
+    // were previously stripped here, which would have silently rendered plain unstyled links in every
+    // surface that uses this sanitizer (Preview, View content) — caught before shipping.
+    ALLOWED_ATTR: ["href", "rel", "target", "class", "style", "title"],
   });
 }
 
@@ -3781,9 +3790,36 @@ function SocialTab({ siteId }: { siteId: number }) {
   // — a real modal, not the browser's native window.confirm() popup.
   const [deletePostId, setDeletePostId] = useState<number | null>(null);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  // User instruction — a real AI-generated image automatically, right after the post's text. Default
+  // on, matching Blog's own default.
+  const [generateImage, setGenerateImage] = useState(true);
 
   const postsQuery = useQuery({ queryKey: ["seo", "social", siteId], queryFn: () => getSocialPosts(siteId) });
   const posts = postsQuery.data ?? [];
+
+  // User instruction — new background image-generation job for social (mirrors the Blog tab's own
+  // followups polling/toast, see its identical block for the full comment on why).
+  const socialFollowupsQuery = useQuery({
+    queryKey: ["seo", "social-followups", siteId],
+    queryFn: () => getSocialFollowups(siteId),
+    refetchInterval: (q) => ((q.state.data?.length ?? 0) > 0 ? 3000 : 12000),
+  });
+  const socialFollowups = socialFollowupsQuery.data ?? [];
+  const socialFollowupStages = Object.fromEntries(socialFollowups.map((f) => [f.post_id, f.stage]));
+  const socialFollowupSignature = socialFollowups.map((f) => `${f.post_id}:${f.stage}`).join("|");
+  const prevSocialImageStages = useRef<Record<number, string>>({});
+  useEffect(() => {
+    for (const [postIdStr, stage] of Object.entries(prevSocialImageStages.current)) {
+      const postId = Number(postIdStr);
+      if (stage === "Generating the image" && !(postId in socialFollowupStages)) {
+        toast.success("Content ready — image generated.");
+      }
+    }
+    prevSocialImageStages.current = socialFollowupStages;
+    if (socialFollowups.length > 0) {
+      queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
+    }
+  }, [socialFollowupSignature]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Module 40 — multiple connected Facebook Pages. Global (not scoped to
   // this site) since a Page is Meta's own asset, not tied to one SEO
@@ -3838,6 +3874,7 @@ function SocialTab({ siteId }: { siteId: number }) {
         facebook_account_id: facebookAccountId === "" ? undefined : facebookAccountId,
         linkedin_account_id: linkedinAccountId === "" ? undefined : linkedinAccountId,
         instructions: socialInstructions.trim() || undefined,
+        generate_image: generateImage,
       }),
     onSuccess: (created) => {
       toast.success(`Generated ${created.length} of ${selectedPlatforms.length} requested post(s).`);
@@ -4490,12 +4527,22 @@ function SocialTab({ siteId }: { siteId: number }) {
                 onChange={(e) => setImageUrl(e.target.value)}
                 placeholder="https://example.com/page-image.jpg"
               />
-              {selectedPlatforms.some((p) => IMAGE_REQUIRED_PLATFORMS.includes(p)) && !imageUrl.trim() && (
+              {selectedPlatforms.some((p) => IMAGE_REQUIRED_PLATFORMS.includes(p)) && !imageUrl.trim() && !generateImage && (
                 <p className="mt-1 text-theme-xs text-warning-500">
                   {selectedPlatforms.filter((p) => IMAGE_REQUIRED_PLATFORMS.includes(p)).join(" and ")} have no
                   text-only post type — this post won't be publishable there without an image URL.
                 </p>
               )}
+              <label className="mt-2 flex items-center gap-2 text-theme-xs text-gray-500 dark:text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={generateImage}
+                  onChange={(e) => setGenerateImage(e.target.checked)}
+                  disabled={!!imageUrl.trim()}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                Generate an image automatically{imageUrl.trim() ? " (disabled — Image URL is set above)" : ""}
+              </label>
             </div>
             {selectedPlatforms.includes("facebook") && facebookAccounts.length > 0 && (
               <div className="sm:col-span-2">
@@ -4873,6 +4920,12 @@ function SocialTab({ siteId }: { siteId: number }) {
                       {post.platform}
                     </Badge>
                     <Badge variant={socialStatusVariant[post.status]}>{post.status}</Badge>
+                    {post.id in socialFollowupStages && (
+                      <Badge variant="outline">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        {socialFollowupStages[post.id]}
+                      </Badge>
+                    )}
                     {post.platform === "facebook" && (
                       <span className="text-theme-xs text-gray-400">
                         via {facebookAccounts.find((a: FacebookAccount) => a.id === post.facebook_account_id)?.label ?? "Default (.env)"}
@@ -5307,6 +5360,19 @@ function BlogSeoToolsPanel({ siteId, post, editing = false }: { siteId: number; 
     onError: (err) => toast.error(serverErrorDetail(err, "FAQ generation failed.")),
   });
 
+  // Trusted URL Sources (user instruction) — runs automatically right after every new post is
+  // generated (the background followups job), inserting real citation links directly into the
+  // article. This button is the manual re-run: for posts generated before this existed, or to
+  // refresh citations after editing the article's content.
+  const trustedSourcesMutation = useMutation({
+    mutationFn: () => generateBlogPostTrustedSources(post.id),
+    onSuccess: () => {
+      toast.success("Trusted sources refreshed — citation links updated in the article.");
+      invalidate();
+    },
+    onError: (err) => toast.error(serverErrorDetail(err, "Trusted source research failed or found no real citations.")),
+  });
+
   const metaMutation = useMutation({
     mutationFn: () => generateBlogPostMeta(post.id),
     onSuccess: () => {
@@ -5369,6 +5435,7 @@ function BlogSeoToolsPanel({ siteId, post, editing = false }: { siteId: number; 
   });
 
   const faqs: FaqPair[] = post.faqs_json ? JSON.parse(post.faqs_json) : [];
+  const trustedSources: TrustedSource[] = post.trusted_sources_json ? JSON.parse(post.trusted_sources_json) : [];
   const internalLinks: InternalLink[] = post.internal_links_json ? JSON.parse(post.internal_links_json) : [];
   const keywordDensity: KeywordDensity[] = post.keyword_density_json ? JSON.parse(post.keyword_density_json) : [];
   const grammarReport: GrammarReport | null = post.grammar_report_json ? JSON.parse(post.grammar_report_json) : null;
@@ -5471,6 +5538,10 @@ function BlogSeoToolsPanel({ siteId, post, editing = false }: { siteId: number; 
           {faqMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
           {faqs.length > 0 ? "Regenerate FAQs" : "Generate FAQs"}
         </Button>
+        <Button size="sm" variant="outline" onClick={() => trustedSourcesMutation.mutate()} disabled={trustedSourcesMutation.isPending}>
+          {trustedSourcesMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          {trustedSources.length > 0 ? "Refresh trusted sources" : "Find trusted sources"}
+        </Button>
         <Button size="sm" variant="outline" onClick={() => grammarMutation.mutate()} disabled={grammarMutation.isPending}>
           {grammarMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
           {grammarReport ? "Re-check grammar" : "Check grammar"}
@@ -5489,8 +5560,23 @@ function BlogSeoToolsPanel({ siteId, post, editing = false }: { siteId: number; 
       )}
 
       <div className="rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
-        <div className="mb-1 flex items-center justify-between">
-          <p className="font-medium text-gray-700 dark:text-gray-300">SEO meta tags</p>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <p className="font-medium text-gray-700 dark:text-gray-300">SEO meta tags</p>
+            {post.meta_pushed_status === "confirmed" && (
+              <Badge variant="success" title="Confirmed present on the live page's <head> after the last publish">
+                Live on site
+              </Badge>
+            )}
+            {post.meta_pushed_status === "not_confirmed" && (
+              <Badge
+                variant="warning"
+                title="Sent at the last publish, but the site didn't confirm it — most likely no supported SEO plugin (Yoast/Rank Math) is active there. Nothing else was affected."
+              >
+                Not confirmed on site
+              </Badge>
+            )}
+          </div>
           {!editingMeta && (post.meta_title || post.meta_description) && (
             <button
               type="button"
@@ -5590,6 +5676,24 @@ function BlogSeoToolsPanel({ siteId, post, editing = false }: { siteId: number; 
             <div key={idx}>
               <p className="font-medium text-gray-700 dark:text-gray-300">{f.question}</p>
               <p className="text-gray-500 dark:text-gray-400">{f.answer}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {trustedSources.length > 0 && (
+        <div className="space-y-2 rounded-md border border-gray-200 bg-white p-2 text-theme-xs dark:border-gray-800 dark:bg-gray-900">
+          <p className="mb-1 font-medium text-gray-700 dark:text-gray-300">
+            Trusted sources researched — real, web-search-verified, not from the model's memory. A citation link
+            was added directly in the article above wherever one matched closely enough; this is the full list
+            researched, including any that found no close match.
+          </p>
+          {trustedSources.map((s, idx) => (
+            <div key={idx} className="border-t border-gray-100 pt-2 first:border-0 first:pt-0 dark:border-gray-800">
+              <a href={s.url} target="_blank" rel="noreferrer" className="font-medium text-brand-600 hover:underline dark:text-brand-400">
+                {s.title}
+              </a>
+              {s.quoted_text && <p className="mt-0.5 text-gray-500 dark:text-gray-400">"{s.quoted_text}"</p>}
             </div>
           ))}
         </div>
@@ -5845,6 +5949,9 @@ function BlogTab({ siteId }: { siteId: number }) {
   const [primaryKeyword, setPrimaryKeyword] = useState("");
   const [secondaryKeywords, setSecondaryKeywords] = useState("");
   const [instructions, setInstructions] = useState("");
+  // User instruction — a real AI-generated featured image automatically, right after the article.
+  // Default on, matching bulk/calendar generation's own default.
+  const [generateImage, setGenerateImage] = useState(true);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [seoToolsId, setSeoToolsId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -5872,7 +5979,19 @@ function BlogTab({ siteId }: { siteId: number }) {
   const followupStages = Object.fromEntries(followups.map((f) => [f.post_id, f.stage]));
   const followupSignature = followups.map((f) => `${f.post_id}:${f.stage}`).join("|");
   const prevFollowupCount = useRef(0);
+  // User instruction — a toast when the automatically-generated featured image lands, same pattern
+  // as every other "X ready" completion toast in this app. "Generating the image" is the pipeline's
+  // last stage (_run_blog_followup_job), so a post that was on that exact stage and has now dropped
+  // out of the followups list entirely just finished it.
+  const prevImageStages = useRef<Record<number, string>>({});
   useEffect(() => {
+    for (const [postIdStr, stage] of Object.entries(prevImageStages.current)) {
+      const postId = Number(postIdStr);
+      if (stage === "Generating the image" && !(postId in followupStages)) {
+        toast.success("Content ready — featured image generated.");
+      }
+    }
+    prevImageStages.current = followupStages;
     // refresh the list whenever a step finishes (the stage changes) and when the last one completes
     if (followups.length > 0 || prevFollowupCount.current > 0) {
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
@@ -5947,6 +6066,7 @@ function BlogTab({ siteId }: { siteId: number }) {
         primary_keyword: primaryKeyword.trim() || undefined,
         secondary_keywords: splitCsv(secondaryKeywords),
         instructions: instructions.trim() || undefined,
+        generate_image: generateImage,
       }),
     onSuccess: () => {
       toast.success("Blog post drafted.");
@@ -6060,10 +6180,20 @@ function BlogTab({ siteId }: { siteId: number }) {
     onMutate: (id) => setPublishing((prev) => ({ ...prev, [id]: Date.now() })),
     onSettled: (_data, _err, id) => setPublishing((prev) => without(prev, id)),
     onSuccess: (result) => {
-      if (result.status === "published") {
-        toast.success('Created as a draft in your CMS — click "Go Live" when you\'re ready to publish it for real.');
+      // Re-clicking Publish/Sync on an already-published/live post now
+      // updates the existing CMS post instead of creating a duplicate
+      // (see _publish_blog_post_steps) — status stays "published"/"live"
+      // either way, so success/failure has to be read from `error`
+      // (cleared on success, set on failure) rather than assuming a
+      // status change happened.
+      if (result.error) {
+        toast.error(result.error);
+      } else if (result.status === "live") {
+        toast.success("Synced the latest title, content, FAQs, and image to your live site.");
+      } else if (result.status === "published") {
+        toast.success('Synced to your CMS draft — click "Go Live" when you\'re ready to publish it for real.');
       } else {
-        toast.error(result.error || "Publishing to the CMS failed.");
+        toast.error("Publishing to the CMS failed.");
       }
       queryClient.invalidateQueries({ queryKey: ["seo", "blog", siteId] });
     },
@@ -6474,6 +6604,17 @@ function BlogTab({ siteId }: { siteId: number }) {
                 not instead of them.
               </p>
             </div>
+            <div className="sm:col-span-2">
+              <label className="flex items-center gap-2 text-theme-xs text-gray-500 dark:text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={generateImage}
+                  onChange={(e) => setGenerateImage(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                Generate a featured image automatically
+              </label>
+            </div>
           </div>
           <Button
             className="mt-4"
@@ -6487,8 +6628,9 @@ function BlogTab({ siteId }: { siteId: number }) {
             <>
               <ProgressBar className="mt-3 max-w-sm" />
               <p className="mt-2 text-theme-xs text-gray-400">
-                Writing the article (about 700-800 words) usually takes a few minutes. The draft appears as soon as it is
-                written; meta tags, FAQs, internal links and the grammar check are then prepared in the background.
+                Writing the article (about 1000-1200 words) usually takes a few minutes. The draft appears as soon as it is
+                written; meta tags, FAQs, internal links, the grammar check{generateImage ? ", and a featured image" : ""} are
+                then prepared in the background.
               </p>
             </>
           )}
@@ -6832,12 +6974,10 @@ function BlogTab({ siteId }: { siteId: number }) {
                         <Sparkles className="h-3.5 w-3.5" />
                         SEO Tools
                       </Button>
-                      {(post.status === "draft" || post.status === "approved" || post.status === "failed") && (
-                        <Button size="sm" variant="outline" onClick={() => startEditing(post)} disabled={post.id in publishing}>
-                          <Pencil className="h-3.5 w-3.5" />
-                          Edit
-                        </Button>
-                      )}
+                      <Button size="sm" variant="outline" onClick={() => startEditing(post)} disabled={post.id in publishing}>
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit
+                      </Button>
                       {post.status === "draft" && (
                         <>
                           <Button size="sm" variant="outline" onClick={() => approveMutation.mutate(post.id)}>
@@ -6866,6 +7006,17 @@ function BlogTab({ siteId }: { siteId: number }) {
                           {post.id in goingLive ? "Going live…" : post.error ? "Retry Go Live" : "Go Live"}
                         </Button>
                       )}
+                      {(post.status === "published" || post.status === "live") && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => publishMutation.mutate(post.id)}
+                          disabled={post.id in publishing}
+                        >
+                          {post.id in publishing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                          {post.id in publishing ? "Syncing…" : "Sync to site"}
+                        </Button>
+                      )}
                     </div>
                     {post.id in followupStages && (
                       <div className="mt-3 rounded-lg border border-brand-200 bg-brand-50/40 p-3 dark:border-brand-500/30 dark:bg-brand-500/5" role="status" aria-live="polite">
@@ -6875,7 +7026,7 @@ function BlogTab({ siteId }: { siteId: number }) {
                         </p>
                         <ProgressBar />
                         <p className="mt-2 text-theme-xs text-gray-500 dark:text-gray-400">
-                          You can read and edit the draft now. Meta tags, FAQs, internal links and the grammar check fill in automatically. Run a plagiarism/AI-content check manually with Check now whenever you're ready.
+                          You can read and edit the draft now. Meta tags, FAQs, internal links, the grammar check, and real trusted-source citations fill in automatically. Run a plagiarism/AI-content check manually with Check now whenever you're ready.
                         </p>
                       </div>
                     )}

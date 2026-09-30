@@ -121,6 +121,7 @@ class CmsClient(ABC):
         slug: Optional[str] = None,
         tags: Optional[List[str]] = None,
         categories: Optional[List[str]] = None,
+        featured_media: Optional[str] = None,
     ) -> CmsResult:
         """Updates only the fields actually passed (None = leave
         untouched). meta is a generic passthrough to whatever custom-
@@ -142,8 +143,11 @@ class CmsClient(ABC):
         term IDs — WordPress's own implementation resolves each name to
         an existing term or creates a new one (see WordPressClient's
         _resolve_or_create_terms); Webflow has no generic equivalent
-        taxonomy concept, so its implementation ignores them. Never
-        raises — failures come back as CmsResult(ok=False, detail=...)."""
+        taxonomy concept, so its implementation ignores them.
+        featured_media is a media library id from upload_media() below —
+        WordPress sets it as the post's actual Featured Image; Webflow
+        has no matching concept, so its implementation ignores it too.
+        Never raises — failures come back as CmsResult(ok=False, detail=...)."""
         raise NotImplementedError
 
     @abstractmethod
@@ -173,12 +177,25 @@ class CmsClient(ABC):
         slug: Optional[str] = None,
         tags: Optional[List[str]] = None,
         categories: Optional[List[str]] = None,
+        featured_media: Optional[str] = None,
     ) -> CmsResult:
         """Module 34 — creates a genuinely new post, always as a draft
         (never published outright): WordPress gets `status: "draft"`,
         Webflow gets `isDraft: true`. A human still has to hit Publish in
         the CMS itself — this method never puts a page live on its own.
         tags/categories are plain names (see update_post's docstring for
-        how WordPress resolves/creates them; ignored on Webflow). Never
-        raises — failures come back as CmsResult(ok=False, ...)."""
+        how WordPress resolves/creates them; ignored on Webflow).
+        featured_media: see update_post's docstring. Never raises —
+        failures come back as CmsResult(ok=False, ...)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def upload_media(self, image_bytes: bytes, filename: str, *, mime_type: str = "image/webp") -> Optional[str]:
+        """Uploads binary image bytes to the CMS's own media library,
+        returning its id (as a string) for use as create_post/
+        update_post's featured_media — or None on failure, not
+        configured, or not supported by this CMS (Webflow: its assets
+        API needs a different upload flow this interface doesn't cover
+        yet, so it returns None rather than guess at an unverified
+        shape). Never raises."""
         raise NotImplementedError

@@ -313,7 +313,11 @@ permission problem, the message names the Google account to add to Search Consol
 Create, review and publish posts for LinkedIn, X (Twitter), Instagram, Facebook and Pinterest.
 
 - **Generate social content** — enter a page title and excerpt, choose platforms, and the AI drafts a post for each.
-  You can also **bulk-generate** from several topics or create a **30-day content calendar**.
+  You can also **bulk-generate** from several topics or create a **30-day content calendar**. A **"Generate an
+  image automatically"** checkbox (on by default) makes a real AI image for the post right after the text, in the
+  background — no extra click needed. It's automatically disabled if you've already typed an Image URL, so a
+  manually-supplied image is never overwritten; a small "Generating the image" badge shows on the post card while
+  it works, and a **"Content ready"** notification appears once it lands.
 - **Posts** lists every post. Use **Add post** to write one yourself.
 - On any post that is not yet published you can **Edit** (text, platform, source link, image link), **Delete**,
   **Generate image** (AI) or **Upload image**, **Approve** or **Reject**, **Schedule** a date and time, and
@@ -374,10 +378,13 @@ similarity, so two posts on the same subject with differently-worded keywords wo
 text for anything the topic and keyword don't cover: audience, tone, an analogy to include, things to avoid
 (e.g. "write for a complete beginner, include a real-world analogy, don't mention pricing or specific
 providers"). It's followed on top of WorkPulse's standing SEO / E-E-A-T / AEO / GEO writing rules, not instead
-of them. WorkPulse writes the article first (about 700–800 words, usually a few minutes) and shows the draft as
-soon as it is ready. The meta title and description, keyword density, five FAQs, internal links and the grammar
-check are then prepared in the background — a banner on the post shows what it is working on, and you can read
-and edit meanwhile.
+of them. A **"Generate a featured image automatically"** checkbox (on by default) controls whether a real
+AI image is made for the post too — untick it if you'd rather add one yourself later. WorkPulse writes the
+article first (about 1000–1200 words, which can take a few minutes) and shows the draft as soon as it is ready. The meta
+title and description, keyword density, five FAQs, internal links, the grammar check, real trusted-source
+citations, and — if the checkbox was on — the featured image are then prepared in the background: a banner on
+the post shows what it is working on, you can read and edit meanwhile, and a **"Content ready"** notification
+appears once the image lands.
 
 Each draft shows badges for **structure issues** (missing H1, too short) and **grammar**. **Plagiarism** and
 **AI-content score** are a real, paid check against the whole web via Quetext — press **Check now** (or
@@ -391,6 +398,12 @@ A draft moves through: **Draft → Approved → Published (as a CMS draft) → L
 - **Edit** opens the editor: headings, bold, lists, links, tables, images and more. The **copy** button at the right
   of the toolbar copies the whole article (formatting included) to paste elsewhere.
 - **SEO Tools** — meta title/description, slug, tags, categories, keyword density, internal links, image.
+- **Trusted source citations** happen automatically on every new post — real web-search-verified sources (not
+  the model's memory) are found and small citation links are added directly inside the article, right after the
+  sentence each one backs (e.g. a claim about card authentication linking to Visa's or EMVCo's own page). You'll
+  see them as you would any other link when you Preview, View content, or Edit the post. For a post generated
+  before this existed, or after you've edited the article's text, press **Refresh trusted sources** in SEO Tools
+  to re-run it.
 - **Approve**, then **Publish**. Publishing creates a **draft in your CMS** — it does not make the page public. It
   adds a featured image (generated if none, using real AI image generation so it reflects the actual post
   content rather than a generic stock-style picture) **centred after the first paragraph**, and related-reading

@@ -1381,6 +1381,7 @@ export const bulkGenerateSocialPosts = (payload: {
   image_url?: string;
   facebook_account_id?: number | null;
   linkedin_account_id?: number | null;
+  generate_image?: boolean;
 }) => api.post<SocialPost[]>("/api/seo/social/bulk-generate", payload, { timeout: 0 }).then((r) => r.data);
 
 export const generateSocialCalendar = (payload: {
@@ -1393,6 +1394,7 @@ export const generateSocialCalendar = (payload: {
   image_url?: string;
   facebook_account_id?: number | null;
   linkedin_account_id?: number | null;
+  generate_image?: boolean;
 }) => api.post<SocialPost[]>("/api/seo/social/generate-calendar", payload, { timeout: 0 }).then((r) => r.data);
 
 export interface SocialExportResult {

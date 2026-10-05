@@ -3032,6 +3032,7 @@ def bulk_generate_social_posts_route(payload: SocialBulkGenerateRequest, db: Ses
         raise HTTPException(status_code=404, detail=f"No SEO site {payload.site_id}")
 
     created_ids = []
+    image_jobs = []
     for topic in payload.topics:
         topic = topic.strip()
         if not topic:
@@ -3050,10 +3051,13 @@ def bulk_generate_social_posts_route(payload: SocialBulkGenerateRequest, db: Ses
                 linkedin_account_id=payload.linkedin_account_id if platform == "linkedin" else None,
             )
             created_ids.append(post_id)
+            if payload.generate_image and not payload.image_url:
+                image_jobs.append({"post_id": post_id, "site_id": payload.site_id, "platform": platform, "content": draft.content})
 
     if not created_ids:
         raise HTTPException(status_code=502, detail="Social content generation failed for every topic/platform combination")
 
+    _start_social_image_jobs(image_jobs)
     db.expire_all()
     return db.query(SeoSocialPost).filter(SeoSocialPost.id.in_(created_ids)).all()
 
@@ -3082,6 +3086,7 @@ def generate_social_calendar_route(payload: SocialCalendarGenerateRequest, db: S
         raise HTTPException(status_code=400, detail="post_time must be in HH:MM format")
 
     created_ids = []
+    image_jobs = []
     for day_offset in range(payload.days):
         day = payload.start_date + timedelta(days=day_offset)
         topic = topics[day_offset % len(topics)]
@@ -3102,10 +3107,13 @@ def generate_social_calendar_route(payload: SocialCalendarGenerateRequest, db: S
             )
             database.set_social_post_schedule(post_id, scheduled_for)
             created_ids.append(post_id)
+            if payload.generate_image and not payload.image_url:
+                image_jobs.append({"post_id": post_id, "site_id": payload.site_id, "platform": platform, "content": draft.content})
 
     if not created_ids:
         raise HTTPException(status_code=502, detail="Social content generation failed for every day/platform combination")
 
+    _start_social_image_jobs(image_jobs)
     db.expire_all()
     return db.query(SeoSocialPost).filter(SeoSocialPost.id.in_(created_ids)).all()
 

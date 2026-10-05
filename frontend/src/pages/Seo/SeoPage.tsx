@@ -4060,6 +4060,8 @@ function SocialTab({ siteId }: { siteId: number }) {
   // Bulk topic-based generation — reuses the same platform/image/account
   // selection as the single-topic generator above, just with a list of
   // topics instead of one page_title/content_excerpt pair.
+  const [bulkGenerateImage, setBulkGenerateImage] = useState(true);
+  const [calendarGenerateImage, setCalendarGenerateImage] = useState(true);
   const [bulkTopics, setBulkTopics] = useState("");
   const bulkGenerateMutation = useMutation({
     mutationKey: ["seo", "content-generate", "social", "bulk", siteId],
@@ -4071,6 +4073,7 @@ function SocialTab({ siteId }: { siteId: number }) {
         image_url: imageUrl.trim() || undefined,
         facebook_account_id: facebookAccountId === "" ? undefined : facebookAccountId,
         linkedin_account_id: linkedinAccountId === "" ? undefined : linkedinAccountId,
+        generate_image: bulkGenerateImage,
       }),
     onSuccess: (created) => {
       toast.success(`Generated ${created.length} post(s) from the given topics.`);
@@ -4108,6 +4111,7 @@ function SocialTab({ siteId }: { siteId: number }) {
         start_date: calendarStartDate,
         days: calendarDays,
         post_time: calendarPostTime,
+        generate_image: calendarGenerateImage,
       }),
     onSuccess: (created) => {
       toast.success(`Generated a ${calendarDays}-day calendar: ${created.length} post(s), scheduled and awaiting review.`);
@@ -4650,6 +4654,15 @@ function SocialTab({ siteId }: { siteId: number }) {
               placeholder={"Why local AI removes per-token cost\nHow agentic automation differs from a chatbot\n..."}
               className="w-full rounded-lg border border-gray-300 bg-transparent p-3 text-theme-sm text-gray-800 shadow-theme-xs focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:focus:border-brand-800"
             />
+            <label className="mb-2 mt-3 flex items-center gap-2 text-theme-xs text-gray-500 dark:text-gray-400">
+              <input
+                type="checkbox"
+                checked={bulkGenerateImage}
+                onChange={(e) => setBulkGenerateImage(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              Generate an image automatically for each post
+            </label>
             <Button
               className="mt-3"
               variant="outline"
@@ -4736,6 +4749,15 @@ function SocialTab({ siteId }: { siteId: number }) {
               );
             })}
           </div>
+            <label className="mb-2 mt-3 flex items-center gap-2 text-theme-xs text-gray-500 dark:text-gray-400">
+              <input
+                type="checkbox"
+                checked={calendarGenerateImage}
+                onChange={(e) => setCalendarGenerateImage(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              Generate an image automatically for each day's post
+            </label>
           <Button
             className="mt-4"
             onClick={() => calendarMutation.mutate()}
@@ -6947,7 +6969,7 @@ function BlogTab({ siteId }: { siteId: number }) {
                       )}
                       {post.cms_post_link && (
                         <a
-                          href={post.cms_post_link}
+                          href={cmsPostHref(post)}
                           target="_blank"
                           rel="noreferrer"
                           className="text-theme-xs text-brand-600 underline dark:text-brand-400"
@@ -7256,6 +7278,17 @@ function BlogPreviewModal({ post, onClose }: { post: BlogPost; onClose: () => vo
       </div>
     </div>
   );
+}
+
+// A post that is not live yet is a WordPress draft. WordPress's own link for
+// a draft is the raw ?p=ID address, which shows "Page not found" to anyone
+// not logged in. For drafts, open the WordPress editor for that post instead.
+// Live posts keep their public link.
+function cmsPostHref(post: BlogPost): string {
+  const link = post.cms_post_link ?? "";
+  if (post.status === "live" || !post.cms_post_id || !link.includes("?p=")) return link;
+  const siteRoot = link.split("?")[0].replace(/\/+$/, "");
+  return `${siteRoot}/wp-admin/post.php?post=${encodeURIComponent(post.cms_post_id)}&action=edit`;
 }
 
 // The modal already shows the post title as its own heading, and publishing
@@ -10516,7 +10549,7 @@ function KeywordResearchCard() {
             placeholder="Seed keyword, e.g. seo automation"
             className="max-w-sm"
           />
-          <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country" className="max-w-20" />
+          <CountrySelect value={country} onChange={setCountry} className="w-56" />
           <Button size="sm" onClick={() => researchMutation.mutate()} disabled={researchMutation.isPending || !keyword.trim()}>
             {researchMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
             Research
@@ -10613,7 +10646,7 @@ function KeywordDifficultyCard() {
         </p>
         <div className="flex flex-wrap gap-2">
           <Input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="Keyword" className="max-w-sm" />
-          <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country" className="max-w-20" />
+          <CountrySelect value={country} onChange={setCountry} className="w-56" />
           <Button size="sm" onClick={() => checkMutation.mutate()} disabled={checkMutation.isPending || !keyword.trim()}>
             {checkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
             Check
@@ -10691,7 +10724,7 @@ function RapidApiKeywordCard({ siteId }: { siteId: number }) {
           sample of the provider's top keyword rows, not the full list.
         </p>
         <div className="flex flex-wrap gap-2">
-          <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country code" className="max-w-24" />
+          <CountrySelect value={country} onChange={setCountry} className="w-56" />
           <Button size="sm" onClick={() => checkMutation.mutate()} disabled={checkMutation.isPending}>
             {checkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
             Check
@@ -10970,7 +11003,7 @@ function KeywordInsightsCard() {
         </p>
         <div className="flex flex-wrap gap-2">
           <Input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="Keyword" className="max-w-xs" />
-          <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country code" className="max-w-24" />
+          <CountrySelect value={country} onChange={setCountry} className="w-56" />
           <Button size="sm" onClick={() => checkMutation.mutate()} disabled={checkMutation.isPending || !keyword.trim()}>
             {checkMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
             Check
@@ -11107,6 +11140,59 @@ function regionName(code: string): string {
   } catch {
     return code;
   }
+}
+
+// Full ISO 3166-1 country list for the keyword tools' country pickers; names come from the browser's own region names.
+const COUNTRY_OPTIONS: { code: string; name: string }[] = (() => {
+  const names = new Intl.DisplayNames(["en"], { type: "region" });
+  return "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW"
+    .split(" ")
+    .map((code) => ({ code: code.toLowerCase(), name: names.of(code) ?? code }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+})();
+
+function CountrySelect({ value, onChange, className }: { value: string; onChange: (code: string) => void; className?: string }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const selected = COUNTRY_OPTIONS.find((c) => c.code === value.toLowerCase());
+  const q = query.trim().toLowerCase();
+  const matches = COUNTRY_OPTIONS.filter((c) => !q || c.name.toLowerCase().includes(q) || c.code.includes(q));
+  return (
+    <div className={`relative ${className ?? ""}`}>
+      <input
+        value={open ? query : selected ? `${selected.name} (${selected.code.toUpperCase()})` : value}
+        onFocus={() => {
+          setOpen(true);
+          setQuery("");
+        }}
+        onBlur={() => setOpen(false)}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search country…"
+        className="h-11 w-full rounded-lg border border-gray-300 bg-transparent px-4 py-2.5 text-sm text-gray-800 shadow-theme-xs placeholder:text-gray-400 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/20 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:placeholder:text-white/30 dark:focus:border-brand-800"
+      />
+      {open && (
+        <ul className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-gray-200 bg-white py-1 shadow-theme-md dark:border-gray-700 dark:bg-gray-900">
+          {matches.length === 0 && <li className="px-3 py-2 text-theme-xs text-gray-400">No matching country</li>}
+          {matches.map((c) => (
+            <li key={c.code}>
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  onChange(c.code);
+                  setOpen(false);
+                }}
+                className="flex w-full items-center justify-between px-3 py-2 text-left text-theme-sm text-gray-800 hover:bg-gray-100 dark:text-white/90 dark:hover:bg-gray-800"
+              >
+                <span>{c.name}</span>
+                <span className="text-theme-xs text-gray-400">{c.code.toUpperCase()}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function formatCompactNumber(n: number | null | undefined): string {

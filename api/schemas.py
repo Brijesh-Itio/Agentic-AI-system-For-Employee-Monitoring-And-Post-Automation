@@ -1624,6 +1624,7 @@ class SocialBulkGenerateRequest(BaseModel):
     image_url: Optional[str] = None
     facebook_account_id: Optional[int] = None
     linkedin_account_id: Optional[int] = None
+    generate_image: bool = True
 
 
 class SocialCalendarGenerateRequest(BaseModel):
@@ -1641,6 +1642,7 @@ class SocialCalendarGenerateRequest(BaseModel):
     image_url: Optional[str] = None
     facebook_account_id: Optional[int] = None
     linkedin_account_id: Optional[int] = None
+    generate_image: bool = True
 
 
 class SocialExportRequest(BaseModel):

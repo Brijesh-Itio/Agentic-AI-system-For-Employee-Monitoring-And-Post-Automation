@@ -16,7 +16,7 @@ authoritative, always-current contract, open the interactive docs at **`http://l
 | Long operations | Some SEO calls run for minutes (blog publish, grammar check, roll-ups). Use client timeouts of several minutes, or the status-polling endpoints (e.g. `/api/seo/sitemap/status`) |
 | Secrets | Stored credentials are never returned; responses expose flags such as `cms_app_password_set` |
 
-## Contents (265 endpoints)
+## Contents (277 endpoints)
 
 - [Google sign-in (SSO)](#google-sign-in-sso) — 3
 - [Authentication](#authentication) — 5
@@ -38,7 +38,7 @@ authoritative, always-current contract, open the interactive docs at **`http://l
 - [Leads](#leads) — 6
 - [Notepad](#notepad) — 3
 - [URL redirects](#url-redirects) — 6
-- [SEO](#seo) — 163
+- [SEO](#seo) — 175
 - [Other](#other) — 1
 
 ## Google sign-in (SSO)
@@ -281,6 +281,7 @@ authoritative, always-current contract, open the interactive docs at **`http://l
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/seo/blog` | List Blog Posts Route |
+| `GET` | `/api/seo/blog/followups` | Posts of this site whose background extras (originality check, meta, FAQs, links, grammar, image, trusted sources) are still being prepared, with the current step. Empty when nothing is running. Polled by the dashboard every 3 seconds. |
 | `POST` | `/api/seo/blog/bulk-approve` | Bulk Approve Blog Posts Route |
 | `POST` | `/api/seo/blog/bulk-generate` | The same generation call /blog/generate makes, just looped over multiple pasted topics in one request. |
 | `POST` | `/api/seo/blog/bulk-publish` | One post's failure (CMS error, transient network issue) never stops the rest, same graceful-degrade-per-item convention as the social-post bulk-publish route. |
@@ -292,6 +293,7 @@ authoritative, always-current contract, open the interactive docs at **`http://l
 | `POST` | `/api/seo/blog/{post_id}/faqs/generate` | Generate Blog Post Faqs Route |
 | `POST` | `/api/seo/blog/{post_id}/go-live` | The explicit, separate 'actually make it public' action /blog/{post_id}/publish's own docstring says has always needed a human: /publish only ever created a CMS draft. |
 | `POST` | `/api/seo/blog/{post_id}/grammar-check` | Manual re-check — e.g. |
+| `POST` | `/api/seo/blog/{post_id}/grammar/apply` | One-click fixing for grammar suggestions. Rewrites the post text with each suggestion that can be located and changed safely; anything else is reported back with its reason and left alone. |
 | `POST` | `/api/seo/blog/{post_id}/image/generate` | Generate Blog Post Image Route |
 | `POST` | `/api/seo/blog/{post_id}/image/upload` | Upload Blog Post Image Route |
 | `POST` | `/api/seo/blog/{post_id}/interlinks/generate` | Generate Blog Post Interlinks Route |
@@ -302,6 +304,7 @@ authoritative, always-current contract, open the interactive docs at **`http://l
 | `POST` | `/api/seo/blog/{post_id}/reject` | Reject Blog Post Route |
 | `POST` | `/api/seo/blog/{post_id}/schedule` | Sets/clears when this post should auto-publish. |
 | `PATCH` | `/api/seo/blog/{post_id}/taxonomy` | Slug/tags/categories, set before Publish so publish_blog_post_route (below) can pass them through to the CMS at create_post time. |
+| `POST` | `/api/seo/blog/{post_id}/trusted-sources/generate` | Trusted URL Sources — manual re-run of the same pipeline the background followups job runs automatically on every new post. Finds real, checked sources via web search and places them as inline citation links in the article. Use for older posts, or to refresh citations after editing. |
 | `POST` | `/api/seo/interlinks/index` | Index Page Route |
 | `POST` | `/api/seo/interlinks/suggest` | Suggest Interlinks Route |
 
@@ -311,6 +314,8 @@ authoritative, always-current contract, open the interactive docs at **`http://l
 |---|---|---|
 | `POST` | `/api/seo/content/analyze` | Analyze Content Route |
 | `POST` | `/api/seo/content/faq` | Generate Faq Route |
+| `POST` | `/api/seo/content-gap/analyze` | Content Gap / Keyword Gap. Compares this site's keywords against one or more competitor sites and categorizes each keyword as Missing, Weak, Strong, Shared, Untapped or Unique. Only Missing and Untapped rows get LLM topic suggestions. |
+| `GET` | `/api/seo/quetext/status` | Whether the Quetext API key is configured. Does not call Quetext. |
 | `POST` | `/api/seo/content/quality-check` | General-purpose version of the same check the generation routes run automatically — lets any piece of content (e.g. |
 | `GET` | `/api/seo/og-tags` | List Og Tags Route |
 | `POST` | `/api/seo/og-tags/generate` | Generate Og Tags Route |
@@ -459,6 +464,9 @@ authoritative, always-current contract, open the interactive docs at **`http://l
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/seo/social` | List Social Posts Route |
+| `GET` | `/api/seo/social/followups` | Social posts of this site whose automatic image is still being generated, with the current step. Empty when nothing is running. |
+| `GET` | `/api/seo/social/linkedin-page-url` | The LinkedIn company page URL used for posting, from app settings (falls back to the configured default). |
+| `PUT` | `/api/seo/social/linkedin-page-url` | Save the LinkedIn company page URL to app settings. |
 | `POST` | `/api/seo/social` | Create a post by hand (the Create part of Social's CRUD) — the AI generator above is the other way in. |
 | `POST` | `/api/seo/social/bulk-approve` | Bulk Approve Social Posts Route |
 | `POST` | `/api/seo/social/bulk-delete` | Bulk Delete Social Posts Route |
@@ -484,6 +492,17 @@ authoritative, always-current contract, open the interactive docs at **`http://l
 | `GET` | `/api/seo/facebook-accounts` | List Facebook Accounts Route |
 | `POST` | `/api/seo/facebook-accounts` | Create Facebook Account Route |
 | `DELETE` | `/api/seo/facebook-accounts/{account_id}` | Delete Facebook Account Route |
+
+### Social — LinkedIn accounts
+
+Several LinkedIn accounts can be connected. Unlike Facebook, LinkedIn issues no reusable token, so an account is only ready to post after a successful login, which stores a Playwright session file per account.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/seo/linkedin-accounts` | List connected LinkedIn accounts. Passwords and session data are never returned. |
+| `POST` | `/api/seo/linkedin-accounts` | Create an account row. This alone does NOT make the account ready to post; run the login route next. |
+| `DELETE` | `/api/seo/linkedin-accounts/{account_id}` | Remove an account and its stored session. |
+| `POST` | `/api/seo/linkedin-accounts/{account_id}/login` | Runs a real Playwright login for this account and saves its session. Public and effectively irreversible once it runs, so only call it on purpose. |
 
 ### Meta rewrite queue
 

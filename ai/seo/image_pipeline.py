@@ -31,7 +31,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Optional
 
-from PIL import Image, ImageFilter
+from PIL import Image
 
 from ai.images.factory import get_provider as get_image_provider
 from automation.seo.server_access import client_for_site
@@ -130,10 +130,9 @@ def _crop_safe_composition_guidance(standard_size: Optional[tuple[int, int]]) ->
         return ""
     target_w, target_h = standard_size
     return (
-        f" Compose as a single wide landscape image (roughly {target_w}:{target_h}). Every element — "
-        "subject, text, icons, UI mockups — must be FULLY contained within the frame, with clear empty "
-        "margin on all four sides; nothing may be cropped, cut off, or bleed past any edge, especially "
-        "the top and bottom (those get cropped further for this format). If the scene involves multiple "
+        f" Compose as a single wide landscape image (roughly {target_w}:{target_h}). The image is "
+        "center-cropped to that ratio, so keep the main subject and any text or UI mockups inside the "
+        "central band of the frame, clear of the top and bottom edges. If the scene involves multiple "
         "panels, labels, or data points, keep the count small (2-4 at most) and each one large and simple "
         "enough to fit with room to spare — do not pack many small panels or dense rows of text edge-to-edge; "
         "a crowded layout is what causes elements to run off the canvas or overlap."
@@ -141,40 +140,28 @@ def _crop_safe_composition_guidance(standard_size: Optional[tuple[int, int]]) ->
 
 
 def _resize_to_standard(image_bytes: bytes, target_size: tuple[int, int]) -> bytes:
-    """Fits the whole source image inside target_size with no cropping —
-    scales it down (never up) so every pixel survives, then centers it on
-    a blurred, filled-to-cover copy of the same image so the letterbox
-    space reads as an intentional background rather than dead bars (the
-    same technique Instagram/Spotify use for non-matching aspect ratios).
+    """Fills target_size edge to edge: scales the source to cover the whole
+    frame, then center-crops the overflow. No bars, no blur — the image
+    looks like a full-bleed photo at the platform's standard size.
 
-    This used to center-crop to the target ratio instead, which reliably
-    threw away real content: no image provider here generates a native
-    ~1.91:1 image (see generate_and_publish_image's own comment), so that
-    crop always cut roughly the top+bottom 20% off, and _crop_safe_
-    composition_guidance's prompt-level "leave that margin empty" request
-    was confirmed live, twice, not to be reliably followed — a post title
-    and a process-flow step both still got cut mid-element despite it. A
-    prompt is advice the model can ignore; not cropping the image we
-    already have is a hard guarantee, so that's what this does now."""
+    Earlier this letterboxed the whole image onto a bar (to avoid cropping
+    text out), which left unfilled side bars on wide images. That was
+    reverted on user request. The composition guidance above asks the
+    model to keep the subject in the central band, since the crop
+    removes some of the top and bottom edges."""
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     target_w, target_h = target_size
     src_w, src_h = image.size
 
-    fit_scale = min(target_w / src_w, target_h / src_h)
-    fit_w, fit_h = max(1, round(src_w * fit_scale)), max(1, round(src_h * fit_scale))
-    fitted = image.resize((fit_w, fit_h), Image.LANCZOS)
-
     fill_scale = max(target_w / src_w, target_h / src_h)
     fill_w, fill_h = max(target_w, round(src_w * fill_scale)), max(target_h, round(src_h * fill_scale))
-    background = image.resize((fill_w, fill_h), Image.LANCZOS)
+    filled = image.resize((fill_w, fill_h), Image.LANCZOS)
+
     left = (fill_w - target_w) // 2
     top = (fill_h - target_h) // 2
-    background = background.crop((left, top, left + target_w, top + target_h))
-    background = background.filter(ImageFilter.GaussianBlur(radius=30))
-
-    background.paste(fitted, ((target_w - fit_w) // 2, (target_h - fit_h) // 2))
+    cropped = filled.crop((left, top, left + target_w, top + target_h))
     buffer = io.BytesIO()
-    background.save(buffer, format="PNG")
+    cropped.save(buffer, format="PNG")
     return buffer.getvalue()
 
 # Verified live against a real cPanel host this session: the FTP
@@ -285,7 +272,17 @@ def generate_and_publish_image(site, prompt: str, *, task: str = "seo_content") 
     provider = get_image_provider(task)
     standard_size = _standard_dimensions_for_task(task)
     request_width, request_height = standard_size or (1024, 1024)
-    full_prompt = prompt + _crop_safe_composition_guidance(standard_size)
+    # Text inside the image should be a few short, correctly spelled labels
+    # taken from the post itself (its key terms), not invented slogans.
+    # Image models make up slogans and brochure copy when a prompt leaves
+    # text open-ended, so the wording below is explicit about what is allowed.
+    full_prompt = (
+        prompt
+        + _crop_safe_composition_guidance(standard_size)
+        + " Include 2-4 short, correctly spelled labels that name the post's key terms "
+        "(for example the topic words in the prompt above). No slogans, taglines, lorem ipsum, "
+        "logos or brand names."
+    )
     result = provider.generate(full_prompt, width=request_width, height=request_height)
     if not result.ok:
         return ImagePublishResult(

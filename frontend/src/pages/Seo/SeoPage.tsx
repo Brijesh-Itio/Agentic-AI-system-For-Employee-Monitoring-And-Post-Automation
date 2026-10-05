@@ -3794,7 +3794,12 @@ function SocialTab({ siteId }: { siteId: number }) {
   // on, matching Blog's own default.
   const [generateImage, setGenerateImage] = useState(true);
 
-  const postsQuery = useQuery({ queryKey: ["seo", "social", siteId], queryFn: () => getSocialPosts(siteId) });
+  // Refetches while any post is scheduled, so a scheduled post flips to "posted" on screen without a page refresh.
+  const postsQuery = useQuery({
+    queryKey: ["seo", "social", siteId],
+    queryFn: () => getSocialPosts(siteId),
+    refetchInterval: (q) => (q.state.data?.some((p) => p.scheduled_for) ? 30_000 : false),
+  });
   const posts = postsQuery.data ?? [];
 
   // User instruction — new background image-generation job for social (mirrors the Blog tab's own
@@ -3808,6 +3813,7 @@ function SocialTab({ siteId }: { siteId: number }) {
   const socialFollowupStages = Object.fromEntries(socialFollowups.map((f) => [f.post_id, f.stage]));
   const socialFollowupSignature = socialFollowups.map((f) => `${f.post_id}:${f.stage}`).join("|");
   const prevSocialImageStages = useRef<Record<number, string>>({});
+  const prevSocialFollowupCount = useRef(0);
   useEffect(() => {
     for (const [postIdStr, stage] of Object.entries(prevSocialImageStages.current)) {
       const postId = Number(postIdStr);
@@ -3816,9 +3822,12 @@ function SocialTab({ siteId }: { siteId: number }) {
       }
     }
     prevSocialImageStages.current = socialFollowupStages;
-    if (socialFollowups.length > 0) {
+    // Refresh on every stage change AND when the last job finishes (the list empties) — otherwise the
+    // finished image only appeared after a manual page refresh.
+    if (socialFollowups.length > 0 || prevSocialFollowupCount.current > 0) {
       queryClient.invalidateQueries({ queryKey: ["seo", "social", siteId] });
     }
+    prevSocialFollowupCount.current = socialFollowups.length;
   }, [socialFollowupSignature]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Module 40 — multiple connected Facebook Pages. Global (not scoped to
@@ -5943,6 +5952,10 @@ function PostActionProgress({ startedAt, title, detail }: { startedAt: number; t
 }
 
 function BlogTab({ siteId }: { siteId: number }) {
+  // Calendar can be collapsed (body hidden, header kept) or closed (card
+  // replaced by a "Show" bar). Session-only UI state, not saved anywhere.
+  const [calendarCollapsed, setCalendarCollapsed] = useState(false);
+  const [calendarClosed, setCalendarClosed] = useState(false);
   const queryClient = useQueryClient();
   const toast = useToast();
   const [topic, setTopic] = useState("");
@@ -6754,13 +6767,48 @@ function BlogTab({ siteId }: { siteId: number }) {
         </CardContent>
       </Card>
 
-      {scheduledPosts.length > 0 && (
+      {scheduledPosts.length > 0 && calendarClosed && (
+        <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-white/[0.03]">
+          <span className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+            <CalendarIcon className="h-4 w-4 text-brand-500" />
+            Content Calendar ({scheduledPosts.length} scheduled)
+          </span>
+          <Button size="sm" variant="outline" onClick={() => setCalendarClosed(false)}>
+            Show calendar
+          </Button>
+        </div>
+      )}
+
+      {scheduledPosts.length > 0 && !calendarClosed && (
         <Card>
           <CardContent className="p-6">
-            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
-              <CalendarIcon className="h-4 w-4 text-brand-500" />
-              Content Calendar
-            </h2>
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h2 className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+                <CalendarIcon className="h-4 w-4 text-brand-500" />
+                Content Calendar
+              </h2>
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setCalendarCollapsed((v) => !v)}
+                  aria-expanded={!calendarCollapsed}
+                >
+                  {calendarCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+                  {calendarCollapsed ? "Expand" : "Collapse"}
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => setCalendarClosed(true)}
+                  className="rounded-full p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/10 dark:hover:text-gray-300"
+                  aria-label="Close calendar"
+                >
+                  <XCircle className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+            {!calendarCollapsed && (
+              <>
             <p className="mb-4 text-theme-xs text-gray-400">
               Every scheduled post, by date — yellow: draft, blue: approved, green: live, red: failed. Click a post to
               preview it; drag it to a new day to reschedule (keeps the same time of day).
@@ -6786,6 +6834,8 @@ function BlogTab({ siteId }: { siteId: number }) {
                 }}
               />
             </div>
+              </>
+            )}
           </CardContent>
         </Card>
       )}
@@ -7201,11 +7251,17 @@ function BlogPreviewModal({ post, onClose }: { post: BlogPost; onClose: () => vo
         {post.excerpt && <p className="mb-5 text-base text-gray-500 dark:text-gray-400">{post.excerpt}</p>}
         <div
           className="prose prose-sm max-w-none dark:prose-invert"
-          dangerouslySetInnerHTML={{ __html: withFeaturedImage(sanitizeBlogHtml(post.content), post.image_url) }}
+          dangerouslySetInnerHTML={{ __html: withFeaturedImage(stripBodyH1(sanitizeBlogHtml(post.content)), post.image_url) }}
         />
       </div>
     </div>
   );
+}
+
+// The modal already shows the post title as its own heading, and publishing
+// drops the body's H1 for the same reason (the CMS theme prints the title).
+function stripBodyH1(html: string): string {
+  return html.replace(/<h1\b[^>]*>[\s\S]*?<\/h1>\s*/gi, "");
 }
 
 // Mirrors what publishing does: the featured image sits centered right after

@@ -168,7 +168,7 @@ async def lifespan(app: FastAPI):
     seo_scheduler.add_job(
         _run_scheduled_social_posts,
         trigger="interval",
-        minutes=5,
+        minutes=1,
         id="scheduled_social_posts",
         replace_existing=True,
         misfire_grace_time=300,

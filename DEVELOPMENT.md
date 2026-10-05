@@ -256,7 +256,7 @@ commented list; this table groups them.
 | | `OLLAMA_TIMEOUT_SECONDS` | 120 — fast-model calls |
 | | `OLLAMA_GENERATE_TIMEOUT_SECONDS` | 600 — main-model calls |
 | SEO LLM | `SEO_LLM_PROVIDER_DEFAULT` | `ollama`; `claude` / `openai` need `CLAUDE_API_KEY` / `OPENAI_API_KEY` |
-| | `SEO_LLM_PROVIDER_BLOG_POST`, `SEO_LLM_PROVIDER_SOCIAL_LINKEDIN/_TWITTER/_INSTAGRAM/_FACEBOOK`, `SEO_LLM_PROVIDER_IMAGE_PROMPT`, `SEO_LLM_PROVIDER_GRAMMAR_CHECK`, `SEO_LLM_PROVIDER_CONTENT_GAP` | Per-task overrides (2026-09-29: all set to `openai` / GPT-6 Sol) — win over `SEO_LLM_PROVIDER_DEFAULT` for that one task only |
+| | `SEO_LLM_PROVIDER_BLOG_POST`, `SEO_LLM_PROVIDER_SOCIAL_LINKEDIN/_TWITTER/_INSTAGRAM/_FACEBOOK`, `SEO_LLM_PROVIDER_IMAGE_PROMPT`, `SEO_LLM_PROVIDER_GRAMMAR_CHECK`, `SEO_LLM_PROVIDER_CONTENT_GAP`, `SEO_LLM_PROVIDER_SOURCE_PLACEMENT` | Per-task overrides (2026-09-29: all set to `openai` / GPT-6 Sol; `SOURCE_PLACEMENT` was pinned to `openai` because the local `phi3:mini` placed zero citations) — win over `SEO_LLM_PROVIDER_DEFAULT` for that one task only |
 | Email | `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`, `REPORT_RECIPIENT_EMAIL` | Gmail App Password, not the account password |
 | SSO | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `API_PUBLIC_URL`, `FRONTEND_URL` | Blank = SSO off |
 | Google (SEO) | `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` | Path to the service-account key file |
@@ -267,7 +267,7 @@ commented list; this table groups them.
 | Images | `IMAGE_PROVIDER_DEFAULT` (`openai`, since 2026-09-29 — was `image_worker`), `OPENAI_IMAGE_MODEL` (blank = `gpt-image-2.5-sunburst`), `IMAGE_WORKER_URL/API_KEY`, `PEXELS_API_KEY`, `STABILITY_API_KEY`, `PUTER_AUTH_TOKEN`, `FASTSD_API_URL` | Real generated pixels via OpenAI's Images API, not the prompt-writing step `image_worker` does |
 | Social | `LINKEDIN_EMAIL/PASSWORD`, `FACEBOOK_*`, `INSTAGRAM_*` | The `.env` default account only — additional accounts are added in the UI (`seo_linkedin_accounts`/`seo_facebook_accounts`), each with its own stored session/token, not `.env` |
 | Notifications | `SLACK_WEBHOOK_URL` | Digest delivery |
-| Research | `BACKLINK_PROVIDER_DEFAULT` (`google_alerts`), `GOOGLE_ALERTS_RSS_URL`, `SEMRUSH_API_KEY`, `SEMRUSH_DATABASE`, `RAPIDAPI_*`, `AHREFS_API_KEY` | Ahrefs is a documented extension point, not wired |
+| Research | `BACKLINK_PROVIDER_DEFAULT` (`google_alerts`), `GOOGLE_ALERTS_RSS_URL`, `SEMRUSH_API_KEY`, `SEMRUSH_DATABASE`, `RAPIDAPI_SEMRUSH_MAGIC_KEY`, `RAPIDAPI_*`, `AHREFS_API_KEY` | Ahrefs is a documented extension point, not wired. `RAPIDAPI_SEMRUSH_MAGIC_KEY` is the key the competitor keyword tools read; the older `RAPIDAPI_SEMRUSH_KEY` is stale and must not be used |
 | Sheets | `SEO_SHEETS_SHARE_EMAIL` | |
 
 ### 6.2 Per-site configuration (stored in the database)

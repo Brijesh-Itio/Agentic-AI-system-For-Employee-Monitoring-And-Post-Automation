@@ -2935,10 +2935,11 @@ def set_social_post_quality(post_id: int, quality_report_json: str) -> bool:
 
 
 def mark_social_post_posted(post_id: int, external_post_id: Optional[str]) -> None:
+    # Local time, not CURRENT_TIMESTAMP (UTC) — scheduled_for is entered and compared in local time, so posted_at has to match it.
     with write_cursor() as cur:
         cur.execute(
-            "UPDATE seo_social_posts SET status = 'posted', external_post_id = ?, posted_at = CURRENT_TIMESTAMP, error = NULL WHERE id = ?",
-            (external_post_id, post_id),
+            "UPDATE seo_social_posts SET status = 'posted', external_post_id = ?, posted_at = ?, error = NULL WHERE id = ?",
+            (external_post_id, datetime.now().isoformat(sep=" ", timespec="seconds"), post_id),
         )
 
 

@@ -20,6 +20,7 @@ other ai/seo/* call (blog_content.py, social_content.py) — sharing the
 exact function across those two conventions isn't a clean fit.
 """
 import logging
+import re
 from typing import Optional
 
 from ai.llm.factory import get_provider
@@ -49,17 +50,38 @@ _INSTRUCTION = (
     "or symbolic/metaphorical imagery; if the content is abstract, pick a literal "
     "object plausibly related to it (e.g. a phone displaying a payment app for a "
     "'payment solutions' article) rather than trying to symbolise the idea itself.\n"
-    "- No text, letters, logos, or people's faces in the description.\n"
+    "- Include 2-4 short labels or key terms from the content itself (for example "
+    "'search intent', 'keywords', 'ranking'), written as they would appear on a screen or "
+    "a notebook. No slogans, taglines, logos, brand names, or people's faces.\n"
+    "- Prefer objects that show the topic itself: a screen with search results, "
+    "keyword lists, ranking bars, or a content calendar; a notebook with a checklist; "
+    "a desk setup with a laptop. Do NOT describe brochures, posters, banners, or "
+    "magazine-style layouts, and do not invent slogans or taglines for them.\n"
     "- Output ONLY the final image description, nothing else — no preamble, "
     "no quotes, no explanation of your reasoning.\n\n"
 )
+
+
+def _post_excerpt(content: str, title: Optional[str]) -> str:
+    """Plain text for the prompt, not raw HTML. Section headings come first:
+    they name the post's real subject, and the start of a generated post is
+    often a generic intro. Cutting the raw HTML at 1500 characters lost
+    them, and the tags took up part of the budget."""
+    source = content or title or ""
+    if "<" not in source:
+        return source[:1500]
+    headings = re.findall(r"<h[2-4][^>]*>(.*?)</h[2-4]>", source, flags=re.IGNORECASE | re.DOTALL)
+    heading_text = " | ".join(re.sub(r"<[^>]+>", "", h).strip() for h in headings if h.strip())
+    body_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", source)).strip()
+    combined = f"Section headings: {heading_text}\n\n{body_text}" if heading_text else body_text
+    return combined[:1500]
 
 
 def derive_image_prompt(content: str, *, title: Optional[str] = None, site_id: Optional[int] = None) -> Optional[str]:
     """Never raises — returns None on LLM failure, so callers fall back to
     their previous title/excerpt behaviour, matching this codebase's
     graceful-degrade convention throughout."""
-    excerpt = (content or title or "")[:1500]
+    excerpt = _post_excerpt(content, title)
     if not excerpt.strip():
         return None
 

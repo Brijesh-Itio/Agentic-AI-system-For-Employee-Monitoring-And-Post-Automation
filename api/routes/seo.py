@@ -217,7 +217,7 @@ from api.schemas import (
     TechnicalIssueReview,
     UrlInspectRequest,
 )
-from ai.seo.blog_content import generate_blog_post
+from ai.seo.blog_content import _strip_existing_h1, generate_blog_post
 from ai.seo.blog_meta_generator import generate_blog_meta_tags
 from ai.seo.content_quality import assess_humanization, check_plagiarism
 from ai.seo.content_gap import categorize_keyword_gap, suggest_broader_topics, suggest_topics_for_gap_rows
@@ -4215,32 +4215,6 @@ def _append_faq_section(content: str, faqs_json: Optional[str]) -> str:
     return f"{content}\n{faq_section}\n{schema_script}"
 
 
-def _upload_featured_media(client, image_url: str, title: str) -> Optional[str]:
-    """Best-effort: downloads the already-published image (uploaded via
-    SFTP by ai/seo/image_pipeline.py, or a manual upload — either way,
-    already a live URL by the time this runs) and re-uploads those same
-    bytes to the CMS's own media library, so it can be set as the post's
-    REAL Featured Image (WordPress's dedicated featured_media field) —
-    confirmed as a separate, previously never-connected mechanism from
-    _insert_featured_image's inline <img>, which stays for readers
-    scrolling the article itself; this covers WordPress's Featured
-    Image box, which was always empty before. Never raises — a failure
-    here degrades to "no featured image set", same graceful-degrade
-    convention as image generation itself, rather than blocking the
-    whole publish."""
-    import requests
-
-    try:
-        response = requests.get(image_url, timeout=30)
-        response.raise_for_status()
-        filename = image_url.split("/")[-1].split("?")[0] or "featured-image.webp"
-        content_type = response.headers.get("Content-Type") or "image/webp"
-        return client.upload_media(response.content, filename, mime_type=content_type)
-    except Exception:
-        logger.exception("Featured image upload to CMS failed for %r (post %r) — publishing without one", image_url, title)
-        return None
-
-
 def _schedule_sitemap_update(site_id: int, url: Optional[str]) -> None:
     """A post just went live — fold its URL into the site's sitemap (debounced,
     on a background thread). Must never affect the go-live result itself."""
@@ -4386,9 +4360,9 @@ def _publish_blog_post_steps(post_id: int, db: Session, go_live: bool = False) -
     on faqs_json) were never read here at all, so a post with real,
     stored FAQs could still publish with none of them on the page —
     _append_faq_section fixes that. The featured image was only ever
-    spliced inline into the HTML body (_insert_featured_image); nothing
-    ever populated WordPress's actual Featured Image field
-    (featured_media) — _upload_featured_media fixes that, best-effort."""
+    spliced inline into the HTML body (_insert_featured_image). The
+    CMS's own Featured Image field is deliberately NOT set: it duplicated
+    the inline image on the live page."""
     row = db.query(SeoBlogPost).filter(SeoBlogPost.id == post_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No blog post {post_id}")
@@ -4418,14 +4392,19 @@ def _publish_blog_post_steps(post_id: int, db: Session, go_live: bool = False) -
         except Exception:
             logger.exception("Auto image generation failed for post %s — publishing without one", post_id)
 
-    content = row.content
+    # The CMS theme already prints the post title as the page's own H1, so
+    # the body's copy of the title is removed here — otherwise it shows up
+    # two or three times on the live page.
+    content = _strip_existing_h1(row.content)
+    # One image only: the inline figure below. Setting WordPress's separate
+    # Featured Image as well made the same picture appear twice on the page.
     if image_url:
         content = _insert_featured_image(content, image_url, row.title)
     content = _inject_interlinks(row.site_id, post_id, row.title, content, stored_links_json=row.internal_links_json)
     content = _append_faq_section(content, row.faqs_json)
 
     client = _cms_client_for(site)
-    featured_media = _upload_featured_media(client, image_url, row.title) if image_url else None
+    featured_media = None
     tags = json.loads(row.tags) if row.tags else None
     categories = json.loads(row.categories) if row.categories else None
 

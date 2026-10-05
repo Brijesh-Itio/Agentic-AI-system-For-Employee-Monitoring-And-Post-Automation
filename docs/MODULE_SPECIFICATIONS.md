@@ -1390,6 +1390,58 @@ Two real bugs were caught and fixed by this live testing, not by inspection:
 
 ---
 
+### SEO enhancements after module 32 (added features, not in the original blueprint)
+
+These features were added on top of modules 25–32 by direct user request. Module text above describes each module as it was built, so where it names a default that has since changed (for example the image provider default, now `openai`, and the blog word target, now 1000–1200), the list below is the current behaviour.
+
+**Trusted URL Sources and inline citations** (`ai/seo/source_research.py`, `api/routes/seo.py`, `frontend/src/pages/Seo/SeoPage.tsx`)
+
+Every new blog post runs a background pass that finds real, checked web sources for the topic and places each one as an inline citation link inside the article body, not in a separate panel. Research uses the OpenAI Responses API with its web search tool, so the URLs come from real `url_citation` annotations rather than from model memory. `match_sources_to_paragraphs` runs with two attempts, and `insert_citation_links` styles each link inline. The article HTML is sanitised by DOMPurify on the dashboard, and `ALLOWED_ATTR` includes `href`, `rel`, `target`, `class`, `style` and `title` so the links and their styling survive. Manual re-run: `POST /api/seo/blog/{post_id}/trusted-sources/generate`. Stored in `seo_blog_posts.trusted_sources_json`.
+
+**Content gap and keyword gap** (`ai/seo/content_gap.py`, `POST /api/seo/content-gap/analyze`)
+
+Compares this site's keywords against one or more competitor keyword sets. `categorize_keyword_gap` sorts each keyword into Missing, Weak, Strong, Shared, Untapped or Unique. Only Missing and Untapped rows get LLM topic suggestions (`suggest_topics_for_gap_rows`), which keeps the LLM cost down. `suggest_broader_topics` produces topic ideas for the whole gap. The earlier version compared this site with its own titles, which was rejected; the current version is a real cross-site comparison.
+
+**Keyword cannibalization** (`api/routes/seo.py`, frontend)
+
+Flags two or more pages of the same site that compete for the same primary keyword, so the owner can merge or retarget them.
+
+**Keyword density** (`ai/seo/content_structure.py`, `ContentStructureChecker` in the dashboard)
+
+`analyze_structure` reports keyword density for the post's primary keyword next to the existing structure checks.
+
+**Competitor keyword tool via RapidAPI** (`automation/seo/rapidapi_keyword_client.py`, `POST /api/seo/keywords/rapidapi-check`)
+
+Uses the Semrush-backed RapidAPI wrapper (`semrush-seo3`) for competitor keyword data. It reads `RAPIDAPI_SEMRUSH_MAGIC_KEY`. The older `RAPIDAPI_SEMRUSH_KEY` is stale and must not be used. `fetch_keyword_analysis` returns `DomainKeywordAnalysis` rows. Pagination was checked and does not work on this endpoint, so the client does not page.
+
+**Automatic images for blog and social** (`api/routes/seo.py`, `ai/seo/image_pipeline.py`, `ai/images/providers/openai_image_provider.py`)
+
+Blog generation and social generation each take a `generate_image` flag (default on in the UI). When it is set, the content is saved first, then a background job runs and the dashboard shows a toast. Blog stages: Writing meta tags, Writing FAQs, Suggesting internal links, Checking grammar, Finding trusted sources, Generating the image. Social stage: Generating the image. Progress is read from `GET /api/seo/blog/followups` and `GET /api/seo/social/followups`, which the dashboard polls every 3 seconds. Image generation uses the OpenAI Images API (default model `gpt-image-2.5-sunburst`).
+
+Every generated image goes through `_resize_to_standard`. It letterboxes onto a blurred fill rather than cropping, then converts to WebP and uploads through Server Access (SFTP/FTP). Target sizes are in `_STANDARD_IMAGE_DIMENSIONS`, which now covers Twitter/X, Instagram and Pinterest as well as the earlier platforms. Verified on a site with Server Access configured. A site without Server Access fails the same way the manual image route does, which is a configuration issue, not a bug in this pipeline.
+
+**Blog length** (`ai/seo/blog_content.py`, `ai/seo/content_structure.py`, `api/schemas.py`)
+
+Target length is 1000–1200 words for generated blog posts (`min_words=1000`, `max_words=1200`), including the bulk and calendar generators. The user asked to test this manually, so the range has not been run through a live generation here.
+
+**LinkedIn multi-account** (`automation/linkedin/poster.py`, `api/routes/seo.py`, `automation/seo/social_poster.py`, `ai/seo/social_scheduler.py`)
+
+Several LinkedIn accounts can be connected, the same way Facebook Pages can. Each account has its own table row (`seo_linkedin_accounts`) and its own Playwright session file at `agent/data/linkedin_sessions/{id}.json`. Login is `POST /api/seo/linkedin-accounts/{account_id}/login`, which is public and effectively irreversible once it runs. A post can only be sent from an account that has a stored session; the scheduler refuses otherwise. Rate limiting is per account. Earlier code applied one account's posting limit to all accounts; that was a real bug, and it is fixed. `post_log.linkedin_account_id` records the account used.
+
+**Standard social image sizes** (`ai/seo/image_pipeline.py`)
+
+`_STANDARD_IMAGE_DIMENSIONS` fixes the output size for each platform, so an image is ready to post without manual cropping.
+
+**Quetext plagiarism and AI-detection check** (manual only; `GET /api/seo/quetext/status`)
+
+Quetext DeepSearch is used for the originality and AI-detection checks. It is billed from a separate prepaid API wallet and is only run when a human asks for it, never automatically. `GET /api/seo/quetext/status` reports whether the key is configured and does not call Quetext.
+
+**LLM provider routing** (`ai/llm/factory.py`, `ai/llm/providers/openai_provider.py`)
+
+Each SEO task can be routed to its own provider with an environment variable `SEO_LLM_PROVIDER_<TASK>`. The default is `SEO_LLM_PROVIDER_DEFAULT`, which is `ollama`. The OpenAI provider uses Chat Completions with `max_completion_tokens`, because the models in use reject `max_tokens`. When a reasoning model uses up its budget and returns empty output, the provider retries once with a larger budget. Source placement and grammar checks are routed to `openai`, because the local `phi3:mini` model returned zero citation matches in testing.
+
+---
+
 ## 6. Database Schema Reference
 
 ```sql
@@ -1425,6 +1477,12 @@ CREATE TABLE leads (id, name, company, role, interest, email, notes, last_contac
 CREATE TABLE campaign_log (id, date, time, name, email, company, subject, status, error, follow_up_sent);
 CREATE TABLE post_log (id, date, time, topic, content, post_id, platform, status, likes, comments, error);
 CREATE TABLE jobs (id, command, status, progress, logs_json, result, created_at, completed_at);
+
+-- SEO additions (agent/database.py owns the SEO schema; new columns are added by _ensure_extra_columns)
+CREATE TABLE seo_linkedin_accounts (id, label, email, session_path, created_at, ...);  -- password is never stored here
+ALTER TABLE seo_blog_posts ADD COLUMN trusted_sources_json;     -- inline citation sources for the post
+ALTER TABLE seo_social_posts ADD COLUMN linkedin_account_id;    -- which LinkedIn account posts this draft
+ALTER TABLE post_log ADD COLUMN linkedin_account_id;            -- which LinkedIn account a post went out from
 ```
 
 ---
@@ -1462,6 +1520,14 @@ POST_TOPICS = []
 DAILY_POST_LIMIT = 3
 MIN_POST_INTERVAL_MINUTES = 30
 DAILY_EMAIL_LIMIT = 500
+
+# .env (read by agent/config.py via load_dotenv; secrets are never committed)
+# OPENAI_API_KEY                      required for openai-routed tasks, source research and images
+# SEO_LLM_PROVIDER_DEFAULT            ollama (default)
+# SEO_LLM_PROVIDER_<TASK>             per-task override, e.g. SOURCE_PLACEMENT=openai, GRAMMAR_CHECK=openai
+# IMAGE_PROVIDER_DEFAULT              openai (default)
+# RAPIDAPI_SEMRUSH_MAGIC_KEY          RapidAPI key for the Semrush-backed keyword tools
+# QUETEXT_API_KEY                     Quetext DeepSearch (manual checks only)
 ```
 
 ---
@@ -1562,6 +1628,7 @@ Update this section as each module is completed.
 | MODULE 26 — SEO Agentic AI: CMS & Data Pulls | ✅ Done | WordPress + Webflow CMS adapters behind one generic interface, PageSpeed Insights (CWV metrics), and GSC + GA4 via a from-scratch Google service-account OAuth2 flow (signed with the already-installed `python-jose[cryptography]`, no new Google SDK dependency). **Both GSC and GA4 now verified live** against a real Google Cloud project, a real service account, and a real deployed test site — real OAuth2 tokens obtained, real API calls succeeded end-to-end through the actual routes. Both hit and resolved a real `403` (an API not yet enabled on the Cloud project — two separate APIs, two separate enable steps) — see module 26's test note for the full story. WordPress/Webflow still only verified via mocked HTTP — no live site running either CMS exists yet to test against |
 | MODULE 27 — SEO Agentic AI: Content & On-Page | ✅ Done | Generic image provider layer (FastSD CPU default, Pexels fallback, Stability AI paid — verified live, real FastSD image generated), WebP conversion via Pillow, LLM-written OG tags (real bug caught and fixed: mid-word truncation), ChromaDB-based semantic interlinking (verified live — real embeddings correctly ranked related pages over an unrelated one), and content structure/word-count checks + GSC-seeded FAQ generation. Two honest deviations from the original blueprint, documented in the module's Purpose note: no competitor-word-count scraping (module 20 already proved Google blocks it) and FAQs seeded by real GSC queries instead of scraped People-Also-Ask data. Technical SEO, reporting, social, and backlink pipelines remain for future modules |
 | MODULE 28 — SEO Agentic AI: Technical SEO | ✅ Done | Same-origin site crawler (new dependency: `beautifulsoup4`, the blueprint's own recommended tool) + originally 6, now 10 deterministic issue detectors (broken links, missing canonical, duplicate titles, missing meta description, missing schema, orphaned pages, plus module 32's redirect chains, crawl depth, hreflang errors, robots.txt conflicts — the blueprint's full named list) feeding a human approve/reject queue whose upsert deliberately never touches an already-reviewed issue's status. A real design bug (orphan detection comparing crawled pages against each other, which can structurally never find anything) was caught and fixed before shipping — verified live against a crafted local test site with every detector firing correctly and zero false positives. Applying an approved fix to a live site is intentionally out of scope, matching the blueprint's own "prevents catastrophic misapplication" reasoning. Reporting/alerts, social, and backlink pipelines remain for future modules |
+| SEO enhancements after module 32 (added features) | ✅ Done | Trusted URL sources with inline citations, content/keyword gap, keyword cannibalization and density, RapidAPI competitor keywords, automatic blog and social images with progress toasts, LinkedIn multi-account, standard social image sizes, 1000–1200 word blog target, Quetext (manual), per-task LLM routing. Live checks were run for citations, the RapidAPI tool and the social image pipeline; the 1000–1200 word range and the LinkedIn login path were left for manual testing. See the section above |
 | Module 17 extension — SEO Command Mode + SSRF fix (added feature) | ✅ Done | New `seo_audit` Command Mode action (e.g. "audit the site," "run seo"), gated to manager/admin, resolves the target site by name or by being the only one registered, runs module 28's full crawl+detect pipeline capped at 30 pages for an interactive command. Closed a real pre-existing SSRF gap along the way: `seo_sites.base_url` had no validation and fed straight into the crawler — any authenticated user could have pointed it at an internal service or the cloud metadata endpoint. Now rejected at both site-creation and crawl-start time. Verified live: employee gets a real 403, malicious/internal URLs get a real 400, a real named-site audit via free-text command works end-to-end |
 | MODULE 29 — SEO Agentic AI: Daily Digest | ✅ Done | LLM-written narrative digest (verified live, real LLM call correctly referenced real seeded numbers) and Slack webhook delivery. (A `/seo` frontend dashboard was drafted and screenshot-verified during this module's original session, but in an unrelated sibling folder by mistake, never part of this repo's git history — that folder has since been deleted. The real dashboard, in this repo, is covered by the "SEO Dashboard" row below.) |
 | GSC/GA4 live credential verification (2026-09-01) | ✅ Done | Both integrations verified against real Google Cloud infrastructure — a real service account, a real deployed test site (Search Console ownership verified via a Render-hosted static site after the user's first-choice site turned out to be one they didn't actually control), and both hit-and-resolved real `403`s (each Google API needing a separate explicit "Enable" step in Cloud Console, not just service-account access). Real OAuth2 tokens obtained, real API calls succeeded through the actual `/api/seo/gsc/pull` and `/api/seo/ga4/pull` routes |
@@ -1575,5 +1642,5 @@ Update this section as each module is completed.
 
 
 
-*Last updated: September 1, 2026*
+*Last updated: October 5, 2026*
 *Version: 1.0.0*

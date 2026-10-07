@@ -415,6 +415,16 @@ class SeoSite(Base):
     ssh_username = Column(String)
     ssh_password = Column(String)
     ssh_protocol = Column(String)  # NULL/blank means "sftp" — see agent/database.py
+    # Brand block for blog images — see agent/database.py's _SEO_SITES_EXTRA_COLUMNS.
+    brand_logo_path = Column(String)
+    brand_email = Column(String)
+    brand_phone = Column(String)
+    brand_enabled = Column(Integer)  # NULL/0 = off; see agent/database.py
+    brand_website = Column(String)
+
+    @property
+    def brand_logo_set(self) -> bool:
+        return bool(self.brand_logo_path)
 
     # Plain Python properties (not Columns) — SeoSiteOut's from_attributes
     # reads these via getattr same as any Column, but the API never

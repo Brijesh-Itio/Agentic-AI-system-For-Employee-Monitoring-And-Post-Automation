@@ -13,7 +13,12 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
+import io
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from PIL import Image
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
@@ -178,6 +183,7 @@ from api.schemas import (
     SeoSiteGoogleConfigUpdate,
     SeoSiteOut,
     SeoSiteSshConfigUpdate,
+    SeoSiteBrandUpdate,
     SshStatusOut,
     SocialGenerateRequest,
     SocialPostOut,
@@ -449,6 +455,82 @@ def update_site_ssh_config(site_id: int, payload: SeoSiteSshConfigUpdate, db: Se
     site.ssh_protocol = (payload.ssh_protocol or "").strip().lower() or None
     if payload.ssh_password and payload.ssh_password.strip():
         site.ssh_password = payload.ssh_password.strip()
+    db.commit()
+    db.refresh(site)
+    return site
+
+
+# Brand logos live on this app's own disk, one file per site, never on the
+# website. Blog images read them when stamping the brand strip.
+_BRAND_LOGO_DIR = Path(__file__).resolve().parents[2] / "agent" / "data" / "seo_brand"
+_BRAND_LOGO_MAX_BYTES = 5 * 1024 * 1024
+
+
+@router.patch("/sites/{site_id}/brand", response_model=SeoSiteOut)
+def update_site_brand(site_id: int, payload: SeoSiteBrandUpdate, db: Session = Depends(get_db)):
+    """Email and phone printed on this site's new blog images. Blank clears
+    them. The logo is a separate upload (see the logo routes below)."""
+    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+
+    site.brand_email = (payload.brand_email or "").strip() or None
+    site.brand_phone = (payload.brand_phone or "").strip() or None
+    if payload.brand_website is not None:
+        site.brand_website = (payload.brand_website or "").strip() or None
+    if payload.brand_enabled is not None:
+        site.brand_enabled = 1 if payload.brand_enabled else 0
+    db.commit()
+    db.refresh(site)
+    return site
+
+
+@router.post("/sites/{site_id}/brand/logo", response_model=SeoSiteOut)
+async def upload_site_brand_logo(site_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Stores this site's brand logo. Any common image format is accepted and
+    saved as PNG, scaled down to at most 800px so the strip stays light."""
+    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+
+    data = await file.read()
+    if len(data) > _BRAND_LOGO_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Logo is larger than 5 MB")
+    try:
+        logo = Image.open(io.BytesIO(data))
+        logo.load()
+    except Exception:
+        raise HTTPException(status_code=400, detail="That file is not a readable image")
+
+    logo = logo.convert("RGBA")
+    logo.thumbnail((800, 800))
+    _BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
+    path = _BRAND_LOGO_DIR / f"site_{site_id}.png"
+    logo.save(path, format="PNG")
+    site.brand_logo_path = str(path)
+    db.commit()
+    db.refresh(site)
+    return site
+
+
+@router.get("/sites/{site_id}/brand/logo")
+def get_site_brand_logo(site_id: int, db: Session = Depends(get_db)):
+    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+    if not site.brand_logo_path or not Path(site.brand_logo_path).exists():
+        raise HTTPException(status_code=404, detail="No brand logo uploaded for this site")
+    return FileResponse(site.brand_logo_path, media_type="image/png")
+
+
+@router.delete("/sites/{site_id}/brand/logo", response_model=SeoSiteOut)
+def delete_site_brand_logo(site_id: int, db: Session = Depends(get_db)):
+    site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
+    if site is None:
+        raise HTTPException(status_code=404, detail=f"No SEO site {site_id}")
+    if site.brand_logo_path:
+        Path(site.brand_logo_path).unlink(missing_ok=True)
+    site.brand_logo_path = None
     db.commit()
     db.refresh(site)
     return site
@@ -3608,7 +3690,7 @@ def _run_blog_followup_job(job: dict) -> None:
             try:
                 site = db.query(SeoSite).filter(SeoSite.id == site_id).first()
                 image_prompt = derive_image_prompt(job["content_html"], title=job["title"], site_id=site_id) or job["title"]
-                image_result = generate_and_publish_image(site, image_prompt, task="blog_post")
+                image_result = generate_and_publish_image(site, image_prompt, task="blog_post", title=job["title"])
                 if image_result.ok:
                     database.set_blog_post_image(post_id, image_result.url, image_source=image_result.provider)
             except Exception:
@@ -3728,7 +3810,7 @@ def generate_blog_post_image_route(post_id: int, payload: ImageGenerateRequest, 
         raise HTTPException(status_code=404, detail=f"No SEO site {row.site_id}")
 
     prompt = payload.prompt or derive_image_prompt(row.content, title=row.title, site_id=row.site_id) or row.title
-    result = generate_and_publish_image(site, prompt, task="blog_post")
+    result = generate_and_publish_image(site, prompt, task="blog_post", title=row.title)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
 
@@ -4393,7 +4475,7 @@ def _publish_blog_post_steps(post_id: int, db: Session, go_live: bool = False) -
     if not image_url:
         try:
             image_prompt = derive_image_prompt(row.content, title=row.title, site_id=row.site_id) or row.title
-            image_result = generate_and_publish_image(site, image_prompt, task="blog_post")
+            image_result = generate_and_publish_image(site, image_prompt, task="blog_post", title=row.title)
             if image_result.ok:
                 image_url = image_result.url
                 database.set_blog_post_image(post_id, image_url, image_source=image_result.provider)

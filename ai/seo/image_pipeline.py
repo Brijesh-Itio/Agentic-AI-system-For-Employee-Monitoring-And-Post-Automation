@@ -25,13 +25,14 @@ graceful-degrade convention throughout.
 """
 import io
 import logging
+import os
 import re
 import time
 import urllib.parse
 from dataclasses import dataclass
 from typing import Optional
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 from ai.images.factory import get_provider as get_image_provider
 from automation.seo.server_access import client_for_site
@@ -86,7 +87,7 @@ def is_ai_generated_image_provider(provider: Optional[str]) -> bool:
 _STANDARD_IMAGE_DIMENSIONS = {
     "facebook": (1200, 630),
     "linkedin": (1200, 627),
-    "blog_post": (1200, 600),
+    "blog_post": (1200, 800),
     "twitter": (1600, 900),
     "instagram": (1080, 1080),
     "pinterest": (1000, 1500),
@@ -130,9 +131,8 @@ def _crop_safe_composition_guidance(standard_size: Optional[tuple[int, int]]) ->
         return ""
     target_w, target_h = standard_size
     return (
-        f" Compose as a single wide landscape image (roughly {target_w}:{target_h}). The image is "
-        "center-cropped to that ratio, so keep the main subject and any text or UI mockups inside the "
-        "central band of the frame, clear of the top and bottom edges. If the scene involves multiple "
+        f" Compose as a single wide landscape image (roughly {target_w}:{target_h}), with every element "
+        "fully inside the frame. If the scene involves multiple "
         "panels, labels, or data points, keep the count small (2-4 at most) and each one large and simple "
         "enough to fit with room to spare — do not pack many small panels or dense rows of text edge-to-edge; "
         "a crowded layout is what causes elements to run off the canvas or overlap."
@@ -268,10 +268,323 @@ def _publish_webp_bytes(site, webp_bytes: bytes, name_hint: str, *, provider: Op
     return ImagePublishResult(ok=True, url=public_url, provider=provider)
 
 
-def generate_and_publish_image(site, prompt: str, *, task: str = "seo_content") -> ImagePublishResult:
+# Brand block for blog images: a strip along the bottom of the image with
+# the site's logo on the left and its email and phone on the right. The
+# app draws it itself after generation, so the exact text and logo are
+# always right; the image model is only asked to leave that strip empty.
+_BRAND_STRIP_RATIO = 0.14
+_BRAND_FONT_CANDIDATES = ("arialbd.ttf", "C:/Windows/Fonts/arialbd.ttf", "DejaVuSans-Bold.ttf")
+
+
+def brand_for_site(site) -> Optional[dict]:
+    """The site's brand block, or None when no brand is set. Only blog
+    images get it (see generate_and_publish_image)."""
+    if not getattr(site, "brand_enabled", None):
+        return None
+    logo_path = getattr(site, "brand_logo_path", None)
+    email = (getattr(site, "brand_email", None) or "").strip()
+    phone = (getattr(site, "brand_phone", None) or "").strip()
+    website = (getattr(site, "brand_website", None) or "").strip()
+    if not (logo_path or email or phone or website):
+        return None
+    return {
+        "logo_path": logo_path if logo_path and os.path.exists(logo_path) else None,
+        "email": email,
+        "phone": phone,
+        "website": _display_domain(website),
+    }
+
+
+def _display_domain(url: str) -> str:
+    """Shows the website the way people write it on a card: no scheme, no
+    trailing slash (https://webpays.com/ -> webpays.com)."""
+    return re.sub(r"^https?://", "", url, flags=re.IGNORECASE).rstrip("/")
+
+
+def _brand_font(size: int):
+    for name in _BRAND_FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size=size)
+
+
+_BRAND_SYMBOL_FONT_CANDIDATES = ("C:/Windows/Fonts/seguisym.ttf", "seguisym.ttf")
+_BRAND_TEXT_COLOR = (30, 30, 30)
+
+
+def _brand_symbol_font(size: int):
+    """Segoe UI Symbol has the envelope and telephone glyphs. None when the
+    font is missing, in which case the icon is left out and the text stands
+    alone rather than drawing a wrong character."""
+    for name in _BRAND_SYMBOL_FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return None
+
+
+def _draw_brand_icon(draw, kind: str, x: int, center_y: float, size: int, symbol_font) -> None:
+    """Draws an icon whose vertical middle sits on center_y, the middle of
+    the text beside it. Email and phone use the symbol font's glyphs, each
+    centered by its own measured box; the globe is drawn with shapes so it
+    never depends on a font."""
+    line_w = max(1, size // 12)
+    if kind == "globe":
+        top = center_y - size / 2
+        draw.ellipse([x, top, x + size, top + size], outline=_BRAND_TEXT_COLOR, width=line_w)
+        draw.ellipse([x + size * 0.3, top, x + size * 0.7, top + size], outline=_BRAND_TEXT_COLOR, width=line_w)
+        draw.line([(x, center_y), (x + size, center_y)], fill=_BRAND_TEXT_COLOR, width=line_w)
+    elif symbol_font is not None:
+        glyph = "\u2709" if kind == "email" else "\u260E"
+        glyph_box = draw.textbbox((0, 0), glyph, font=symbol_font)
+        glyph_mid = (glyph_box[1] + glyph_box[3]) / 2
+        draw.text((x, center_y - glyph_mid), glyph, font=symbol_font, fill=_BRAND_TEXT_COLOR)
+
+
+def _stamp_brand_strip(image_bytes: bytes, target_size: tuple[int, int], brand: dict) -> bytes:
+    """Adds the brand footer BELOW the scene. The scene is never covered, so
+    no part of the generated picture is hidden. Returns PNG bytes; the
+    caller converts to WebP as usual."""
+    scene_w, scene_h = target_size
+    scene = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    if scene.size != target_size:
+        scene = scene.resize(target_size, Image.LANCZOS)
+
+    footer_h = round(scene_h * _BRAND_STRIP_RATIO)
+    image = Image.new("RGB", (scene_w, scene_h + footer_h), (255, 255, 255))
+    image.paste(scene, (0, 0))
+    target_w, target_h = scene_w, scene_h + footer_h
+    strip_h = footer_h
+    strip_top = scene_h
+    pad = max(6, strip_h // 6)
+    draw = ImageDraw.Draw(image)
+    draw.line([(0, strip_top), (target_w, strip_top)], fill=(225, 225, 225), width=2)
+
+    logo_right_edge = 0
+    if brand.get("logo_path"):
+        logo = Image.open(brand["logo_path"]).convert("RGBA")
+        max_logo_h = strip_h - 2 * pad
+        max_logo_w = round(target_w * 0.28)
+        scale = min(max_logo_h / logo.height, max_logo_w / logo.width)
+        logo = logo.resize((max(1, round(logo.width * scale)), max(1, round(logo.height * scale))), Image.LANCZOS)
+        image.paste(logo, (pad, strip_top + (strip_h - logo.height) // 2), mask=logo.split()[3])
+        logo_right_edge = pad + logo.width
+
+    # Layout: logo on the left, email and phone stacked on the right with an
+    # icon before each, and the website centered along the bottom edge.
+    font_size = max(12, round(strip_h * 0.26))
+    font = _brand_font(font_size)
+    symbol_font = _brand_symbol_font(font_size)
+    icon_size = font_size
+    icon_gap = max(4, font_size // 3)
+    text_h = draw.textbbox((0, 0), "Ag", font=font)[3]
+    # Middle of the capital letters, measured from the top of a text line.
+    cap_box = draw.textbbox((0, 0), "H", font=font)
+    cap_mid = (cap_box[1] + cap_box[3]) / 2
+
+    contact_lines = []
+    if brand.get("email"):
+        contact_lines.append(("email", brand["email"]))
+    if brand.get("phone"):
+        contact_lines.append(("phone", brand["phone"]))
+    line_gap = max(3, strip_h // 9)
+    block_h = len(contact_lines) * text_h + max(0, len(contact_lines) - 1) * line_gap
+    y = strip_top + (strip_h - block_h) // 2 - (text_h // 4)
+    contact_left_edge = target_w - pad
+    email_y = None
+    for kind, text in contact_lines:
+        if kind == "email":
+            email_y = y
+        text_w = draw.textbbox((0, 0), text, font=font)[2]
+        x = target_w - pad - (icon_size + icon_gap + text_w)
+        contact_left_edge = min(contact_left_edge, x)
+        _draw_brand_icon(draw, kind, x, y + cap_mid, icon_size, symbol_font)
+        draw.text((x + icon_size + icon_gap, y), text, font=font, fill=_BRAND_TEXT_COLOR)
+        y += text_h + line_gap
+
+    if brand.get("website"):
+        text = brand["website"]
+        text_w = draw.textbbox((0, 0), text, font=font)[2]
+        total = icon_size + icon_gap + text_w
+        # Centered on the empty space between the logo and the contact block,
+        # not on the full canvas width — the logo and the contact text are
+        # rarely the same width, so a canvas-center position looks off to
+        # the eye even though it is mathematically centered.
+        available_left = (logo_right_edge + pad) if logo_right_edge else pad
+        available_right = contact_left_edge - pad if contact_lines else target_w - pad
+        center = (available_left + available_right) / 2
+        x = round(center - total / 2)
+        x = max(available_left, min(x, available_right - total))
+        # Same row as the email line — not pinned to the bottom edge — so the
+        # website reads as part of the same line, not a separate one below it.
+        y = email_y if email_y is not None else strip_top + (strip_h - text_h) // 2
+        _draw_brand_icon(draw, "globe", x, y + cap_mid, icon_size, symbol_font)
+        draw.text((x + icon_size + icon_gap, y), text, font=font, fill=_BRAND_TEXT_COLOR)
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+# The post title drawn onto the blog image itself — in the upper-left, in a
+# color sampled from the site's own logo (independent of whether the brand
+# strip footer is switched on: the title is a separate feature). Added as
+# its own step so the prompt, resize and brand-footer code above are
+# untouched, apart from one added line asking the model to keep this corner
+# plain (see generate_and_publish_image).
+#
+# A hard-edged, fully opaque rectangle read as a sticker pasted over the
+# photo (user report, with a screenshot of a lab photo mostly hidden behind
+# one). Replaced with a soft, partly translucent tint that fades out at its
+# own right and bottom edges, sized to the text itself rather than a fixed
+# block — so it blends into the picture instead of sitting on top of it.
+_TITLE_FONT_CANDIDATES = ("arialbd.ttf", "C:/Windows/Fonts/arialbd.ttf", "seguisb.ttf", "C:/Windows/Fonts/segoeuib.ttf")
+_TITLE_FALLBACK_COLOR = (25, 30, 45)
+_TITLE_TINT_MAX_ALPHA = 190
+_TITLE_MAX_LINES = 3
+
+
+def _title_font(size: int):
+    for name in _TITLE_FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size=size)
+
+
+def _dominant_logo_color(logo_path: Optional[str]) -> Optional[tuple[int, int, int]]:
+    """The logo's own most common vivid color (skipping near-white,
+    near-black and near-gray pixels, which are backgrounds/outlines, not
+    the brand color). None when there is no logo or it has no vivid color
+    — the caller falls back to a plain dark color in that case."""
+    if not logo_path or not os.path.exists(logo_path):
+        return None
+    try:
+        logo = Image.open(logo_path).convert("RGBA")
+    except Exception:
+        return None
+    small = logo.copy()
+    small.thumbnail((120, 120))
+    buckets: dict[tuple[int, int, int], int] = {}
+    for r, g, b, a in small.getdata():
+        if a < 128:
+            continue
+        hi, lo = max(r, g, b), min(r, g, b)
+        saturation = 0 if hi == 0 else (hi - lo) / hi
+        value = hi / 255
+        if saturation < 0.35 or value < 0.25:
+            continue
+        key = (r // 24 * 24, g // 24 * 24, b // 24 * 24)
+        buckets[key] = buckets.get(key, 0) + 1
+    if not buckets:
+        return None
+    return max(buckets.items(), key=lambda kv: kv[1])[0]
+
+
+def _wrap_title(draw, text: str, font, max_width: int, max_lines: int = _TITLE_MAX_LINES) -> list[str]:
+    words = text.split()
+    lines: list[str] = []
+    i = 0
+    while i < len(words) and len(lines) < max_lines:
+        current = words[i]
+        i += 1
+        while i < len(words):
+            trial = f"{current} {words[i]}"
+            if draw.textlength(trial, font=font) <= max_width:
+                current = trial
+                i += 1
+            else:
+                break
+        lines.append(current)
+    if i < len(words) and lines:
+        last = lines[-1]
+        while " " in last and draw.textlength(last + "…", font=font) > max_width:
+            last = last.rsplit(" ", 1)[0]
+        lines[-1] = last + "…"
+    return lines
+
+
+def _fade_mask(size: tuple[int, int], solid_w: int, fade_w: int, fade_h: int, max_alpha: int) -> Image.Image:
+    """An alpha mask at max_alpha for the first solid_w columns, fading
+    linearly to 0 over the next fade_w columns (a soft right edge), and
+    separately fading the bottom fade_h rows to 0 (a soft bottom edge). The
+    left and top edges are left hard because they already sit on the
+    image's own corner, not a visible edge of the tint."""
+    w, h = size
+    row = [max_alpha] * min(solid_w, w)
+    for i in range(fade_w):
+        if len(row) >= w:
+            break
+        row.append(round(max_alpha * (1 - (i + 1) / fade_w)))
+    row += [0] * max(0, w - len(row))
+    h_mask = Image.new("L", (w, 1))
+    h_mask.putdata(row[:w])
+    h_mask = h_mask.resize((w, h))
+
+    col = [max_alpha] * max(0, h - fade_h)
+    for i in range(fade_h):
+        col.append(round(max_alpha * (1 - (i + 1) / fade_h)))
+    col = (col[:h] + [0] * max(0, h - len(col)))[:h]
+    v_mask = Image.new("L", (1, h))
+    v_mask.putdata(col)
+    v_mask = v_mask.resize((w, h))
+
+    return ImageChops.multiply(h_mask, v_mask)
+
+
+def _stamp_title_card(image_bytes: bytes, title: str, logo_path: Optional[str]) -> bytes:
+    """Draws the post title in the upper-left of the scene, on a soft tint
+    sized to the text and faded at its own edges — not a hard panel."""
+    base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    w, h = base.size
+    measure = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+
+    pad = round(w * 0.03)
+    font = _title_font(max(16, round(h * 0.05)))
+    max_text_w = round(w * 0.56) - 2 * pad
+    lines = _wrap_title(measure, title.strip(), font, max_text_w)
+    if not lines:
+        return image_bytes
+
+    line_h = measure.textbbox((0, 0), "Ag", font=font)[3]
+    line_gap = max(2, round(line_h * 0.35))
+    zone_h = 2 * pad + len(lines) * line_h + (len(lines) - 1) * line_gap
+    longest_line_w = max(measure.textlength(line, font=font) for line in lines)
+    solid_w = round(2 * pad + longest_line_w)
+    # Generous fade margins — a softer, longer blend so the tint reads as a
+    # light wash over the photo rather than any kind of edge at all.
+    fade_w = round(pad * 4)
+    fade_h = round(pad * 2)
+
+    mask = _fade_mask((w, zone_h), solid_w, fade_w, fade_h, _TITLE_TINT_MAX_ALPHA)
+    tint = Image.new("RGBA", (w, zone_h), (255, 255, 255, 255))
+    tint.putalpha(mask)
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    overlay.paste(tint, (0, 0), tint)
+
+    draw = ImageDraw.Draw(overlay)
+    color = _dominant_logo_color(logo_path) or _TITLE_FALLBACK_COLOR
+    y = pad
+    for line in lines:
+        draw.text((pad, y), line, font=font, fill=color)
+        y += line_h + line_gap
+
+    composited = Image.alpha_composite(base, overlay).convert("RGB")
+    buffer = io.BytesIO()
+    composited.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def generate_and_publish_image(site, prompt: str, *, task: str = "seo_content", title: Optional[str] = None) -> ImagePublishResult:
     provider = get_image_provider(task)
     standard_size = _standard_dimensions_for_task(task)
     request_width, request_height = standard_size or (1024, 1024)
+    # Brand block: blog images only, and only when the site has one set.
+    brand = brand_for_site(site) if task == "blog_post" and standard_size else None
     # Text inside the image should be a few short, correctly spelled labels
     # taken from the post itself (its key terms), not invented slogans.
     # Image models make up slogans and brochure copy when a prompt leaves
@@ -283,6 +596,16 @@ def generate_and_publish_image(site, prompt: str, *, task: str = "seo_content") 
         "(for example the topic words in the prompt above). No slogans, taglines, lorem ipsum, "
         "logos or brand names."
     )
+    if task == "blog_post" and title:
+        # The post title is drawn onto the upper-left corner afterward (see
+        # _stamp_title_card) — asking for a plain area there up front means
+        # there is less underneath for that tint to cover.
+        full_prompt += (
+            " The upper-left third of the image (from the top-left corner to roughly the middle) must be "
+            "visually empty: a plain, softly blurred background only — no people, faces, objects, screens, "
+            "charts, icons or UI elements there at all. Keep every subject and every detail of the scene in "
+            "the remaining two-thirds of the frame instead. A title will be placed over that empty corner."
+        )
     result = provider.generate(full_prompt, width=request_width, height=request_height)
     if not result.ok:
         return ImagePublishResult(
@@ -304,6 +627,22 @@ def generate_and_publish_image(site, prompt: str, *, task: str = "seo_content") 
                 task,
             )
             image_bytes = result.image_bytes
+
+    if task == "blog_post" and title and standard_size:
+        try:
+            image_bytes = _stamp_title_card(image_bytes, title, getattr(site, "brand_logo_path", None))
+        except Exception:
+            # Never blocks the image itself — same graceful-degrade
+            # convention as the resize and brand-strip steps above.
+            logger.exception("Title card failed for site %s — publishing the image without it", getattr(site, "id", None))
+
+    if brand and standard_size:
+        try:
+            image_bytes = _stamp_brand_strip(image_bytes, standard_size, brand)
+        except Exception:
+            # Never blocks the image itself: an unbranded image is still a
+            # usable blog image, same graceful-degrade convention as resize.
+            logger.exception("Brand strip failed for site %s — publishing the image without it", getattr(site, "id", None))
 
     webp = convert_to_webp(image_bytes)
     if webp is None:

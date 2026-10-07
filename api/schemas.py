@@ -646,6 +646,23 @@ class SeoSiteOut(BaseModel):
     ssh_username: Optional[str] = None
     ssh_protocol: Optional[str] = None
     ssh_password_set: bool = False
+    # Brand block for blog images. The logo file itself is only fetched via
+    # GET /sites/{id}/brand/logo; here we just say whether one is set.
+    brand_email: Optional[str] = None
+    brand_phone: Optional[str] = None
+    brand_logo_set: bool = False
+    brand_enabled: Optional[bool] = False
+    brand_website: Optional[str] = None
+
+
+class SeoSiteBrandUpdate(BaseModel):
+    """Blank string clears the email/phone. The logo is uploaded separately
+    (POST /sites/{id}/brand/logo) because it is a file, not a field."""
+
+    brand_email: Optional[str] = None
+    brand_phone: Optional[str] = None
+    brand_enabled: Optional[bool] = None  # None leaves the switch as it is
+    brand_website: Optional[str] = None
 
 
 class SeoSiteCreate(BaseModel):

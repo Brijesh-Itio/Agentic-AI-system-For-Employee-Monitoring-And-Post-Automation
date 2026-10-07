@@ -286,6 +286,10 @@ import {
   updateSeoSiteCmsConfig,
   updateSeoSiteGoogleConfig,
   updateSeoSiteSshConfig,
+  updateSeoSiteBrand,
+  uploadSeoSiteBrandLogo,
+  deleteSeoSiteBrandLogo,
+  getSeoSiteBrandLogoBlob,
 } from "@/api";
 import RedirectionTab from "@/pages/Redirection/RedirectionTab";
 
@@ -1016,6 +1020,161 @@ const SERVER_PROTOCOLS = [
   { value: "ftp", label: "FTP", defaultPort: "21" },
   { value: "ftps", label: "FTPS (Explicit)", defaultPort: "21" },
 ] as const;
+
+// Brand block for this site's new blog images: a logo plus an email and
+// phone, drawn by the app onto a strip along the bottom of each image. Only
+// images generated after saving get it; existing images are not changed.
+function BrandCard({ site }: { site: SeoSite }) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [brandEmail, setBrandEmail] = useState(site.brand_email ?? "");
+  const [brandPhone, setBrandPhone] = useState(site.brand_phone ?? "");
+  const [brandEnabled, setBrandEnabled] = useState(Boolean(site.brand_enabled));
+  const [brandWebsite, setBrandWebsite] = useState(site.brand_website ?? "");
+
+  useEffect(() => {
+    setBrandEmail(site.brand_email ?? "");
+    setBrandPhone(site.brand_phone ?? "");
+    setBrandEnabled(Boolean(site.brand_enabled));
+    setBrandWebsite(site.brand_website ?? "");
+  }, [site.id, site.brand_email, site.brand_phone, site.brand_enabled, site.brand_website]);
+
+  const logoQuery = useQuery({
+    queryKey: ["seo", "brand-logo", site.id, site.brand_logo_set],
+    queryFn: () => getSeoSiteBrandLogoBlob(site.id),
+    enabled: site.brand_logo_set,
+    staleTime: Infinity,
+  });
+
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["seo", "sites"] });
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      updateSeoSiteBrand(site.id, {
+        brand_email: brandEmail.trim(),
+        brand_phone: brandPhone.trim(),
+        brand_website: brandWebsite.trim(),
+        brand_enabled: brandEnabled,
+      }),
+    onSuccess: () => {
+      toast.success(
+        brandEnabled ? "Brand saved. New blog images will show it." : "Brand saved. New blog images will not show it."
+      );
+      refresh();
+    },
+    onError: (err) => {
+      const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
+      toast.error(detail || "Could not save the brand details.");
+    },
+  });
+
+  const logoMutation = useMutation({
+    mutationFn: (file: File) => uploadSeoSiteBrandLogo(site.id, file),
+    onSuccess: () => {
+      toast.success("Brand logo uploaded.");
+      refresh();
+    },
+    onError: (err) => {
+      const detail = (err as AxiosError<{ detail?: string }>).response?.data?.detail;
+      toast.error(detail || "Could not upload the logo.");
+    },
+    onSettled: () => {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    },
+  });
+
+  const removeLogoMutation = useMutation({
+    mutationFn: () => deleteSeoSiteBrandLogo(site.id),
+    onSuccess: () => {
+      toast.success("Brand logo removed.");
+      refresh();
+    },
+    onError: () => toast.error("Could not remove the logo."),
+  });
+
+  return (
+    <Card>
+      <CardContent className="space-y-4 p-6">
+        <div>
+          <h3 className="text-base font-semibold text-gray-900 dark:text-white">Brand on blog images</h3>
+          <p className="mt-1 text-theme-xs text-gray-400">
+            Optional. When switched on, the logo, email and phone are drawn along the bottom of each new blog image
+            for this site. Switching it off keeps the saved details. Existing images are not changed.
+          </p>
+        </div>
+
+        <label className="flex items-center gap-2 text-theme-sm text-gray-700 dark:text-gray-300">
+          <input
+            type="checkbox"
+            checked={brandEnabled}
+            onChange={(e) => setBrandEnabled(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-300 text-brand-600"
+          />
+          Show this brand on new blog images
+        </label>
+
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex h-20 w-44 items-center justify-center overflow-hidden rounded-md border border-dashed border-gray-300 bg-gray-50 dark:border-gray-700 dark:bg-white/5">
+            {logoQuery.data ? (
+              <img src={logoQuery.data} alt="Brand logo" className="max-h-full max-w-full object-contain p-2" />
+            ) : (
+              <span className="text-theme-xs text-gray-400">No logo</span>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) logoMutation.mutate(file);
+              }}
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={logoMutation.isPending}
+            >
+              {logoMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {site.brand_logo_set ? "Replace logo" : "Upload logo"}
+            </Button>
+            {site.brand_logo_set && (
+              <Button size="sm" variant="outline" onClick={() => removeLogoMutation.mutate()} disabled={removeLogoMutation.isPending}>
+                Remove logo
+              </Button>
+            )}
+          </div>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-3">
+          <div>
+            <Label htmlFor="brand-email">Email</Label>
+            <Input id="brand-email" value={brandEmail} onChange={(e) => setBrandEmail(e.target.value)} placeholder="info@example.com" />
+          </div>
+          <div>
+            <Label htmlFor="brand-phone">Phone</Label>
+            <Input id="brand-phone" value={brandPhone} onChange={(e) => setBrandPhone(e.target.value)} placeholder="+1 555 0100" />
+          </div>
+          <div>
+            <Label htmlFor="brand-website">Website</Label>
+            <Input id="brand-website" value={brandWebsite} onChange={(e) => setBrandWebsite(e.target.value)} placeholder="https://example.com" />
+          </div>
+        </div>
+
+        <div className="flex justify-end">
+          <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
+            {saveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Save brand details
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 function ServerAccessConfigCard({ site }: { site: SeoSite }) {
   const queryClient = useQueryClient();
@@ -2788,6 +2947,7 @@ function OverviewTab({
 
       <GoogleConfigCard site={site} />
       <CmsConfigCard site={site} />
+      <BrandCard site={site} />
       <ServerAccessConfigCard site={site} />
       <ServerFileBrowser site={site} jumpToPath={serverJumpPath} onJumpHandled={onServerJumpHandled} />
     </>
@@ -7225,7 +7385,7 @@ function BlogTab({ siteId }: { siteId: number }) {
                       expandedId === post.id && (
                         <div
                           className="prose prose-sm mt-3 max-w-none rounded-md bg-gray-50 p-4 dark:bg-white/5 dark:prose-invert"
-                          dangerouslySetInnerHTML={{ __html: sanitizeBlogHtml(post.content) }}
+                          dangerouslySetInnerHTML={{ __html: appendFaqSection(sanitizeBlogHtml(post.content), post.faqs_json) }}
                         />
                       )
                     )}
@@ -7240,7 +7400,15 @@ function BlogTab({ siteId }: { siteId: number }) {
 
       <ContentStructureChecker />
 
-      {previewPost && <BlogPreviewModal post={previewPost} onClose={() => setPreviewPost(null)} />}
+      {previewPost && (
+        <BlogPreviewModal
+          // Read the post from the live list, not the copy taken when Preview was
+          // clicked: a generated image (or any edit) that arrives after that would
+          // otherwise never show in the open preview.
+          post={posts.find((p) => p.id === previewPost.id) ?? previewPost}
+          onClose={() => setPreviewPost(null)}
+        />
+      )}
     </>
   );
 }
@@ -7273,7 +7441,9 @@ function BlogPreviewModal({ post, onClose }: { post: BlogPost; onClose: () => vo
         {post.excerpt && <p className="mb-5 text-base text-gray-500 dark:text-gray-400">{post.excerpt}</p>}
         <div
           className="prose prose-sm max-w-none dark:prose-invert"
-          dangerouslySetInnerHTML={{ __html: withFeaturedImage(stripBodyH1(sanitizeBlogHtml(post.content)), post.image_url) }}
+          dangerouslySetInnerHTML={{
+            __html: appendFaqSection(withFeaturedImage(stripBodyH1(sanitizeBlogHtml(post.content)), post.image_url), post.faqs_json),
+          }}
         />
       </div>
     </div>
@@ -7295,6 +7465,37 @@ function cmsPostHref(post: BlogPost): string {
 // drops the body's H1 for the same reason (the CMS theme prints the title).
 function stripBodyH1(html: string): string {
   return html.replace(/<h1\b[^>]*>[\s\S]*?<\/h1>\s*/gi, "");
+}
+
+// Mirrors api/routes/seo.py's _append_faq_section: the manual "Generate FAQs"
+// button (and the automatic pass right after a draft is created) only ever
+// saved faqs_json — nothing read that column when building the preview or
+// the "View content" panel, so a post with real, saved FAQs looked like it
+// had none until it was actually published. Same FAQ markup as publish,
+// minus the JSON-LD script (nothing reads structured data in a preview).
+function escapeHtml(text: string): string {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function appendFaqSection(html: string, faqsJson: string | null): string {
+  if (!faqsJson) return html;
+  let pairs: { question?: string; answer?: string }[];
+  try {
+    pairs = JSON.parse(faqsJson);
+  } catch {
+    return html;
+  }
+  const valid = pairs.filter((p) => p.question && p.answer);
+  if (valid.length === 0) return html;
+  const items = valid
+    .map(
+      (p) =>
+        `<div class="wp-block-group faq-item" style="margin-bottom:1.25em;"><h3>${escapeHtml(p.question!)}</h3><p>${escapeHtml(p.answer!)}</p></div>`
+    )
+    .join("\n");
+  return `${html}\n<div class="faq-section" style="margin-top:2em;"><h2>Frequently Asked Questions</h2>${items}</div>`;
 }
 
 // Mirrors what publishing does: the featured image sits centered right after

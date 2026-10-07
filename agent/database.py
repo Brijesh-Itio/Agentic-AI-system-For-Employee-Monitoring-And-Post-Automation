@@ -1084,6 +1084,18 @@ _SEO_SITES_EXTRA_COLUMNS = {
     # tested site (webpays.com) turned out to only expose FTP/Explicit
     # FTPS, not SFTP at all. See automation/seo/server_access.py.
     "ssh_protocol": "TEXT",
+    # Brand block stamped onto this site's new blog images (the logo,
+    # email and phone along the bottom). Per site, not global. brand_logo_
+    # path is a local file under agent/data/seo_brand/, never a URL on the
+    # website itself, so the logo is only read by this app.
+    "brand_logo_path": "TEXT",
+    "brand_email": "TEXT",
+    "brand_phone": "TEXT",
+    # Optional on/off switch for the brand strip. Off (NULL or 0) keeps the
+    # saved logo/email/phone but leaves new blog images unbranded.
+    "brand_enabled": "INTEGER",
+    # Website shown centered along the bottom of the brand strip.
+    "brand_website": "TEXT",
 }
 
 # Module 35 — technical issue remediation. fix_value is the concrete,

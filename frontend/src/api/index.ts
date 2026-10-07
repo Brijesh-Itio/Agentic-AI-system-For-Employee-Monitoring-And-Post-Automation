@@ -806,6 +806,12 @@ export interface SeoSite {
   ssh_username: string | null;
   ssh_protocol: string | null;
   ssh_password_set: boolean;
+  // Brand block printed on this site's new blog images.
+  brand_email: string | null;
+  brand_phone: string | null;
+  brand_logo_set: boolean;
+  brand_enabled: boolean | null;
+  brand_website: string | null;
 }
 
 export interface SshStatus {
@@ -852,6 +858,27 @@ export const updateSeoSiteSshConfig = (
   siteId: number,
   payload: { ssh_host?: string; ssh_port?: string; ssh_username?: string; ssh_protocol?: string; ssh_password?: string }
 ) => api.patch<SeoSite>(`/api/seo/sites/${siteId}/ssh-config`, payload).then((r) => r.data);
+
+// Brand block for blog images: email/phone are plain fields, the logo is a file.
+export const updateSeoSiteBrand = (
+  siteId: number,
+  payload: { brand_email?: string; brand_phone?: string; brand_website?: string; brand_enabled?: boolean }
+) =>
+  api.patch<SeoSite>(`/api/seo/sites/${siteId}/brand`, payload).then((r) => r.data);
+
+export const uploadSeoSiteBrandLogo = (siteId: number, file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api.post<SeoSite>(`/api/seo/sites/${siteId}/brand/logo`, form).then((r) => r.data);
+};
+
+export const deleteSeoSiteBrandLogo = (siteId: number) =>
+  api.delete<SeoSite>(`/api/seo/sites/${siteId}/brand/logo`).then((r) => r.data);
+
+// Fetched through the authenticated client, so it works the same as every
+// other API call; returns a blob URL for an <img>.
+export const getSeoSiteBrandLogoBlob = (siteId: number) =>
+  api.get(`/api/seo/sites/${siteId}/brand/logo`, { responseType: "blob" }).then((r) => URL.createObjectURL(r.data));
 
 export const getSshStatus = (siteId: number) =>
   api.get<SshStatus>(`/api/seo/sites/${siteId}/ssh-status`).then((r) => r.data);
